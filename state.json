@@ -1,0 +1,31 @@
+{
+  "mode": "manual",
+  "hour": 20,
+  "minute": 0,
+  "channel_id": 1485482143508332797,
+  "last_posted_date": "2026-03-23",
+  "history": [
+    "Which game had the most disappointing ending?",
+    "What movie do people praise way more than it deserves?",
+    "What is your most replayable game?",
+    "What is the scariest game you have played?",
+    "What is something that should be socially acceptable but somehow is not?"
+  ],
+  "log_channel_id": 1485495018742481048,
+  "used_questions": [
+    "What is something that should be socially acceptable but somehow is not?"
+  ],
+  "posts": [
+    {
+      "message_id": "1485494662411194480",
+      "thread_id": "1485494662411194480",
+      "channel_id": "1485482143508332797",
+      "category": "general",
+      "question": "What is something that should be socially acceptable but somehow is not?",
+      "posted_at": "2026-03-23T07:25:25.721837+03:00",
+      "closed": true,
+      "closed_at": "2026-03-23T07:25:58.974794+03:00",
+      "close_reason": "manual"
+    }
+  ]
+}
