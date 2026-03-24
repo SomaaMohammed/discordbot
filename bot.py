@@ -2364,7 +2364,7 @@ async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -
     embed.add_field(name="🔴 Challenger", value=f"{player1.mention}", inline=True)
     embed.add_field(name="🔵 Opponent", value=f"{player2.mention}", inline=True)
     embed.add_field(name="🏆 Champion", value=f"{winner.mention}", inline=False)
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(content=f"{player1.mention} {player2.mention}", embed=embed)
 
 
 @tasks.loop(minutes=1)
