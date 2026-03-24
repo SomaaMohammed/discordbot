@@ -899,7 +899,7 @@ async def require_staff(interaction: discord.Interaction) -> bool:
 court_group = app_commands.Group(name="court", description="Imperial Court controls")
 questions_group = app_commands.Group(name="questions", description="Question utilities")
 court_group.add_command(questions_group)
-admin_group = app_commands.Group(name="Invictus", description="Server admin and moderation tools")
+admin_group = app_commands.Group(name="invictus", description="Server admin and moderation tools")
 
 
 def get_manage_target_channel(interaction: discord.Interaction) -> discord.TextChannel | None:
@@ -1685,18 +1685,18 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `/court removeanswer <message_id>` — Remove anonymous answer by message ID
 
 **Invictus Commands**
-`/Invictus say <channel>` — Send announcement in channel
-`/Invictus purge <amount>` — Delete 1-100 recent messages
-`/Invictus purgeuser <member> [amount]` — Delete member's messages (scan 1-200)
-`/Invictus lock [reason]` — Lock channel for @everyone
-`/Invictus unlock [reason]` — Unlock channel for @everyone
-`/Invictus slowmode <seconds>` — Set slowmode (0-21600)
-`/Invictus timeout <member> <minutes> [reason]` — Timeout member (1-40320 min)
-`/Invictus untimeout <member> [reason]` — Remove timeout from member
-`/Invictus mutemany <members> <minutes> [reason]` — Timeout multiple (space-separated IDs/mentions)
-`/Invictus unmutemany <members> [reason]` — Remove timeout from multiple
-`/Invictus muteall <minutes> <confirm> [reason]` — Timeout all (type CONFIRM)
-`/Invictus unmuteall <confirm> [reason]` — Remove timeout from all (type CONFIRM)
+`/invictus say <channel>` — Send announcement in channel
+`/invictus purge <amount>` — Delete 1-100 recent messages
+`/invictus purgeuser <member> [amount]` — Delete member's messages (scan 1-200)
+`/invictus lock [reason]` — Lock channel for @everyone
+`/invictus unlock [reason]` — Unlock channel for @everyone
+`/invictus slowmode <seconds>` — Set slowmode (0-21600)
+`/invictus timeout <member> <minutes> [reason]` — Timeout member (1-40320 min)
+`/invictus untimeout <member> [reason]` — Remove timeout from member
+`/invictus mutemany <members> <minutes> [reason]` — Timeout multiple (space-separated IDs/mentions)
+`/invictus unmutemany <members> [reason]` — Remove timeout from multiple
+`/invictus muteall <minutes> <confirm> [reason]` — Timeout all (type CONFIRM)
+`/invictus unmuteall <confirm> [reason]` — Remove timeout from all (type CONFIRM)
 
 **Categories**
 `general` — Broad prompts for everyday discussion
