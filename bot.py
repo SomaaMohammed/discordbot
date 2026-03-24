@@ -51,6 +51,7 @@ THREAD_CLOSE_HOURS = 24
 THREAD_AUTO_ARCHIVE_MINUTES = 1440
 
 MSG_USE_IN_SERVER = "Use this inside the server."
+MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
 MSG_INQUIRY_CLOSED = "This court inquiry is already closed."
 MSG_QUESTION_EMPTY = "Question cannot be empty."
 
@@ -762,6 +763,7 @@ class ImperialCourtBot(commands.Bot):
     async def setup_hook(self) -> None:
         guild = discord.Object(id=TEST_GUILD_ID)
         self.tree.add_command(court_group, guild=guild)
+        self.tree.add_command(admin_group, guild=guild)
         self.add_view(AnonymousAnswerView())
         synced = await self.tree.sync(guild=guild)
         print(f"Synced {len(synced)} command(s) to guild {TEST_GUILD_ID}")
@@ -792,6 +794,189 @@ async def require_staff(interaction: discord.Interaction) -> bool:
 court_group = app_commands.Group(name="court", description="Imperial Court controls")
 questions_group = app_commands.Group(name="questions", description="Question utilities")
 court_group.add_command(questions_group)
+admin_group = app_commands.Group(name="admin", description="Server admin and moderation tools")
+
+
+def get_manage_target_channel(interaction: discord.Interaction) -> discord.TextChannel | None:
+    if interaction.channel is None:
+        return None
+    if isinstance(interaction.channel, discord.TextChannel):
+        return interaction.channel
+    return None
+
+
+@admin_group.command(name="say", description="Send an admin announcement in a channel")
+@app_commands.describe(channel="Target channel", message="Message content")
+async def admin_say(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    message: str,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    clean_message = message.strip()
+    if not clean_message:
+        await interaction.response.send_message("Message cannot be empty.", ephemeral=True)
+        return
+
+    try:
+        await channel.send(clean_message, allowed_mentions=discord.AllowedMentions.none())
+    except discord.Forbidden:
+        await interaction.response.send_message("I do not have permission to send messages there.", ephemeral=True)
+        return
+    except discord.HTTPException:
+        await interaction.response.send_message("Failed to send the message.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"Announcement sent to {channel.mention}.", ephemeral=True)
+
+    await send_log(
+        interaction.guild,
+        "Admin Announcement Sent",
+        f"**By:** {interaction.user.mention}\n**Channel:** {channel.mention}\n**Message:** {clean_message}",
+    )
+
+
+@admin_group.command(name="purge", description="Delete recent messages in this channel")
+@app_commands.describe(amount="How many recent messages to delete (1-100)")
+async def admin_purge(
+    interaction: discord.Interaction,
+    amount: app_commands.Range[int, 1, 100],
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    channel = get_manage_target_channel(interaction)
+    if channel is None:
+        await interaction.response.send_message(MSG_USE_TEXT_CHANNEL, ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        deleted = await channel.purge(limit=amount)
+    except discord.Forbidden:
+        await interaction.followup.send("I do not have permission to manage messages here.", ephemeral=True)
+        return
+    except discord.HTTPException:
+        await interaction.followup.send("Failed to purge messages.", ephemeral=True)
+        return
+
+    await interaction.followup.send(f"Deleted `{len(deleted)}` message(s) in {channel.mention}.", ephemeral=True)
+
+    await send_log(
+        interaction.guild,
+        "Admin Purge",
+        f"**By:** {interaction.user.mention}\n**Channel:** {channel.mention}\n**Requested:** `{amount}`\n**Deleted:** `{len(deleted)}`",
+    )
+
+
+@admin_group.command(name="lock", description="Lock this channel for @everyone")
+@app_commands.describe(reason="Optional reason")
+async def admin_lock(
+    interaction: discord.Interaction,
+    reason: str | None = None,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    channel = get_manage_target_channel(interaction)
+    if channel is None:
+        await interaction.response.send_message(MSG_USE_TEXT_CHANNEL, ephemeral=True)
+        return
+
+    everyone = interaction.guild.default_role
+    overwrite = channel.overwrites_for(everyone)
+    overwrite.send_messages = False
+
+    try:
+        await channel.set_permissions(everyone, overwrite=overwrite, reason=reason or "Channel locked via /admin lock")
+    except discord.Forbidden:
+        await interaction.response.send_message("I do not have permission to edit channel overrides.", ephemeral=True)
+        return
+    except discord.HTTPException:
+        await interaction.response.send_message("Failed to lock this channel.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("Channel locked for @everyone.", ephemeral=True)
+
+    await send_log(
+        interaction.guild,
+        "Admin Channel Locked",
+        f"**By:** {interaction.user.mention}\n**Channel:** {channel.mention}\n**Reason:** {reason or 'No reason provided.'}",
+    )
+
+
+@admin_group.command(name="unlock", description="Unlock this channel for @everyone")
+@app_commands.describe(reason="Optional reason")
+async def admin_unlock(
+    interaction: discord.Interaction,
+    reason: str | None = None,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    channel = get_manage_target_channel(interaction)
+    if channel is None:
+        await interaction.response.send_message(MSG_USE_TEXT_CHANNEL, ephemeral=True)
+        return
+
+    everyone = interaction.guild.default_role
+    overwrite = channel.overwrites_for(everyone)
+    overwrite.send_messages = True
+
+    try:
+        await channel.set_permissions(everyone, overwrite=overwrite, reason=reason or "Channel unlocked via /admin unlock")
+    except discord.Forbidden:
+        await interaction.response.send_message("I do not have permission to edit channel overrides.", ephemeral=True)
+        return
+    except discord.HTTPException:
+        await interaction.response.send_message("Failed to unlock this channel.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("Channel unlocked for @everyone.", ephemeral=True)
+
+    await send_log(
+        interaction.guild,
+        "Admin Channel Unlocked",
+        f"**By:** {interaction.user.mention}\n**Channel:** {channel.mention}\n**Reason:** {reason or 'No reason provided.'}",
+    )
+
+
+@admin_group.command(name="slowmode", description="Set slowmode for this channel")
+@app_commands.describe(seconds="Slowmode delay in seconds (0-21600)")
+async def admin_slowmode(
+    interaction: discord.Interaction,
+    seconds: app_commands.Range[int, 0, 21600],
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    channel = get_manage_target_channel(interaction)
+    if channel is None:
+        await interaction.response.send_message(MSG_USE_TEXT_CHANNEL, ephemeral=True)
+        return
+
+    try:
+        await channel.edit(slowmode_delay=seconds, reason=f"Updated by {interaction.user}")
+    except discord.Forbidden:
+        await interaction.response.send_message("I do not have permission to edit this channel.", ephemeral=True)
+        return
+    except discord.HTTPException:
+        await interaction.response.send_message("Failed to update slowmode.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Slowmode set to `{seconds}` second(s) in {channel.mention}.",
+        ephemeral=True,
+    )
+
+    await send_log(
+        interaction.guild,
+        "Admin Slowmode Updated",
+        f"**By:** {interaction.user.mention}\n**Channel:** {channel.mention}\n**Seconds:** `{seconds}`",
+    )
 
 
 @court_group.command(name="status", description="Show current court bot status")
