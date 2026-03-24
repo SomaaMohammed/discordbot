@@ -2336,9 +2336,15 @@ async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -
         winner = random.choice([player1, player2])
         loser = player2 if winner == player1 else player1
 
-    # Generate fake stats for both players
-    p1_stats = {stat["name"]: random.randint(1, 100) for stat in BOSS_STATS}
-    p2_stats = {stat["name"]: random.randint(1, 100) for stat in BOSS_STATS}
+    # Generate fake stats for both players, with max stats for the undefeated user.
+    p1_stats = {
+        stat["name"]: (100 if player1.id == UNDEFEATED_USER_ID else random.randint(1, 100))
+        for stat in BOSS_STATS
+    }
+    p2_stats = {
+        stat["name"]: (100 if player2.id == UNDEFEATED_USER_ID else random.randint(1, 100))
+        for stat in BOSS_STATS
+    }
 
     # Battle description
     battle_text = f"""⚔️ **{player1.mention} vs {player2.mention}** ⚔️
