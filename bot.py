@@ -1654,6 +1654,73 @@ async def court_status(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(status_text(), ephemeral=True)
 
 
+@court_group.command(name="help", description="Show all available commands")
+async def court_help(interaction: discord.Interaction) -> None:
+    if not await require_staff(interaction):
+        return
+
+    help_text = """
+**📜 Imperial Court Bot Commands**
+
+**Court Control Commands**
+`/court status` — Show current bot status
+`/court mode <mode>` — Set bot mode (off, manual, auto)
+`/court channel <channel>` — Set court post channel
+`/court logchannel [channel]` — Set staff log channel (leave empty to disable)
+`/court schedule <hour> <minute>` — Set auto-post time (0-23 hour, 0-59 minute)
+
+**Question Management**
+`/court listcategories` — List all question categories and counts
+`/court addquestion <category> <question>` — Add a question to a category
+`/court deletequestion <category> <question>` — Delete a question from a category
+`/court editquestion <category> <old> <new>` — Edit a question in a category
+`/court questions count [category]` — Count questions (opt: by category)
+`/court questions unused [category]` — Show unused questions (opt: by category)
+`/court resethistory` — Clear history and used question pool
+
+**Court Posts**
+`/court post [category] [randomize]` — Post a question now (opt: pick category/order)
+`/court custom <question>` — Post a custom question immediately
+`/court close [message_id]` — Close latest inquiry (or specific by ID)
+`/court removeanswer <message_id>` — Remove anonymous answer by message ID
+
+**Admin Commands**
+`/admin say <channel>` — Send announcement in channel
+`/admin purge <amount>` — Delete 1-100 recent messages
+`/admin purgeuser <member> [amount]` — Delete member's messages (scan 1-200)
+`/admin lock [reason]` — Lock channel for @everyone
+`/admin unlock [reason]` — Unlock channel for @everyone
+`/admin slowmode <seconds>` — Set slowmode (0-21600)
+`/admin timeout <member> <minutes> [reason]` — Timeout member (1-40320 min)
+`/admin untimeout <member> [reason]` — Remove timeout from member
+`/admin mutemany <members> <minutes> [reason]` — Timeout multiple (space-separated IDs/mentions)
+`/admin unmutemany <members> [reason]` — Remove timeout from multiple
+`/admin muteall <minutes> <confirm> [reason]` — Timeout all (type CONFIRM)
+`/admin unmuteall <confirm> [reason]` — Remove timeout from all (type CONFIRM)
+
+**Categories**
+`general` — Broad prompts for everyday discussion
+`gaming` — Games, consoles, mechanics, franchises, hot takes
+`music` — Songs, artists, albums, genres, music takes
+`hot-take` — Controversial opinions and spicy takes
+`chaos` — Funny, dumb, cursed, unhinged prompts
+
+**Notes**
+• Staff role required for all commands
+• Anonymous answers are one per person per inquiry
+• Inquiries auto-close after 24 hours
+• Confirm commands require exact "CONFIRM" text
+"""
+
+    embed = discord.Embed(
+        title="🗺️ Command Reference",
+        description=help_text,
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @court_group.command(name="mode", description="Set the bot mode")
 @app_commands.describe(mode="off, manual, or auto")
 @app_commands.choices(
