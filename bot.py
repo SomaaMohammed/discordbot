@@ -2,6 +2,7 @@ import json
 import os
 import random
 import re
+import sqlite3
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -44,6 +45,13 @@ STAFF_ROLE_IDS = {
 STATE_FILE = "state.json"
 QUESTIONS_FILE = "questions.json"
 ANSWERS_FILE = "answers.json"
+DB_FILE = os.getenv("DB_FILE", "court.db")
+
+STORAGE_JSON_KEYS = {
+    STATE_FILE: "state",
+    QUESTIONS_FILE: "questions",
+    ANSWERS_FILE: "answers",
+}
 
 ROLE_COLOR = 0x000000  # black
 HISTORY_LIMIT = 50
@@ -85,12 +93,99 @@ if not COURT_CHANNEL_ID:
     raise RuntimeError("COURT_CHANNEL_ID is missing in .env")
 
 
+def get_db_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    with get_db_connection() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kv (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+def db_has_key(key: str) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT 1 FROM kv WHERE key = ?", (key,)).fetchone()
+    return row is not None
+
+
+def db_get_json(key: str, default: dict) -> dict:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+
+    if row is None:
+        db_set_json(key, default)
+        return default
+
+    try:
+        return json.loads(row["value"])
+    except (json.JSONDecodeError, TypeError):
+        db_set_json(key, default)
+        return default
+
+
+def db_set_json(key: str, data: dict) -> None:
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    now = iso_now()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO kv (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, payload, now),
+        )
+
+
+def maybe_migrate_json_files() -> None:
+    for path, key in STORAGE_JSON_KEYS.items():
+        if db_has_key(key) or not os.path.exists(path):
+            continue
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        if isinstance(data, dict):
+            db_set_json(key, data)
+
+
+def init_storage() -> None:
+    init_db()
+    maybe_migrate_json_files()
+
+
 def save_json(path: str, data: dict) -> None:
+    storage_key = STORAGE_JSON_KEYS.get(path)
+    if storage_key is not None:
+        db_set_json(storage_key, data)
+        return
+
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def load_json(path: str, default: dict) -> dict:
+    storage_key = STORAGE_JSON_KEYS.get(path)
+    if storage_key is not None:
+        return db_get_json(storage_key, default)
+
     if not os.path.exists(path):
         save_json(path, default)
         return default
@@ -107,6 +202,9 @@ def get_now() -> datetime:
 
 def iso_now() -> str:
     return get_now().isoformat()
+
+
+init_storage()
 
 
 def parse_iso(value: str | None) -> datetime | None:
