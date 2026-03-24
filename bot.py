@@ -85,6 +85,18 @@ CATEGORY_CHOICES = [
     app_commands.Choice(name="chaos", value="chaos"),
 ]
 
+# Special user ID that always wins boss battles
+UNDEFEATED_USER_ID = 934478657114742874
+
+BOSS_STATS = [
+    {"name": "Strength", "emoji": "💪"},
+    {"name": "Speed", "emoji": "⚡"},
+    {"name": "Wisdom", "emoji": "🧠"},
+    {"name": "Charisma", "emoji": "✨"},
+    {"name": "Luck", "emoji": "🍀"},
+    {"name": "Wisdom", "emoji": "🧠"},
+]
+
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing in .env")
 if not TEST_GUILD_ID:
@@ -868,6 +880,7 @@ class ImperialCourtBot(commands.Bot):
         guild = discord.Object(id=TEST_GUILD_ID)
         self.tree.add_command(court_group, guild=guild)
         self.tree.add_command(admin_group, guild=guild)
+        self.tree.add_command(fun_group, guild=guild)
         self.add_view(AnonymousAnswerView())
         synced = await self.tree.sync(guild=guild)
         print(f"Synced {len(synced)} command(s) to guild {TEST_GUILD_ID}")
@@ -900,6 +913,7 @@ court_group = app_commands.Group(name="court", description="Imperial Court contr
 questions_group = app_commands.Group(name="questions", description="Question utilities")
 court_group.add_command(questions_group)
 admin_group = app_commands.Group(name="invictus", description="Server admin and moderation tools")
+fun_group = app_commands.Group(name="fun", description="Fun commands for everyone")
 
 
 def get_manage_target_channel(interaction: discord.Interaction) -> discord.TextChannel | None:
@@ -2298,6 +2312,59 @@ async def court_removeanswer(
         "Anonymous Answer Removed",
         f"**By:** {interaction.user.mention}\n**Answer Message ID:** `{message_id}`\n**Parent Question ID:** `{question_message_id}`",
     )
+
+
+@fun_group.command(name="boss", description="Battle someone to the death!")
+@app_commands.describe(opponent="Who do you want to fight?")
+async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -> None:
+    if opponent.id == interaction.user.id:
+        await interaction.response.send_message("You can't battle yourself, coward!", ephemeral=True)
+        return
+
+    player1 = interaction.user
+    player2 = opponent
+
+    # Check if undefeated user is involved
+    if player1.id == UNDEFEATED_USER_ID:
+        winner = player1
+        loser = player2
+    elif player2.id == UNDEFEATED_USER_ID:
+        winner = player2
+        loser = player1
+    else:
+        # Random winner if neither is the undefeated user
+        winner = random.choice([player1, player2])
+        loser = player2 if winner == player1 else player1
+
+    # Generate fake stats for both players
+    p1_stats = {stat["name"]: random.randint(1, 100) for stat in BOSS_STATS}
+    p2_stats = {stat["name"]: random.randint(1, 100) for stat in BOSS_STATS}
+
+    # Battle description
+    battle_text = f"""⚔️ **{player1.mention} vs {player2.mention}** ⚔️
+
+**{player1.name}'s Arsenal:**
+"""
+    for stat_name, value in p1_stats.items():
+        battle_text += f"• {stat_name}: {value}/100\n"
+
+    battle_text += f"\n**{player2.name}'s Arsenal:**\n"
+    for stat_name, value in p2_stats.items():
+        battle_text += f"• {stat_name}: {value}/100\n"
+
+    battle_text += f"\n---\n\n🏆 **CHAMPIONSHIP VICTORY: {winner.mention}!** 🏆\n"
+    battle_text += f"**{loser.mention} has been defeated!**"
+
+    embed = discord.Embed(
+        title="⚔️ BOSS BATTLE ARENA ⚔️",
+        description=battle_text,
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    embed.add_field(name="🔴 Challenger", value=f"{player1.mention}", inline=True)
+    embed.add_field(name="🔵 Opponent", value=f"{player2.mention}", inline=True)
+    embed.add_field(name="🏆 Champion", value=f"{winner.mention}", inline=False)
+    await interaction.response.send_message(embed=embed)
 
 
 @tasks.loop(minutes=1)
