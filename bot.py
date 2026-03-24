@@ -1712,6 +1712,9 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `/invictus muteall <minutes> <confirm> [reason]` — Timeout all (type CONFIRM)
 `/invictus unmuteall <confirm> [reason]` — Remove timeout from all (type CONFIRM)
 
+**Fun Commands**
+`/fun battle <opponent>` — Battle another member (mentions both users)
+
 **Categories**
 `general` — Broad prompts for everyday discussion
 `gaming` — Games, consoles, mechanics, franchises, hot takes
@@ -1720,7 +1723,8 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `chaos` — Funny, dumb, cursed, unhinged prompts
 
 **Notes**
-• Staff role required for all commands
+• Staff role required for `/court` and `/invictus` commands
+• `/fun battle` is available to everyone
 • Anonymous answers are one per person per inquiry
 • Inquiries auto-close after 24 hours
 • Confirm commands require exact "CONFIRM" text
