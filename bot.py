@@ -2314,7 +2314,7 @@ async def court_removeanswer(
     )
 
 
-@fun_group.command(name="boss", description="Battle someone to the death!")
+@fun_group.command(name="battle", description="Battle someone to the death!")
 @app_commands.describe(opponent="Who do you want to fight?")
 async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -> None:
     if opponent.id == interaction.user.id:
