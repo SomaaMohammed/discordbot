@@ -45,7 +45,7 @@ STATE_FILE = "state.json"
 QUESTIONS_FILE = "questions.json"
 ANSWERS_FILE = "answers.json"
 
-ROLE_COLOR = 0x6D28D9  # royal purple
+ROLE_COLOR = 0x000000  # black
 HISTORY_LIMIT = 50
 POST_RECORD_LIMIT = 100
 THREAD_CLOSE_HOURS = 24
@@ -990,7 +990,12 @@ class AdminSayModal(discord.ui.Modal, title="Send Announcement"):
             return
 
         try:
-            await self.channel.send(self.message_content.value, allowed_mentions=discord.AllowedMentions.all())
+            embed = discord.Embed(
+                description=self.message_content.value,
+                color=ROLE_COLOR,
+                timestamp=get_now(),
+            )
+            await self.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.all())
         except discord.Forbidden:
             await interaction.response.send_message("I do not have permission to send messages there.", ephemeral=True)
             return
