@@ -899,7 +899,7 @@ async def require_staff(interaction: discord.Interaction) -> bool:
 court_group = app_commands.Group(name="court", description="Imperial Court controls")
 questions_group = app_commands.Group(name="questions", description="Question utilities")
 court_group.add_command(questions_group)
-admin_group = app_commands.Group(name="admin", description="Server admin and moderation tools")
+admin_group = app_commands.Group(name="Invictus", description="Server admin and moderation tools")
 
 
 def get_manage_target_channel(interaction: discord.Interaction) -> discord.TextChannel | None:
@@ -1654,8 +1654,8 @@ async def court_status(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(status_text(), ephemeral=True)
 
 
-@court_group.command(name="help", description="Show all available commands")
-async def court_help(interaction: discord.Interaction) -> None:
+@admin_group.command(name="help", description="Show all available commands")
+async def admin_help(interaction: discord.Interaction) -> None:
     if not await require_staff(interaction):
         return
 
@@ -1684,19 +1684,19 @@ async def court_help(interaction: discord.Interaction) -> None:
 `/court close [message_id]` — Close latest inquiry (or specific by ID)
 `/court removeanswer <message_id>` — Remove anonymous answer by message ID
 
-**Admin Commands**
-`/admin say <channel>` — Send announcement in channel
-`/admin purge <amount>` — Delete 1-100 recent messages
-`/admin purgeuser <member> [amount]` — Delete member's messages (scan 1-200)
-`/admin lock [reason]` — Lock channel for @everyone
-`/admin unlock [reason]` — Unlock channel for @everyone
-`/admin slowmode <seconds>` — Set slowmode (0-21600)
-`/admin timeout <member> <minutes> [reason]` — Timeout member (1-40320 min)
-`/admin untimeout <member> [reason]` — Remove timeout from member
-`/admin mutemany <members> <minutes> [reason]` — Timeout multiple (space-separated IDs/mentions)
-`/admin unmutemany <members> [reason]` — Remove timeout from multiple
-`/admin muteall <minutes> <confirm> [reason]` — Timeout all (type CONFIRM)
-`/admin unmuteall <confirm> [reason]` — Remove timeout from all (type CONFIRM)
+**Invictus Commands**
+`/Invictus say <channel>` — Send announcement in channel
+`/Invictus purge <amount>` — Delete 1-100 recent messages
+`/Invictus purgeuser <member> [amount]` — Delete member's messages (scan 1-200)
+`/Invictus lock [reason]` — Lock channel for @everyone
+`/Invictus unlock [reason]` — Unlock channel for @everyone
+`/Invictus slowmode <seconds>` — Set slowmode (0-21600)
+`/Invictus timeout <member> <minutes> [reason]` — Timeout member (1-40320 min)
+`/Invictus untimeout <member> [reason]` — Remove timeout from member
+`/Invictus mutemany <members> <minutes> [reason]` — Timeout multiple (space-separated IDs/mentions)
+`/Invictus unmutemany <members> [reason]` — Remove timeout from multiple
+`/Invictus muteall <minutes> <confirm> [reason]` — Timeout all (type CONFIRM)
+`/Invictus unmuteall <confirm> [reason]` — Remove timeout from all (type CONFIRM)
 
 **Categories**
 `general` — Broad prompts for everyday discussion
