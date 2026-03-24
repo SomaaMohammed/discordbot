@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -49,9 +50,12 @@ HISTORY_LIMIT = 50
 POST_RECORD_LIMIT = 100
 THREAD_CLOSE_HOURS = 24
 THREAD_AUTO_ARCHIVE_MINUTES = 1440
+MAX_TIMEOUT_MINUTES = 40320
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
+MSG_BOT_CONTEXT_ERROR = "Could not verify bot permissions in this server."
+MSG_CONFIRM_REQUIRED = "Confirmation failed. Type `CONFIRM` exactly."
 MSG_INQUIRY_CLOSED = "This court inquiry is already closed."
 MSG_QUESTION_EMPTY = "Question cannot be empty."
 
@@ -772,6 +776,7 @@ class ImperialCourtBot(commands.Bot):
 
 
 intents = discord.Intents.default()
+intents.members = True
 bot = ImperialCourtBot(command_prefix=commands.when_mentioned, intents=intents)
 
 
@@ -805,6 +810,162 @@ def get_manage_target_channel(interaction: discord.Interaction) -> discord.TextC
     return None
 
 
+def is_confirmed(value: str) -> bool:
+    return value.strip().upper() == "CONFIRM"
+
+
+async def get_admin_context(
+    interaction: discord.Interaction,
+) -> tuple[discord.Guild, discord.Member] | None:
+    if interaction.guild is None:
+        await interaction.response.send_message(MSG_USE_IN_SERVER, ephemeral=True)
+        return None
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("Could not verify your roles.", ephemeral=True)
+        return None
+
+    return interaction.guild, interaction.user
+
+
+async def send_admin_log(
+    guild: discord.Guild,
+    actor: discord.Member,
+    title: str,
+    details: list[str],
+) -> None:
+    description = "\n".join([f"**By:** {actor.mention}", *details])
+    await send_log(guild, title, description)
+
+
+def parse_member_ids(raw: str) -> list[int]:
+    seen = set()
+    parsed = []
+
+    for value in re.findall(r"\d{15,20}", raw):
+        member_id = int(value)
+        if member_id not in seen:
+            seen.add(member_id)
+            parsed.append(member_id)
+
+    return parsed
+
+
+async def resolve_members(guild: discord.Guild, member_ids: list[int]) -> tuple[list[discord.Member], list[int]]:
+    found: list[discord.Member] = []
+    missing: list[int] = []
+
+    for member_id in member_ids:
+        member = guild.get_member(member_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(member_id)
+            except Exception:
+                missing.append(member_id)
+                continue
+
+        found.append(member)
+
+    return found, missing
+
+
+def can_timeout_target(
+    actor: discord.Member,
+    me: discord.Member,
+    target: discord.Member,
+) -> tuple[bool, str]:
+    if target.bot:
+        return False, "target is a bot"
+
+    if target.id == me.id:
+        return False, "target is the bot"
+
+    if target.id == actor.guild.owner_id:
+        return False, "target is the server owner"
+
+    if target.id == actor.id:
+        return False, "target is yourself"
+
+    if me.top_role <= target.top_role:
+        return False, "bot role is not high enough"
+
+    if actor.id != actor.guild.owner_id and actor.top_role <= target.top_role:
+        return False, "your role is not high enough"
+
+    return True, ""
+
+
+async def set_member_timeout(
+    member: discord.Member,
+    until: datetime | None,
+    reason: str,
+) -> tuple[bool, str | None]:
+    try:
+        await member.timeout(until, reason=reason)
+        return True, None
+    except discord.Forbidden:
+        return False, "missing permissions"
+    except discord.HTTPException:
+        return False, "discord API error"
+
+
+async def get_timeout_context(
+    interaction: discord.Interaction,
+) -> tuple[discord.Guild, discord.Member, discord.Member] | None:
+    admin_context = await get_admin_context(interaction)
+    if admin_context is None:
+        return None
+    guild, actor = admin_context
+
+    me = guild.me
+    if me is None:
+        await interaction.response.send_message(MSG_BOT_CONTEXT_ERROR, ephemeral=True)
+        return None
+
+    return guild, actor, me
+
+
+def build_timeout_reason(action: str, user: discord.Member, reason: str | None) -> str:
+    base = f"{action} by {user} via /admin"
+    if reason:
+        return f"{base} | {reason}"
+    return base
+
+
+async def apply_timeout_to_targets(
+    actor: discord.Member,
+    me: discord.Member,
+    targets: list[discord.Member],
+    until: datetime | None,
+    reason: str,
+    only_if_timed_out: bool = False,
+) -> tuple[int, int, int, list[str]]:
+    applied = 0
+    skipped = 0
+    failed = 0
+    details: list[str] = []
+
+    for target in targets:
+        allowed, why_not = can_timeout_target(actor, me, target)
+        if not allowed:
+            skipped += 1
+            details.append(f"{target} ({why_not})")
+            continue
+
+        if only_if_timed_out and not target.is_timed_out():
+            skipped += 1
+            continue
+
+        ok, failure = await set_member_timeout(target, until, reason)
+        if ok:
+            applied += 1
+        else:
+            failed += 1
+            details.append(f"{target} ({failure})")
+
+    return applied, skipped, failed, details
+
+
 @admin_group.command(name="say", description="Send an admin announcement in a channel")
 @app_commands.describe(channel="Target channel", message="Message content")
 async def admin_say(
@@ -831,10 +992,16 @@ async def admin_say(
 
     await interaction.response.send_message(f"Announcement sent to {channel.mention}.", ephemeral=True)
 
-    await send_log(
-        interaction.guild,
+    admin_context = await get_admin_context(interaction)
+    if admin_context is None:
+        return
+    guild, actor = admin_context
+
+    await send_admin_log(
+        guild,
+        actor,
         "Admin Announcement Sent",
-        f"**By:** {interaction.user.mention}\n**Channel:** {channel.mention}\n**Message:** {clean_message}",
+        [f"**Channel:** {channel.mention}", f"**Message:** {clean_message}"],
     )
 
 
@@ -865,10 +1032,69 @@ async def admin_purge(
 
     await interaction.followup.send(f"Deleted `{len(deleted)}` message(s) in {channel.mention}.", ephemeral=True)
 
-    await send_log(
-        interaction.guild,
+    admin_context = await get_admin_context(interaction)
+    if admin_context is None:
+        return
+    guild, actor = admin_context
+
+    await send_admin_log(
+        guild,
+        actor,
         "Admin Purge",
-        f"**By:** {interaction.user.mention}\n**Channel:** {channel.mention}\n**Requested:** `{amount}`\n**Deleted:** `{len(deleted)}`",
+        [
+            f"**Channel:** {channel.mention}",
+            f"**Requested:** `{amount}`",
+            f"**Deleted:** `{len(deleted)}`",
+        ],
+    )
+
+
+@admin_group.command(name="purgeuser", description="Delete recent messages from one member in this channel")
+@app_commands.describe(member="Member whose messages to remove", amount="How many recent messages to scan (1-200)")
+async def admin_purgeuser(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    amount: app_commands.Range[int, 1, 200] = 100,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    channel = get_manage_target_channel(interaction)
+    if channel is None:
+        await interaction.response.send_message(MSG_USE_TEXT_CHANNEL, ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        deleted = await channel.purge(limit=amount, check=lambda m: m.author.id == member.id)
+    except discord.Forbidden:
+        await interaction.followup.send("I do not have permission to manage messages here.", ephemeral=True)
+        return
+    except discord.HTTPException:
+        await interaction.followup.send("Failed to purge that member's messages.", ephemeral=True)
+        return
+
+    await interaction.followup.send(
+        f"Deleted `{len(deleted)}` message(s) from {member.mention} in {channel.mention}.",
+        ephemeral=True,
+    )
+
+    admin_context = await get_admin_context(interaction)
+    if admin_context is None:
+        return
+    guild, actor = admin_context
+
+    await send_admin_log(
+        guild,
+        actor,
+        "Admin Purge User",
+        [
+            f"**Channel:** {channel.mention}",
+            f"**Target:** {member.mention}",
+            f"**Scanned:** `{amount}`",
+            f"**Deleted:** `{len(deleted)}`",
+        ],
     )
 
 
@@ -976,6 +1202,325 @@ async def admin_slowmode(
         interaction.guild,
         "Admin Slowmode Updated",
         f"**By:** {interaction.user.mention}\n**Channel:** {channel.mention}\n**Seconds:** `{seconds}`",
+    )
+
+
+@admin_group.command(name="timeout", description="Timeout one member")
+@app_commands.describe(member="Member to timeout", minutes="Timeout duration in minutes (1-40320)", reason="Optional reason")
+async def admin_timeout(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    minutes: app_commands.Range[int, 1, MAX_TIMEOUT_MINUTES],
+    reason: str | None = None,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    context = await get_timeout_context(interaction)
+    if context is None:
+        return
+    guild, actor, me = context
+
+    allowed, why_not = can_timeout_target(actor, me, member)
+    if not allowed:
+        await interaction.response.send_message(f"Cannot timeout {member.mention}: {why_not}.", ephemeral=True)
+        return
+
+    until = get_now() + timedelta(minutes=minutes)
+    mod_reason = build_timeout_reason("Muted", actor, reason)
+    ok, failure = await set_member_timeout(member, until, mod_reason)
+    if not ok:
+        await interaction.response.send_message(f"Failed to timeout {member.mention}: {failure}.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Timed out {member.mention} for `{minutes}` minute(s).",
+        ephemeral=True,
+    )
+
+    await send_admin_log(
+        guild,
+        actor,
+        "Admin Timeout",
+        [
+            f"**Target:** {member.mention}",
+            f"**Minutes:** `{minutes}`",
+            f"**Reason:** {reason or 'No reason provided.'}",
+        ],
+    )
+
+
+@admin_group.command(name="untimeout", description="Remove timeout from one member")
+@app_commands.describe(member="Member to untimeout", reason="Optional reason")
+async def admin_untimeout(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str | None = None,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    context = await get_timeout_context(interaction)
+    if context is None:
+        return
+    guild, actor, me = context
+
+    allowed, why_not = can_timeout_target(actor, me, member)
+    if not allowed:
+        await interaction.response.send_message(f"Cannot untimeout {member.mention}: {why_not}.", ephemeral=True)
+        return
+
+    if not member.is_timed_out():
+        await interaction.response.send_message(f"{member.mention} is not currently timed out.", ephemeral=True)
+        return
+
+    mod_reason = build_timeout_reason("Unmuted", actor, reason)
+    ok, failure = await set_member_timeout(member, None, mod_reason)
+    if not ok:
+        await interaction.response.send_message(f"Failed to untimeout {member.mention}: {failure}.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Removed timeout from {member.mention}.",
+        ephemeral=True,
+    )
+
+    await send_admin_log(
+        guild,
+        actor,
+        "Admin Untimeout",
+        [
+            f"**Target:** {member.mention}",
+            f"**Reason:** {reason or 'No reason provided.'}",
+        ],
+    )
+
+
+@admin_group.command(name="mutemany", description="Timeout multiple members at once")
+@app_commands.describe(
+    members="Mentions or user IDs separated by spaces",
+    minutes="Timeout duration in minutes (1-40320)",
+    reason="Optional reason",
+)
+async def admin_mutemany(
+    interaction: discord.Interaction,
+    members: str,
+    minutes: app_commands.Range[int, 1, MAX_TIMEOUT_MINUTES],
+    reason: str | None = None,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    context = await get_timeout_context(interaction)
+    if context is None:
+        return
+    guild, actor, me = context
+
+    member_ids = parse_member_ids(members)
+    if not member_ids:
+        await interaction.response.send_message("No valid member mentions or IDs were provided.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    targets, missing_ids = await resolve_members(guild, member_ids)
+    mute_until = get_now() + timedelta(minutes=minutes)
+    mod_reason = build_timeout_reason("Muted", actor, reason)
+    applied, skipped, failed, skipped_details = await apply_timeout_to_targets(
+        actor,
+        me,
+        targets,
+        mute_until,
+        mod_reason,
+    )
+
+    summary = (
+        f"Muted `{applied}` member(s) for `{minutes}` minute(s).\n"
+        f"Skipped: `{skipped}` | Failed: `{failed}` | Unknown IDs: `{len(missing_ids)}`"
+    )
+    if skipped_details:
+        summary += "\n\nIssues:\n" + "\n".join(f"- {line}" for line in skipped_details[:10])
+
+    await interaction.followup.send(summary, ephemeral=True)
+
+    await send_log(
+        guild,
+        "Admin Mute Many",
+        f"**By:** {actor.mention}\n"
+        f"**Minutes:** `{minutes}`\n"
+        f"**Applied:** `{applied}`\n"
+        f"**Skipped:** `{skipped}`\n"
+        f"**Failed:** `{failed}`\n"
+        f"**Unknown IDs:** `{len(missing_ids)}`\n"
+        f"**Reason:** {reason or 'No reason provided.'}",
+    )
+
+
+@admin_group.command(name="unmutemany", description="Remove timeout from multiple members")
+@app_commands.describe(
+    members="Mentions or user IDs separated by spaces",
+    reason="Optional reason",
+)
+async def admin_unmutemany(
+    interaction: discord.Interaction,
+    members: str,
+    reason: str | None = None,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    context = await get_timeout_context(interaction)
+    if context is None:
+        return
+    guild, actor, me = context
+
+    member_ids = parse_member_ids(members)
+    if not member_ids:
+        await interaction.response.send_message("No valid member mentions or IDs were provided.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    targets, missing_ids = await resolve_members(guild, member_ids)
+    mod_reason = build_timeout_reason("Unmuted", actor, reason)
+    applied, skipped, failed, skipped_details = await apply_timeout_to_targets(
+        actor,
+        me,
+        targets,
+        None,
+        mod_reason,
+    )
+
+    summary = (
+        f"Unmuted `{applied}` member(s).\n"
+        f"Skipped: `{skipped}` | Failed: `{failed}` | Unknown IDs: `{len(missing_ids)}`"
+    )
+    if skipped_details:
+        summary += "\n\nIssues:\n" + "\n".join(f"- {line}" for line in skipped_details[:10])
+
+    await interaction.followup.send(summary, ephemeral=True)
+
+    await send_log(
+        guild,
+        "Admin Unmute Many",
+        f"**By:** {actor.mention}\n"
+        f"**Applied:** `{applied}`\n"
+        f"**Skipped:** `{skipped}`\n"
+        f"**Failed:** `{failed}`\n"
+        f"**Unknown IDs:** `{len(missing_ids)}`\n"
+        f"**Reason:** {reason or 'No reason provided.'}",
+    )
+
+
+@admin_group.command(name="muteall", description="Timeout all non-bot members")
+@app_commands.describe(
+    minutes="Timeout duration in minutes (1-40320)",
+    confirm="Type CONFIRM to run",
+    reason="Optional reason",
+)
+async def admin_muteall(
+    interaction: discord.Interaction,
+    minutes: app_commands.Range[int, 1, MAX_TIMEOUT_MINUTES],
+    confirm: str,
+    reason: str | None = None,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    if not is_confirmed(confirm):
+        await interaction.response.send_message(MSG_CONFIRM_REQUIRED, ephemeral=True)
+        return
+
+    context = await get_timeout_context(interaction)
+    if context is None:
+        return
+    guild, actor, me = context
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        if not guild.chunked:
+            await guild.chunk(cache=True)
+    except Exception:
+        pass
+
+    mute_until = get_now() + timedelta(minutes=minutes)
+    mod_reason = build_timeout_reason("Muted", actor, reason)
+    applied, skipped, failed, _ = await apply_timeout_to_targets(
+        actor,
+        me,
+        guild.members,
+        mute_until,
+        mod_reason,
+    )
+
+    await interaction.followup.send(
+        f"Mute all complete. Muted `{applied}` member(s). Skipped `{skipped}`. Failed `{failed}`.",
+        ephemeral=True,
+    )
+
+    await send_log(
+        guild,
+        "Admin Mute All",
+        f"**By:** {actor.mention}\n"
+        f"**Minutes:** `{minutes}`\n"
+        f"**Applied:** `{applied}`\n"
+        f"**Skipped:** `{skipped}`\n"
+        f"**Failed:** `{failed}`\n"
+        f"**Reason:** {reason or 'No reason provided.'}",
+    )
+
+
+@admin_group.command(name="unmuteall", description="Remove timeout from all non-bot members")
+@app_commands.describe(confirm="Type CONFIRM to run", reason="Optional reason")
+async def admin_unmuteall(
+    interaction: discord.Interaction,
+    confirm: str,
+    reason: str | None = None,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    if not is_confirmed(confirm):
+        await interaction.response.send_message(MSG_CONFIRM_REQUIRED, ephemeral=True)
+        return
+
+    context = await get_timeout_context(interaction)
+    if context is None:
+        return
+    guild, actor, me = context
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        if not guild.chunked:
+            await guild.chunk(cache=True)
+    except Exception:
+        pass
+
+    mod_reason = build_timeout_reason("Unmuted", actor, reason)
+    applied, skipped, failed, _ = await apply_timeout_to_targets(
+        actor,
+        me,
+        guild.members,
+        None,
+        mod_reason,
+        only_if_timed_out=True,
+    )
+
+    await interaction.followup.send(
+        f"Unmute all complete. Unmuted `{applied}` member(s). Skipped `{skipped}`. Failed `{failed}`.",
+        ephemeral=True,
+    )
+
+    await send_log(
+        guild,
+        "Admin Unmute All",
+        f"**By:** {actor.mention}\n"
+        f"**Applied:** `{applied}`\n"
+        f"**Skipped:** `{skipped}`\n"
+        f"**Failed:** `{failed}`\n"
+        f"**Reason:** {reason or 'No reason provided.'}",
     )
 
 
