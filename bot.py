@@ -976,7 +976,7 @@ async def admin_say(
     if not await require_staff(interaction):
         return
 
-    clean_message = message.strip()
+    clean_message = message
     if not clean_message:
         await interaction.response.send_message("Message cannot be empty.", ephemeral=True)
         return
