@@ -56,6 +56,7 @@ MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
 MSG_BOT_CONTEXT_ERROR = "Could not verify bot permissions in this server."
 MSG_CONFIRM_REQUIRED = "Confirmation failed. Type `CONFIRM` exactly."
+MSG_VERIFY_ROLES = "Could not verify your roles."
 MSG_INQUIRY_CLOSED = "This court inquiry is already closed."
 MSG_QUESTION_EMPTY = "Question cannot be empty."
 
@@ -786,7 +787,7 @@ async def require_staff(interaction: discord.Interaction) -> bool:
         return False
 
     if not isinstance(interaction.user, discord.Member):
-        await interaction.response.send_message("Could not verify your roles.", ephemeral=True)
+        await interaction.response.send_message(MSG_VERIFY_ROLES, ephemeral=True)
         return False
 
     if not is_staff(interaction.user):
@@ -822,7 +823,7 @@ async def get_admin_context(
         return None
 
     if not isinstance(interaction.user, discord.Member):
-        await interaction.response.send_message("Could not verify your roles.", ephemeral=True)
+        await interaction.response.send_message(MSG_VERIFY_ROLES, ephemeral=True)
         return None
 
     return interaction.guild, interaction.user
@@ -966,43 +967,57 @@ async def apply_timeout_to_targets(
     return applied, skipped, failed, details
 
 
+class AdminSayModal(discord.ui.Modal, title="Send Announcement"):
+    message_content = discord.ui.TextInput(
+        label="Message",
+        style=discord.TextStyle.paragraph,
+        placeholder="Paste your announcement here...",
+        required=True,
+        max_length=2000,
+    )
+
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__(timeout=None)
+        self.channel = channel
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(MSG_VERIFY_ROLES, ephemeral=True)
+            return
+
+        if interaction.guild is None:
+            await interaction.response.send_message(MSG_USE_IN_SERVER, ephemeral=True)
+            return
+
+        try:
+            await self.channel.send(self.message_content.value, allowed_mentions=discord.AllowedMentions.all())
+        except discord.Forbidden:
+            await interaction.response.send_message("I do not have permission to send messages there.", ephemeral=True)
+            return
+        except discord.HTTPException:
+            await interaction.response.send_message("Failed to send the message.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(f"Announcement sent to {self.channel.mention}.", ephemeral=True)
+
+        await send_admin_log(
+            interaction.guild,
+            interaction.user,
+            "Admin Announcement Sent",
+            [f"**Channel:** {self.channel.mention}", f"**Message:** {self.message_content.value}"],
+        )
+
+
 @admin_group.command(name="say", description="Send an admin announcement in a channel")
-@app_commands.describe(channel="Target channel", message="Message content")
+@app_commands.describe(channel="Target channel")
 async def admin_say(
     interaction: discord.Interaction,
     channel: discord.TextChannel,
-    message: str,
 ) -> None:
     if not await require_staff(interaction):
         return
 
-    clean_message = message
-    if not clean_message:
-        await interaction.response.send_message("Message cannot be empty.", ephemeral=True)
-        return
-
-    try:
-        await channel.send(clean_message, allowed_mentions=discord.AllowedMentions.all())
-    except discord.Forbidden:
-        await interaction.response.send_message("I do not have permission to send messages there.", ephemeral=True)
-        return
-    except discord.HTTPException:
-        await interaction.response.send_message("Failed to send the message.", ephemeral=True)
-        return
-
-    await interaction.response.send_message(f"Announcement sent to {channel.mention}.", ephemeral=True)
-
-    admin_context = await get_admin_context(interaction)
-    if admin_context is None:
-        return
-    guild, actor = admin_context
-
-    await send_admin_log(
-        guild,
-        actor,
-        "Admin Announcement Sent",
-        [f"**Channel:** {channel.mention}", f"**Message:** {clean_message}"],
-    )
+    await interaction.response.send_modal(AdminSayModal(channel))
 
 
 @admin_group.command(name="purge", description="Delete recent messages in this channel")
