@@ -982,7 +982,7 @@ async def admin_say(
         return
 
     try:
-        await channel.send(clean_message, allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(clean_message, allowed_mentions=discord.AllowedMentions.all())
     except discord.Forbidden:
         await interaction.response.send_message("I do not have permission to send messages there.", ephemeral=True)
         return
