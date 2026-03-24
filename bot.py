@@ -57,6 +57,7 @@ MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
 MSG_BOT_CONTEXT_ERROR = "Could not verify bot permissions in this server."
 MSG_CONFIRM_REQUIRED = "Confirmation failed. Type `CONFIRM` exactly."
 MSG_VERIFY_ROLES = "Could not verify your roles."
+MSG_EVERYONE_MENTION = "@everyone"
 MSG_INQUIRY_CLOSED = "This court inquiry is already closed."
 MSG_QUESTION_EMPTY = "Question cannot be empty."
 
@@ -726,7 +727,7 @@ async def post_question(
     embed = build_embed(chosen_category, question)
 
     sent = await channel.send(
-        content="@everyone",
+        content=MSG_EVERYONE_MENTION,
         embed=embed,
         view=AnonymousAnswerView(),
         allowed_mentions=discord.AllowedMentions(everyone=True),
@@ -995,7 +996,11 @@ class AdminSayModal(discord.ui.Modal, title="Send Announcement"):
                 color=ROLE_COLOR,
                 timestamp=get_now(),
             )
-            await self.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.all())
+            await self.channel.send(
+                content=MSG_EVERYONE_MENTION,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(everyone=True),
+            )
         except discord.Forbidden:
             await interaction.response.send_message("I do not have permission to send messages there.", ephemeral=True)
             return
@@ -1981,7 +1986,7 @@ async def court_custom(interaction: discord.Interaction, question: str) -> None:
 
     embed = build_embed("custom", clean_question)
     sent = await channel.send(
-        content="@everyone",
+        content=MSG_EVERYONE_MENTION,
         embed=embed,
         view=AnonymousAnswerView(),
         allowed_mentions=discord.AllowedMentions(everyone=True),
