@@ -63,6 +63,8 @@ THREAD_AUTO_ARCHIVE_MINUTES = 1440
 MAX_TIMEOUT_MINUTES = 40320
 REPLY_MUTE_MINUTES = 1
 SILENT_LOCK_SECONDS = 10
+SILENT_LOCK_EXCLUDE_ROLES = {1462082750101328029, 1461500213746204921, 1461382351874424842}  # Includes Imperial Sentinel
+EMPEROR_MENTION_RESPONSE = "He's always watching."
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -93,12 +95,12 @@ CATEGORY_CHOICES = [
 UNDEFEATED_USER_ID = 934478657114742874
 
 BOSS_STATS = [
-    {"name": "Strength", "emoji": "💪"},
-    {"name": "Speed", "emoji": "⚡"},
-    {"name": "Wisdom", "emoji": "🧠"},
-    {"name": "Charisma", "emoji": "✨"},
-    {"name": "Luck", "emoji": "🍀"},
-    {"name": "Wisdom", "emoji": "🧠"},
+    {"name": "Strength", "emoji": ""},
+    {"name": "Speed", "emoji": ""},
+    {"name": "Wisdom", "emoji": ""},
+    {"name": "Charisma", "emoji": ""},
+    {"name": "Luck", "emoji": ""},
+    {"name": "Wisdom", "emoji": ""},
 ]
 
 if not TOKEN:
@@ -522,7 +524,7 @@ def make_thread_name(question: str) -> str:
 
 def build_embed(category: str, question: str) -> discord.Embed:
     embed = discord.Embed(
-        title="📜 Imperial Court Inquiry",
+        title="Imperial Court Inquiry",
         description=f"*The throne demands an answer.*\n\n**Question:** {question}",
         color=ROLE_COLOR,
         timestamp=get_now(),
@@ -601,7 +603,7 @@ class ClosedAnswerView(discord.ui.View):
         button = discord.ui.Button(
             label="Court Inquiry Closed",
             style=discord.ButtonStyle.secondary,
-            emoji="🔒",
+            emoji="",
             disabled=True,
         )
         self.add_item(button)
@@ -782,7 +784,7 @@ class AnonymousAnswerModal(discord.ui.Modal, title="Anonymous Court Answer"):
         answer_number = next_answer_number(question_message_id)
 
         embed = discord.Embed(
-            title=f"🕯️ Anonymous Answer #{answer_number}",
+            title=f"Anonymous Answer #{answer_number}",
             description=self.answer.value,
             color=ROLE_COLOR,
             timestamp=get_now(),
@@ -805,7 +807,7 @@ class AnonymousAnswerView(discord.ui.View):
     @discord.ui.button(
         label="Answer Anonymously",
         style=discord.ButtonStyle.secondary,
-        emoji="🕯️",
+        emoji="",
         custom_id="court:anonymous_answer",
     )
     async def anonymous_answer_button(
@@ -850,7 +852,7 @@ async def post_question(
 
     if thread is not None:
         await thread.send(
-            "🕯️ **Anonymous Court Replies**\n"
+            "**Anonymous Court Replies**\n"
             "- One anonymous answer per person\n"
             "- Stay on topic\n"
             "- Anonymous does not mean consequence-free\n"
@@ -1077,9 +1079,14 @@ def is_emperor_lock_trigger(content: str) -> bool:
     return re.match(r"^\s*the\s+emperor\s+is\s+here\.?\s*$", content, flags=re.IGNORECASE) is not None
 
 
+def has_emperor_mention(content: str) -> bool:
+    return re.search(r"\b(sammy|emperor)\b", content, flags=re.IGNORECASE) is not None
+
+
 async def lock_channel_silently(channel: discord.TextChannel, actor: discord.Member, seconds: int = SILENT_LOCK_SECONDS) -> None:
     targets: list[discord.Role] = [
-        role for role in actor.guild.roles if not role.permissions.administrator
+        role for role in actor.guild.roles
+        if not role.permissions.administrator and role.id not in SILENT_LOCK_EXCLUDE_ROLES and not role.is_bot_managed()
     ]
 
     original_send_messages: dict[int, bool | None] = {}
@@ -1804,7 +1811,7 @@ async def admin_help(interaction: discord.Interaction) -> None:
         return
 
     help_text = """
-**📜 Imperial Court Bot Commands**
+**Imperial Court Bot Commands**
 
 **Court Control Commands**
 `/court status` — Show current bot status
@@ -2308,7 +2315,7 @@ async def court_custom(interaction: discord.Interaction, question: str) -> None:
 
     if thread is not None:
         await thread.send(
-            "🕯️ **Anonymous Court Replies**\n"
+            "**Anonymous Court Replies**\n"
             "- One anonymous answer per person\n"
             "- Stay on topic\n"
             "- Anonymous does not mean consequence-free\n"
@@ -2481,7 +2488,7 @@ async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -
     }
 
     # Battle description
-    battle_text = f"""⚔️ **{player1.mention} vs {player2.mention}** ⚔️
+    battle_text = f"""**{player1.mention} vs {player2.mention}**
 
 **{player1.name}'s Arsenal:**
 """
@@ -2492,18 +2499,18 @@ async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -
     for stat_name, value in p2_stats.items():
         battle_text += f"• {stat_name}: {value}/100\n"
 
-    battle_text += f"\n---\n\n🏆 **CHAMPIONSHIP VICTORY: {winner.mention}!** 🏆\n"
+    battle_text += f"\n---\n\n** CHAMPIONSHIP VICTORY: {winner.mention}!**\n"
     battle_text += f"**{loser.mention} has been defeated!**"
 
     embed = discord.Embed(
-        title="⚔️ BOSS BATTLE ARENA ⚔️",
+        title="BOSS BATTLE ARENA",
         description=battle_text,
         color=ROLE_COLOR,
         timestamp=get_now(),
     )
-    embed.add_field(name="🔴 Challenger", value=f"{player1.mention}", inline=True)
-    embed.add_field(name="🔵 Opponent", value=f"{player2.mention}", inline=True)
-    embed.add_field(name="🏆 Champion", value=f"{winner.mention}", inline=False)
+    embed.add_field(name="Challenger", value=f"{player1.mention}", inline=True)
+    embed.add_field(name="Opponent", value=f"{player2.mention}", inline=True)
+    embed.add_field(name="Champion", value=f"{winner.mention}", inline=False)
     await interaction.response.send_message(content=f"{player1.mention} {player2.mention}", embed=embed)
 
 
@@ -2590,6 +2597,10 @@ async def on_message(message: discord.Message) -> None:
         return
 
     if message.guild is None or not isinstance(message.author, discord.Member):
+        return
+
+    if has_emperor_mention(message.content):
+        await message.channel.send(EMPEROR_MENTION_RESPONSE)
         return
 
     if is_silence_lock_trigger(message.content) or is_emperor_lock_trigger(message.content):
