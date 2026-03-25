@@ -63,6 +63,7 @@ THREAD_AUTO_ARCHIVE_MINUTES = 1440
 MAX_TIMEOUT_MINUTES = 40320
 REPLY_MUTE_MINUTES = 1
 SILENT_LOCK_SECONDS = 10
+SILENT_LOCK_EXTRA_ROLE_ID = 1461386876475932806
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -1078,22 +1079,36 @@ def is_emperor_lock_trigger(content: str) -> bool:
 
 
 async def lock_channel_silently(channel: discord.TextChannel, actor: discord.Member, seconds: int = SILENT_LOCK_SECONDS) -> None:
-    overwrite = channel.overwrites_for(actor.guild.default_role)
-    original_send_messages = overwrite.send_messages
-    overwrite.send_messages = False
-    try:
-        await channel.set_permissions(actor.guild.default_role, overwrite=overwrite, reason=f"Silence by {actor}")
-    except (discord.Forbidden, discord.HTTPException):
+    targets: list[discord.Role] = [actor.guild.default_role]
+    extra_role = actor.guild.get_role(SILENT_LOCK_EXTRA_ROLE_ID)
+    if extra_role is not None and extra_role.id != actor.guild.default_role.id:
+        targets.append(extra_role)
+
+    original_send_messages: dict[int, bool | None] = {}
+    applied_targets: list[discord.Role] = []
+
+    for role in targets:
+        overwrite = channel.overwrites_for(role)
+        original_send_messages[role.id] = overwrite.send_messages
+        overwrite.send_messages = False
+        try:
+            await channel.set_permissions(role, overwrite=overwrite, reason=f"Silence by {actor}")
+            applied_targets.append(role)
+        except (discord.Forbidden, discord.HTTPException):
+            continue
+
+    if not applied_targets:
         return
 
     await asyncio.sleep(max(0, seconds))
 
-    restore_overwrite = channel.overwrites_for(actor.guild.default_role)
-    restore_overwrite.send_messages = original_send_messages
-    try:
-        await channel.set_permissions(actor.guild.default_role, overwrite=restore_overwrite, reason=f"Silence expired by {actor}")
-    except (discord.Forbidden, discord.HTTPException):
-        return
+    for role in applied_targets:
+        restore_overwrite = channel.overwrites_for(role)
+        restore_overwrite.send_messages = original_send_messages.get(role.id)
+        try:
+            await channel.set_permissions(role, overwrite=restore_overwrite, reason=f"Silence expired by {actor}")
+        except (discord.Forbidden, discord.HTTPException):
+            continue
 
 
 async def get_replied_member(message: discord.Message) -> discord.Member | None:
