@@ -38,6 +38,7 @@ TIMEZONE_NAME = os.getenv("TIMEZONE", "Asia/Qatar")
 # Roles allowed to control the bot
 STAFF_ROLE_IDS = {
     1461376227095875707,  # Emperor
+    1461386876475932806,  # Privileged lock trigger role
     1461485629178122465,  # Empress
     1461513633367330982,  # Grand Marshal
     1461513909130498230,  # Imperial Guard
@@ -60,8 +61,8 @@ POST_RECORD_LIMIT = 100
 THREAD_CLOSE_HOURS = 24
 THREAD_AUTO_ARCHIVE_MINUTES = 1440
 MAX_TIMEOUT_MINUTES = 40320
-REPLY_MUTE_MINUTES = env_int("REPLY_MUTE_MINUTES", 60)
-SILENT_LOCK_SECONDS = 5
+REPLY_MUTE_MINUTES = 1
+SILENT_LOCK_SECONDS = 10
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
