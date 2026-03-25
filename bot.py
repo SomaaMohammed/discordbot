@@ -63,7 +63,6 @@ THREAD_AUTO_ARCHIVE_MINUTES = 1440
 MAX_TIMEOUT_MINUTES = 40320
 REPLY_MUTE_MINUTES = 1
 SILENT_LOCK_SECONDS = 10
-SILENT_LOCK_EXTRA_ROLE_ID = 1461386876475932806
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -1079,10 +1078,9 @@ def is_emperor_lock_trigger(content: str) -> bool:
 
 
 async def lock_channel_silently(channel: discord.TextChannel, actor: discord.Member, seconds: int = SILENT_LOCK_SECONDS) -> None:
-    targets: list[discord.Role] = [actor.guild.default_role]
-    extra_role = actor.guild.get_role(SILENT_LOCK_EXTRA_ROLE_ID)
-    if extra_role is not None and extra_role.id != actor.guild.default_role.id:
-        targets.append(extra_role)
+    targets: list[discord.Role] = [
+        role for role in actor.guild.roles if not role.permissions.administrator
+    ]
 
     original_send_messages: dict[int, bool | None] = {}
     applied_targets: list[discord.Role] = []
