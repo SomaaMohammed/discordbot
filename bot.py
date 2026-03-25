@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import random
@@ -60,6 +61,7 @@ THREAD_CLOSE_HOURS = 24
 THREAD_AUTO_ARCHIVE_MINUTES = 1440
 MAX_TIMEOUT_MINUTES = 40320
 REPLY_MUTE_MINUTES = env_int("REPLY_MUTE_MINUTES", 60)
+SILENT_LOCK_SECONDS = 5
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -1066,6 +1068,33 @@ def parse_reply_mute_message(content: str) -> str | None:
     return None
 
 
+def is_silence_lock_trigger(content: str) -> bool:
+    return re.match(r"^\s*silence\.?\s*$", content, flags=re.IGNORECASE) is not None
+
+
+def is_emperor_lock_trigger(content: str) -> bool:
+    return re.match(r"^\s*the\s+emperor\s+is\s+here\.?\s*$", content, flags=re.IGNORECASE) is not None
+
+
+async def lock_channel_silently(channel: discord.TextChannel, actor: discord.Member, seconds: int = SILENT_LOCK_SECONDS) -> None:
+    overwrite = channel.overwrites_for(actor.guild.default_role)
+    original_send_messages = overwrite.send_messages
+    overwrite.send_messages = False
+    try:
+        await channel.set_permissions(actor.guild.default_role, overwrite=overwrite, reason=f"Silence by {actor}")
+    except (discord.Forbidden, discord.HTTPException):
+        return
+
+    await asyncio.sleep(max(0, seconds))
+
+    restore_overwrite = channel.overwrites_for(actor.guild.default_role)
+    restore_overwrite.send_messages = original_send_messages
+    try:
+        await channel.set_permissions(actor.guild.default_role, overwrite=restore_overwrite, reason=f"Silence expired by {actor}")
+    except (discord.Forbidden, discord.HTTPException):
+        return
+
+
 async def get_replied_member(message: discord.Message) -> discord.Member | None:
     if message.reference is None or message.reference.message_id is None:
         return None
@@ -1090,6 +1119,47 @@ async def send_mute_failed_embed(message: discord.Message, target: discord.Membe
         timestamp=get_now(),
     )
     await message.reply(embed=embed, mention_author=False)
+
+
+async def handle_reply_mute_trigger(message: discord.Message, reason_text: str) -> None:
+    target = await get_replied_member(message)
+    if target is None:
+        return
+
+    me = message.guild.me
+    if me is None:
+        return
+
+    allowed, why_not = can_timeout_target(message.author, me, target)
+    if not allowed:
+        await send_mute_failed_embed(message, target, why_not)
+        return
+
+    until = get_now() + timedelta(minutes=REPLY_MUTE_MINUTES)
+    mod_reason = build_timeout_reason("Muted", message.author, reason_text or "reply command")
+    ok, failure = await set_member_timeout(target, until, mod_reason)
+    if not ok:
+        await send_mute_failed_embed(message, target, failure or "unknown error")
+        return
+
+    embed = discord.Embed(
+        title="Invictus Mute",
+        description=f"{target.mention} has been muted for `{REPLY_MUTE_MINUTES}` minute(s).",
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    embed.add_field(name="By", value=message.author.mention, inline=True)
+    embed.add_field(name="Reason", value=reason_text or "No reason provided.", inline=True)
+    await message.channel.send(embed=embed)
+
+    await send_log(
+        message.guild,
+        "Reply Mute Triggered",
+        f"**By:** {message.author.mention}\n"
+        f"**Target:** {target.mention}\n"
+        f"**Minutes:** `{REPLY_MUTE_MINUTES}`\n"
+        f"**Reason:** {reason_text or 'No reason provided.'}",
+    )
 
 
 async def apply_timeout_to_targets(
@@ -2508,51 +2578,20 @@ async def on_message(message: discord.Message) -> None:
     if message.guild is None or not isinstance(message.author, discord.Member):
         return
 
+    if is_silence_lock_trigger(message.content) or is_emperor_lock_trigger(message.content):
+        if not is_staff(message.author):
+            return
+        if isinstance(message.channel, discord.TextChannel):
+            await lock_channel_silently(message.channel, message.author, SILENT_LOCK_SECONDS)
+        return
+
     reason_text = parse_reply_mute_message(message.content)
     if reason_text is None:
         return
 
     if not is_staff(message.author):
         return
-
-    target = await get_replied_member(message)
-    if target is None:
-        return
-
-    me = message.guild.me
-    if me is None:
-        return
-
-    allowed, why_not = can_timeout_target(message.author, me, target)
-    if not allowed:
-        await send_mute_failed_embed(message, target, why_not)
-        return
-
-    until = get_now() + timedelta(minutes=REPLY_MUTE_MINUTES)
-    mod_reason = build_timeout_reason("Muted", message.author, reason_text or "reply command")
-    ok, failure = await set_member_timeout(target, until, mod_reason)
-    if not ok:
-        await send_mute_failed_embed(message, target, failure or "unknown error")
-        return
-
-    embed = discord.Embed(
-        title="Invictus Mute",
-        description=f"{target.mention} has been muted for `{REPLY_MUTE_MINUTES}` minute(s).",
-        color=ROLE_COLOR,
-        timestamp=get_now(),
-    )
-    embed.add_field(name="By", value=message.author.mention, inline=True)
-    embed.add_field(name="Reason", value=reason_text or "No reason provided.", inline=True)
-    await message.channel.send(embed=embed)
-
-    await send_log(
-        message.guild,
-        "Reply Mute Triggered",
-        f"**By:** {message.author.mention}\n"
-        f"**Target:** {target.mention}\n"
-        f"**Minutes:** `{REPLY_MUTE_MINUTES}`\n"
-        f"**Reason:** {reason_text or 'No reason provided.'}",
-    )
+    await handle_reply_mute_trigger(message, reason_text)
 
 
 bot.run(TOKEN)
