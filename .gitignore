@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 forlater.txt
 OPERATIONS.md
+reply_mute_patterns.txt

@@ -59,6 +59,7 @@ POST_RECORD_LIMIT = 100
 THREAD_CLOSE_HOURS = 24
 THREAD_AUTO_ARCHIVE_MINUTES = 1440
 MAX_TIMEOUT_MINUTES = 40320
+REPLY_MUTE_MINUTES = env_int("REPLY_MUTE_MINUTES", 60)
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -890,6 +891,7 @@ class ImperialCourtBot(commands.Bot):
 
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True
 bot = ImperialCourtBot(command_prefix=commands.when_mentioned, intents=intents)
 
 
@@ -1044,6 +1046,50 @@ def build_timeout_reason(action: str, user: discord.Member, reason: str | None) 
     if reason:
         return f"{base} | {reason}"
     return base
+
+
+def parse_reply_mute_message(content: str) -> str | None:
+    patterns = [
+        r"^\s*hey[\s,]+invictus\s+mute\b(.*)$",
+        r"^\s*hey[\s,]+invictus\s+silence\b(.*)$",
+        r"^\s*hey[\s,]+invictus\s+timeout\b(.*)$",
+        r"^\s*invictus\s+mute\b(.*)$",
+        r"^\s*invictus\s+silence\b(.*)$",
+        r"^\s*invictus\s+timeout\b(.*)$",
+    ]
+
+    for pattern in patterns:
+        match = re.match(pattern, content, flags=re.IGNORECASE)
+        if match is not None:
+            return match.group(1).strip()
+
+    return None
+
+
+async def get_replied_member(message: discord.Message) -> discord.Member | None:
+    if message.reference is None or message.reference.message_id is None:
+        return None
+
+    target_message = message.reference.resolved
+    if not isinstance(target_message, discord.Message):
+        try:
+            target_message = await message.channel.fetch_message(message.reference.message_id)
+        except Exception:
+            return None
+
+    if isinstance(target_message.author, discord.Member):
+        return target_message.author
+    return None
+
+
+async def send_mute_failed_embed(message: discord.Message, target: discord.Member, reason: str) -> None:
+    embed = discord.Embed(
+        title="Mute Failed",
+        description=f"Could not mute {target.mention}: {reason}.",
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    await message.reply(embed=embed, mention_author=False)
 
 
 async def apply_timeout_to_targets(
@@ -2452,6 +2498,61 @@ async def before_thread_closer() -> None:
 @bot.event
 async def on_ready() -> None:
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
+
+@bot.event
+async def on_message(message: discord.Message) -> None:
+    if message.author.bot:
+        return
+
+    if message.guild is None or not isinstance(message.author, discord.Member):
+        return
+
+    reason_text = parse_reply_mute_message(message.content)
+    if reason_text is None:
+        return
+
+    if not is_staff(message.author):
+        return
+
+    target = await get_replied_member(message)
+    if target is None:
+        return
+
+    me = message.guild.me
+    if me is None:
+        return
+
+    allowed, why_not = can_timeout_target(message.author, me, target)
+    if not allowed:
+        await send_mute_failed_embed(message, target, why_not)
+        return
+
+    until = get_now() + timedelta(minutes=REPLY_MUTE_MINUTES)
+    mod_reason = build_timeout_reason("Muted", message.author, reason_text or "reply command")
+    ok, failure = await set_member_timeout(target, until, mod_reason)
+    if not ok:
+        await send_mute_failed_embed(message, target, failure or "unknown error")
+        return
+
+    embed = discord.Embed(
+        title="Invictus Mute",
+        description=f"{target.mention} has been muted for `{REPLY_MUTE_MINUTES}` minute(s).",
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    embed.add_field(name="By", value=message.author.mention, inline=True)
+    embed.add_field(name="Reason", value=reason_text or "No reason provided.", inline=True)
+    await message.channel.send(embed=embed)
+
+    await send_log(
+        message.guild,
+        "Reply Mute Triggered",
+        f"**By:** {message.author.mention}\n"
+        f"**Target:** {target.mention}\n"
+        f"**Minutes:** `{REPLY_MUTE_MINUTES}`\n"
+        f"**Reason:** {reason_text or 'No reason provided.'}",
+    )
 
 
 bot.run(TOKEN)
