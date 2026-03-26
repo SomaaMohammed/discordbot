@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import random
 import re
@@ -13,6 +14,12 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 def env_int(name: str, default: int = 0) -> int:
     raw = os.getenv(name)
@@ -95,12 +102,12 @@ CATEGORY_CHOICES = [
 UNDEFEATED_USER_ID = 934478657114742874
 
 BOSS_STATS = [
-    {"name": "Strength", "emoji": ""},
-    {"name": "Speed", "emoji": ""},
-    {"name": "Wisdom", "emoji": ""},
-    {"name": "Charisma", "emoji": ""},
-    {"name": "Luck", "emoji": ""},
-    {"name": "Wisdom", "emoji": ""},
+    "Strength",
+    "Speed",
+    "Wisdom",
+    "Charisma",
+    "Luck",
+    "Endurance",
 ]
 
 if not TOKEN:
@@ -887,7 +894,7 @@ class ImperialCourtBot(commands.Bot):
         self.tree.add_command(fun_group, guild=guild)
         self.add_view(AnonymousAnswerView())
         synced = await self.tree.sync(guild=guild)
-        print(f"Synced {len(synced)} command(s) to guild {TEST_GUILD_ID}")
+        logger.info("Synced %s command(s) to guild %s", len(synced), TEST_GUILD_ID)
         auto_poster.start()
         thread_closer.start()
 
@@ -2477,12 +2484,12 @@ async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -
 
     # Generate fake stats for both players, with max stats for the undefeated user.
     p1_stats = {
-        stat["name"]: (100 if player1.id == UNDEFEATED_USER_ID else random.randint(1, 100))
-        for stat in BOSS_STATS
+        stat_name: (100 if player1.id == UNDEFEATED_USER_ID else random.randint(1, 100))
+        for stat_name in BOSS_STATS
     }
     p2_stats = {
-        stat["name"]: (100 if player2.id == UNDEFEATED_USER_ID else random.randint(1, 100))
-        for stat in BOSS_STATS
+        stat_name: (100 if player2.id == UNDEFEATED_USER_ID else random.randint(1, 100))
+        for stat_name in BOSS_STATS
     }
 
     # Battle description
@@ -2543,8 +2550,8 @@ async def auto_poster() -> None:
             "Court Question Auto-Posted",
             f"**Channel:** {channel.mention}\n**Category:** `{chosen_category}`\n**Question:** {question}",
         )
-    except Exception as e:
-        print(f"Auto-post failed: {e}")
+    except Exception:
+        logger.exception("Auto-post failed")
 
 
 @auto_poster.before_loop
@@ -2586,7 +2593,7 @@ async def before_thread_closer() -> None:
 
 @bot.event
 async def on_ready() -> None:
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    logger.info("Logged in as %s (ID: %s)", bot.user, bot.user.id if bot.user else "unknown")
 
 
 @bot.event
