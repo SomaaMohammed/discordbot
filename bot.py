@@ -603,7 +603,6 @@ class ClosedAnswerView(discord.ui.View):
         button = discord.ui.Button(
             label="Court Inquiry Closed",
             style=discord.ButtonStyle.secondary,
-            emoji="",
             disabled=True,
         )
         self.add_item(button)
@@ -807,7 +806,6 @@ class AnonymousAnswerView(discord.ui.View):
     @discord.ui.button(
         label="Answer Anonymously",
         style=discord.ButtonStyle.secondary,
-        emoji="",
         custom_id="court:anonymous_answer",
     )
     async def anonymous_answer_button(
