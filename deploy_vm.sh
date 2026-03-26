@@ -43,10 +43,16 @@ git pull --ff-only origin "$BRANCH"
 source "$VENV_DIR/bin/activate"
 
 echo "==> Install/update Python dependencies"
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
 echo "==> Restart service"
 sudo systemctl restart "$SERVICE_NAME"
+
+if ! sudo systemctl is-active --quiet "$SERVICE_NAME"; then
+  echo "Error: service '$SERVICE_NAME' is not active after restart." >&2
+  sudo journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true
+  exit 1
+fi
 
 echo "==> Service status"
 sudo systemctl --no-pager --full status "$SERVICE_NAME"

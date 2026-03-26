@@ -8,9 +8,15 @@ KEEP_DAYS="${KEEP_DAYS:-14}"
 GCS_BUCKET="${GCS_BUCKET:-}"
 
 mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
 
 if ! command -v sqlite3 >/dev/null 2>&1; then
   echo "sqlite3 is required but not installed."
+  exit 1
+fi
+
+if [[ ! -f "$DB_FILE" ]]; then
+  echo "Database file not found: $DB_FILE"
   exit 1
 fi
 

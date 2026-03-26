@@ -1,10 +1,12 @@
 import asyncio
+import io
 import json
 import logging
 import os
 import random
 import re
 import sqlite3
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -110,12 +112,13 @@ BOSS_STATS = [
     "Endurance",
 ]
 
-if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN is missing in .env")
-if not TEST_GUILD_ID:
-    raise RuntimeError("TEST_GUILD_ID is missing in .env")
-if not COURT_CHANNEL_ID:
-    raise RuntimeError("COURT_CHANNEL_ID is missing in .env")
+def validate_runtime_config() -> None:
+    if not TOKEN:
+        raise RuntimeError("DISCORD_TOKEN is missing in .env")
+    if not TEST_GUILD_ID:
+        raise RuntimeError("TEST_GUILD_ID is missing in .env")
+    if not COURT_CHANNEL_ID:
+        raise RuntimeError("COURT_CHANNEL_ID is missing in .env")
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -251,9 +254,12 @@ def get_state() -> dict:
             "channel_id": COURT_CHANNEL_ID,
             "log_channel_id": LOG_CHANNEL_ID_ENV,
             "last_posted_date": None,
+            "dry_run_auto_post": False,
+            "last_dry_run_date": None,
             "history": [],
             "used_questions": [],
             "posts": [],
+            "metrics": {},
         },
     )
 
@@ -263,9 +269,13 @@ def get_state() -> dict:
     state.setdefault("channel_id", COURT_CHANNEL_ID)
     state.setdefault("log_channel_id", LOG_CHANNEL_ID_ENV)
     state.setdefault("last_posted_date", None)
+    state.setdefault("dry_run_auto_post", False)
+    state.setdefault("last_dry_run_date", None)
     state.setdefault("history", [])
     state.setdefault("used_questions", [])
     state.setdefault("posts", [])
+    state.setdefault("metrics", {})
+    state["metrics"] = ensure_metrics_shape(state.get("metrics", {}))
 
     if state.get("channel_id", 0) == 0:
         state["channel_id"] = COURT_CHANNEL_ID
@@ -286,7 +296,65 @@ def save_state(state: dict) -> None:
     state["used_questions"] = used
 
     state["posts"] = state.get("posts", [])[-POST_RECORD_LIMIT:]
+    state["metrics"] = ensure_metrics_shape(state.get("metrics", {}))
     save_json(STATE_FILE, state)
+
+
+def ensure_metrics_shape(metrics: dict) -> dict:
+    metrics = metrics if isinstance(metrics, dict) else {}
+    metrics.setdefault("command_usage", {})
+    metrics.setdefault("command_failures", {})
+    metrics.setdefault("posts_by_category", {})
+    metrics.setdefault("posts_total", 0)
+    metrics.setdefault("posts_auto", 0)
+    metrics.setdefault("posts_manual", 0)
+    metrics.setdefault("custom_posts", 0)
+    metrics.setdefault("answers_total", 0)
+    metrics.setdefault("last_successful_auto_post", None)
+    return metrics
+
+
+def increment_counter(counter_map: dict, key: str) -> None:
+    counter_map[key] = int(counter_map.get(key, 0)) + 1
+
+
+def record_command_metric(command_name: str, success: bool = True) -> None:
+    state = get_state()
+    metrics = state.get("metrics", {})
+    usage = metrics.setdefault("command_usage", {})
+    increment_counter(usage, command_name)
+    if not success:
+        failures = metrics.setdefault("command_failures", {})
+        increment_counter(failures, command_name)
+    state["metrics"] = metrics
+    save_state(state)
+
+
+def record_post_metric(category: str, source: str) -> None:
+    state = get_state()
+    metrics = state.get("metrics", {})
+    by_category = metrics.setdefault("posts_by_category", {})
+    increment_counter(by_category, category)
+    metrics["posts_total"] = int(metrics.get("posts_total", 0)) + 1
+
+    if source == "auto":
+        metrics["posts_auto"] = int(metrics.get("posts_auto", 0)) + 1
+        metrics["last_successful_auto_post"] = iso_now()
+    elif source == "manual":
+        metrics["posts_manual"] = int(metrics.get("posts_manual", 0)) + 1
+    elif source == "custom":
+        metrics["custom_posts"] = int(metrics.get("custom_posts", 0)) + 1
+
+    state["metrics"] = metrics
+    save_state(state)
+
+
+def record_answer_metric() -> None:
+    state = get_state()
+    metrics = state.get("metrics", {})
+    metrics["answers_total"] = int(metrics.get("answers_total", 0)) + 1
+    state["metrics"] = metrics
+    save_state(state)
 
 
 def get_questions() -> dict:
@@ -604,6 +672,24 @@ async def send_log(guild: discord.Guild, title: str, description: str) -> None:
     await channel.send(embed=embed)
 
 
+async def send_failure_alert(
+    guild: discord.Guild | None,
+    title: str,
+    error: Exception,
+    context: str,
+) -> None:
+    logger.exception("%s | %s", title, context)
+    if guild is None:
+        return
+
+    description = (
+        f"**Context:** {context}\n"
+        f"**Error Type:** `{type(error).__name__}`\n"
+        f"**Error:** `{str(error)[:1000]}`"
+    )
+    await send_log(guild, title, description)
+
+
 class ClosedAnswerView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -726,6 +812,353 @@ def status_text() -> str:
     )
 
 
+def next_auto_post_time(state: dict, now: datetime) -> datetime:
+    next_run = now.replace(
+        hour=state.get("hour", 20),
+        minute=state.get("minute", 0),
+        second=0,
+        microsecond=0,
+    )
+    if next_run <= now:
+        next_run += timedelta(days=1)
+    return next_run
+
+
+def format_duration(delta: timedelta) -> str:
+    total_seconds = max(int(delta.total_seconds()), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+    return f"{hours}h {minutes}m"
+
+
+def count_open_and_overdue_posts(posts: list[dict], now: datetime) -> tuple[int, int]:
+    open_posts = [post for post in posts if not post.get("closed", False)]
+    overdue_posts = 0
+    for post in open_posts:
+        posted_at = parse_iso(post.get("posted_at"))
+        if posted_at and now - posted_at >= timedelta(hours=THREAD_CLOSE_HOURS):
+            overdue_posts += 1
+    return len(open_posts), overdue_posts
+
+
+def find_missing_permissions(
+    channel: discord.TextChannel | None,
+    member: discord.Member | None,
+) -> list[str]:
+    if channel is None or member is None:
+        return []
+
+    required_permissions = [
+        ("view_channel", "View Channel"),
+        ("send_messages", "Send Messages"),
+        ("embed_links", "Embed Links"),
+        ("create_public_threads", "Create Public Threads"),
+        ("send_messages_in_threads", "Send Messages In Threads"),
+    ]
+    permissions = channel.permissions_for(member)
+
+    return [label for attr, label in required_permissions if not getattr(permissions, attr, False)]
+
+
+def build_next_run_text(state: dict, now: datetime) -> tuple[str, str]:
+    mode = state.get("mode", "manual")
+    if mode != "auto":
+        return mode, f"Not scheduled while mode is `{mode}`"
+
+    next_run = next_auto_post_time(state, now)
+    next_run_unix = int(next_run.timestamp())
+    next_run_text = (
+        f"<t:{next_run_unix}:F> (<t:{next_run_unix}:R>)"
+        f" - in `{format_duration(next_run - now)}`"
+    )
+    return mode, next_run_text
+
+
+def build_health_warnings(
+    state: dict,
+    target_channel: discord.TextChannel | None,
+    log_channel: discord.TextChannel | None,
+    missing_permissions: list[str],
+    overdue_open_posts: int,
+) -> list[str]:
+    warnings = []
+    if target_channel is None:
+        warnings.append("Court channel is not reachable")
+    if state.get("log_channel_id", 0) and log_channel is None:
+        warnings.append("Log channel is configured but not reachable")
+    if missing_permissions:
+        warnings.append("Bot is missing permissions in court channel")
+    if overdue_open_posts > 0:
+        warnings.append(f"{overdue_open_posts} open thread(s) appear overdue for auto-close")
+    return warnings
+
+
+def resolve_bot_member(guild: discord.Guild) -> discord.Member | None:
+    me = guild.me
+    if me is None and bot.user is not None:
+        return guild.get_member(bot.user.id)
+    return me
+
+
+def format_channel_health_texts(
+    state: dict,
+    target_channel: discord.TextChannel | None,
+    log_channel: discord.TextChannel | None,
+) -> tuple[str, str]:
+    channel_text = target_channel.mention if target_channel else "Not found"
+    if not state.get("log_channel_id", 0):
+        return channel_text, "Disabled"
+    return channel_text, log_channel.mention if log_channel else "Configured but not found"
+
+
+def add_warnings_field(embed: discord.Embed, warnings: list[str]) -> None:
+    if warnings:
+        embed.add_field(name="Warnings", value="\n".join(f"- {item}" for item in warnings), inline=False)
+        return
+    embed.add_field(name="Warnings", value="None.", inline=False)
+
+
+async def build_health_embed(guild: discord.Guild) -> discord.Embed:
+    state = get_state()
+    questions = get_questions()
+    metrics = state.get("metrics", {})
+    now = get_now()
+
+    open_posts_count, overdue_open_posts = count_open_and_overdue_posts(state.get("posts", []), now)
+
+    target_channel = await get_target_channel(guild)
+    log_channel = await get_log_channel(guild)
+
+    missing_permissions = find_missing_permissions(target_channel, resolve_bot_member(guild))
+
+    mode, next_run_text = build_next_run_text(state, now)
+
+    db_exists = os.path.exists(DB_FILE)
+    db_size_bytes = os.path.getsize(DB_FILE) if db_exists else 0
+    db_size_kb = db_size_bytes / 1024
+    total_questions = sum(len(items) for items in questions.values())
+
+    warnings = build_health_warnings(
+        state,
+        target_channel,
+        log_channel,
+        missing_permissions,
+        overdue_open_posts,
+    )
+
+    overall = "Healthy" if not warnings else "Attention Needed"
+
+    embed = discord.Embed(
+        title="Court Health Check",
+        description=f"**Overall:** `{overall}`\n**Timezone:** `{TIMEZONE_NAME}`\n**Now:** `{now.strftime('%Y-%m-%d %H:%M:%S')}`",
+        color=ROLE_COLOR,
+        timestamp=now,
+    )
+
+    channel_text, log_channel_text = format_channel_health_texts(state, target_channel, log_channel)
+
+    embed.add_field(
+        name="Scheduling",
+        value=(
+            f"**Mode:** `{mode}`\n"
+            f"**Dry Run:** `{'enabled' if state.get('dry_run_auto_post', False) else 'disabled'}`\n"
+            f"**Auto Time:** `{state.get('hour', 20):02d}:{state.get('minute', 0):02d}`\n"
+            f"**Next Auto-Post:** {next_run_text}\n"
+            f"**Last Posted Date:** `{state.get('last_posted_date') or 'Never'}`\n"
+            f"**Last Successful Auto-Post:** `{metrics.get('last_successful_auto_post') or 'Never'}`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Channels",
+        value=(
+            f"**Court Channel:** {channel_text}\n"
+            f"**Log Channel:** {log_channel_text}"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Tasks",
+        value=(
+            f"**Auto Poster Loop:** `{'running' if auto_poster.is_running() else 'stopped'}`\n"
+            f"**Thread Closer Loop:** `{'running' if thread_closer.is_running() else 'stopped'}`"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Data",
+        value=(
+            f"**Questions:** `{total_questions}`\n"
+            f"**Used Pool:** `{len(state.get('used_questions', []))}`\n"
+            f"**Open Posts:** `{open_posts_count}`\n"
+            f"**DB:** `{'present' if db_exists else 'missing'}` ({db_size_kb:.1f} KB)"
+        ),
+        inline=True,
+    )
+
+    if missing_permissions:
+        embed.add_field(
+            name="Missing Permissions",
+            value="\n".join(f"- {item}" for item in missing_permissions),
+            inline=False,
+        )
+
+    add_warnings_field(embed, warnings)
+
+    return embed
+
+
+def build_analytics_embed() -> discord.Embed:
+    state = get_state()
+    metrics = state.get("metrics", {})
+    posts = state.get("posts", [])
+    answers = get_answers()
+    today = get_now().strftime("%Y-%m-%d")
+
+    posts_today = sum(1 for post in posts if str(post.get("posted_at", "")).startswith(today))
+    open_posts = sum(1 for post in posts if not post.get("closed", False))
+    total_answers = sum(len(bucket.get("users", {})) for bucket in answers.values())
+    post_count = max(len(posts), 1)
+    average_answers = total_answers / post_count
+
+    by_category = metrics.get("posts_by_category", {})
+    top_categories = sorted(by_category.items(), key=lambda item: int(item[1]), reverse=True)[:5]
+    category_lines = "\n".join(f"- `{cat}`: `{count}`" for cat, count in top_categories) or "No data yet."
+
+    usage = metrics.get("command_usage", {})
+    top_commands = sorted(usage.items(), key=lambda item: int(item[1]), reverse=True)[:8]
+    command_lines = "\n".join(f"- `{name}`: `{count}`" for name, count in top_commands) or "No command usage yet."
+
+    embed = discord.Embed(
+        title="Court Analytics",
+        description="Usage and engagement snapshot.",
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    embed.add_field(
+        name="Posts",
+        value=(
+            f"**Lifetime Total:** `{metrics.get('posts_total', 0)}`\n"
+            f"**Auto Posts:** `{metrics.get('posts_auto', 0)}`\n"
+            f"**Manual Posts:** `{metrics.get('posts_manual', 0)}`\n"
+            f"**Custom Posts:** `{metrics.get('custom_posts', 0)}`\n"
+            f"**Posts Today (recent window):** `{posts_today}`\n"
+            f"**Open Posts:** `{open_posts}`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Engagement",
+        value=(
+            f"**Tracked Answers:** `{metrics.get('answers_total', 0)}`\n"
+            f"**Current Answer Records:** `{total_answers}`\n"
+            f"**Avg Answers per Post (recent window):** `{average_answers:.2f}`"
+        ),
+        inline=False,
+    )
+    embed.add_field(name="Top Categories", value=category_lines, inline=True)
+    embed.add_field(name="Top Commands", value=command_lines, inline=True)
+    return embed
+
+
+def question_fingerprint(question: str) -> str:
+    lowered = question.casefold()
+    return " ".join(re.findall(r"[a-z0-9']+", lowered))
+
+
+def collect_question_duplicates(questions: dict) -> tuple[list[tuple[str, str]], list[str]]:
+    seen: dict[str, tuple[str, str]] = {}
+    duplicates: list[str] = []
+    all_items: list[tuple[str, str]] = []
+
+    for category, items in questions.items():
+        for question in items:
+            fp = question_fingerprint(question)
+            all_items.append((category, question))
+            if fp in seen:
+                previous_category, previous_question = seen[fp]
+                duplicates.append(
+                    f"- `{category}` duplicates `{previous_category}`: {question}"
+                    if question != previous_question
+                    else f"- `{category}` duplicate: {question}"
+                )
+            else:
+                seen[fp] = (category, question)
+
+    return all_items, duplicates
+
+
+def find_near_duplicates(all_items: list[tuple[str, str]]) -> list[str]:
+    near_duplicates: list[str] = []
+    limit = min(len(all_items), 80)
+    for i in range(limit):
+        cat_a, q_a = all_items[i]
+        fp_a = question_fingerprint(q_a)
+        for j in range(i + 1, limit):
+            cat_b, q_b = all_items[j]
+            fp_b = question_fingerprint(q_b)
+            if fp_a == fp_b:
+                continue
+            score = SequenceMatcher(None, fp_a, fp_b).ratio()
+            if score >= 0.92:
+                near_duplicates.append(f"- `{cat_a}` vs `{cat_b}` ({score:.2f}): {q_a}")
+            if len(near_duplicates) >= 10:
+                return near_duplicates
+    return near_duplicates
+
+
+def find_question_length_outliers(all_items: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
+    short_questions = [f"- `{cat}`: {q}" for cat, q in all_items if len(q) < 20][:10]
+    long_questions = [f"- `{cat}`: {q}" for cat, q in all_items if len(q) > 160][:10]
+    return short_questions, long_questions
+
+
+def build_question_audit_report() -> str:
+    questions = get_questions()
+    all_items, duplicates = collect_question_duplicates(questions)
+    near_duplicates = find_near_duplicates(all_items)
+    short_questions, long_questions = find_question_length_outliers(all_items)
+
+    lines = ["**Question Audit Report**"]
+    lines.append(f"**Total Questions:** `{len(all_items)}`")
+    lines.append(f"**Exact Duplicates:** `{len(duplicates)}`")
+    if duplicates:
+        lines.append("\n".join(duplicates[:10]))
+    lines.append(f"**Near Duplicates:** `{len(near_duplicates)}`")
+    if near_duplicates:
+        lines.append("\n".join(near_duplicates))
+    lines.append(f"**Very Short (<20 chars):** `{len(short_questions)}`")
+    if short_questions:
+        lines.append("\n".join(short_questions))
+    lines.append(f"**Very Long (>160 chars):** `{len(long_questions)}`")
+    if long_questions:
+        lines.append("\n".join(long_questions))
+
+    return "\n".join(lines)
+
+
+def merge_imported_state(imported: dict) -> dict:
+    base = get_state()
+    allowed_keys = {
+        "mode",
+        "hour",
+        "minute",
+        "channel_id",
+        "log_channel_id",
+        "last_posted_date",
+        "dry_run_auto_post",
+        "last_dry_run_date",
+        "history",
+        "used_questions",
+        "posts",
+        "metrics",
+    }
+    for key in allowed_keys:
+        if key in imported:
+            base[key] = imported[key]
+    return base
+
+
 class AnonymousAnswerModal(discord.ui.Modal, title="Anonymous Court Answer"):
     answer = discord.ui.TextInput(
         label="Your answer",
@@ -799,6 +1232,7 @@ class AnonymousAnswerModal(discord.ui.Modal, title="Anonymous Court Answer"):
 
         sent = await thread.send(embed=embed)
         mark_user_answered(question_message_id, user_id, sent.id)
+        record_answer_metric()
 
         await interaction.response.send_message(
             f"Your anonymous answer has been posted in {thread.mention}.",
@@ -843,6 +1277,7 @@ async def post_question(
     channel: discord.TextChannel,
     category: str | None = None,
     randomize: bool = True,
+    source: str = "manual",
 ) -> tuple[str, str]:
     chosen_category, question = pick_question(category, randomize)
     embed = build_embed(chosen_category, question)
@@ -878,6 +1313,7 @@ async def post_question(
     upsert_post_record(record)
 
     register_used_question(question)
+    record_post_metric(chosen_category, source)
 
     state = get_state()
     state["last_posted_date"] = get_now().strftime("%Y-%m-%d")
@@ -1807,7 +2243,102 @@ async def admin_unmuteall(
 async def court_status(interaction: discord.Interaction) -> None:
     if not await require_staff(interaction):
         return
+    record_command_metric("court.status")
     await interaction.response.send_message(status_text(), ephemeral=True)
+
+
+@court_group.command(name="health", description="Show detailed bot health diagnostics")
+async def court_health(interaction: discord.Interaction) -> None:
+    if not await require_staff(interaction):
+        return
+
+    if interaction.guild is None:
+        await interaction.response.send_message(MSG_USE_IN_SERVER, ephemeral=True)
+        return
+
+    record_command_metric("court.health")
+    embed = await build_health_embed(interaction.guild)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@court_group.command(name="analytics", description="Show usage and engagement analytics")
+async def court_analytics(interaction: discord.Interaction) -> None:
+    if not await require_staff(interaction):
+        return
+
+    record_command_metric("court.analytics")
+    await interaction.response.send_message(embed=build_analytics_embed(), ephemeral=True)
+
+
+@court_group.command(name="dryrun", description="Enable or disable auto-post dry run mode")
+@app_commands.describe(enabled="When enabled, scheduled auto-post logs what it would post without posting")
+async def court_dryrun(interaction: discord.Interaction, enabled: bool) -> None:
+    if not await require_staff(interaction):
+        return
+
+    state = get_state()
+    state["dry_run_auto_post"] = enabled
+    if not enabled:
+        state["last_dry_run_date"] = None
+    save_state(state)
+
+    record_command_metric("court.dryrun")
+    await interaction.response.send_message(
+        f"Auto-post dry run is now `{'enabled' if enabled else 'disabled'}`.",
+        ephemeral=True,
+    )
+
+
+@questions_group.command(name="audit", description="Audit questions for duplicates and quality issues")
+async def court_questions_audit(interaction: discord.Interaction) -> None:
+    if not await require_staff(interaction):
+        return
+
+    report = build_question_audit_report()
+    record_command_metric("court.questions.audit")
+    await interaction.response.send_message(report[:1900], ephemeral=True)
+
+
+@court_group.command(name="exportstate", description="Export current state as a JSON file")
+async def court_exportstate(interaction: discord.Interaction) -> None:
+    if not await require_staff(interaction):
+        return
+
+    payload = json.dumps(get_state(), ensure_ascii=False, indent=2)
+    file_obj = discord.File(io.BytesIO(payload.encode("utf-8")), filename="court_state_export.json")
+    record_command_metric("court.exportstate")
+    await interaction.response.send_message("State export attached.", file=file_obj, ephemeral=True)
+
+
+@court_group.command(name="importstate", description="Import state from a JSON attachment")
+@app_commands.describe(file="JSON file previously exported by this bot", confirm="Type CONFIRM to apply")
+async def court_importstate(
+    interaction: discord.Interaction,
+    file: discord.Attachment,
+    confirm: str,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    if not is_confirmed(confirm):
+        await interaction.response.send_message(MSG_CONFIRM_REQUIRED, ephemeral=True)
+        return
+
+    try:
+        raw = await file.read()
+        imported = json.loads(raw.decode("utf-8"))
+    except Exception:
+        await interaction.response.send_message("Failed to parse state JSON file.", ephemeral=True)
+        return
+
+    if not isinstance(imported, dict):
+        await interaction.response.send_message("Imported state must be a JSON object.", ephemeral=True)
+        return
+
+    merged = merge_imported_state(imported)
+    save_state(merged)
+    record_command_metric("court.importstate")
+    await interaction.response.send_message("State imported successfully.", ephemeral=True)
 
 
 @admin_group.command(name="help", description="Show all available commands")
@@ -1820,6 +2351,11 @@ async def admin_help(interaction: discord.Interaction) -> None:
 
 **Court Control Commands**
 `/court status` — Show current bot status
+`/court health` — Show detailed bot health diagnostics
+`/court analytics` — Show usage and engagement analytics
+`/court dryrun <enabled>` — Toggle scheduled auto-post dry run mode
+`/court exportstate` — Export bot state JSON
+`/court importstate <file> <confirm>` — Import bot state JSON (CONFIRM required)
 `/court mode <mode>` — Set bot mode (off, manual, auto)
 `/court channel <channel>` — Set court post channel
 `/court logchannel [channel]` — Set staff log channel (leave empty to disable)
@@ -1832,6 +2368,7 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `/court editquestion <category> <old> <new>` — Edit a question in a category
 `/court questions count [category]` — Count questions (opt: by category)
 `/court questions unused [category]` — Show unused questions (opt: by category)
+`/court questions audit` — Audit duplicates and question quality issues
 `/court resethistory` — Clear history and used question pool
 
 **Court Posts**
@@ -2250,6 +2787,7 @@ async def court_resethistory(interaction: discord.Interaction) -> None:
 @court_group.command(name="post", description="Post a question now")
 @app_commands.describe(category="Optional category", randomize="Post randomly or pick the first available question")
 @app_commands.choices(category=CATEGORY_CHOICES)
+@app_commands.checks.cooldown(1, 20.0)
 async def court_post(
     interaction: discord.Interaction,
     category: app_commands.Choice[str] | None = None,
@@ -2270,11 +2808,17 @@ async def court_post(
         return
 
     try:
-        chosen_category, question = await post_question(channel, category.value if category else None, randomize)
+        chosen_category, question = await post_question(
+            channel,
+            category.value if category else None,
+            randomize,
+            source="manual",
+        )
     except ValueError as e:
         await interaction.followup.send(str(e), ephemeral=True)
         return
 
+    record_command_metric("court.post")
     await interaction.followup.send(
         f"Posted in {channel.mention}\n**Category:** `{chosen_category}`\n**Question:** {question}",
         ephemeral=True,
@@ -2289,6 +2833,7 @@ async def court_post(
 
 @court_group.command(name="custom", description="Post a custom question right now")
 @app_commands.describe(question="Your custom court question")
+@app_commands.checks.cooldown(1, 20.0)
 async def court_custom(interaction: discord.Interaction, question: str) -> None:
     if not await require_staff(interaction):
         return
@@ -2339,11 +2884,13 @@ async def court_custom(interaction: discord.Interaction, question: str) -> None:
         "close_reason": None,
     }
     upsert_post_record(record)
+    record_post_metric("custom", "custom")
 
     state = get_state()
     state["last_posted_date"] = get_now().strftime("%Y-%m-%d")
     save_state(state)
 
+    record_command_metric("court.custom")
     await interaction.followup.send(
         f"Custom question posted in {channel.mention}.",
         ephemeral=True,
@@ -2358,6 +2905,7 @@ async def court_custom(interaction: discord.Interaction, question: str) -> None:
 
 @court_group.command(name="close", description="Close the latest court inquiry or a specific one by message ID")
 @app_commands.describe(message_id="Optional QOTD message ID to close")
+@app_commands.checks.cooldown(1, 10.0)
 async def court_close(
     interaction: discord.Interaction,
     message_id: str | None = None,
@@ -2378,6 +2926,7 @@ async def court_close(
         return
 
     ok, message = await close_court_post(record, "manual")
+    record_command_metric("court.close")
 
     await interaction.response.send_message(message, ephemeral=True)
 
@@ -2532,6 +3081,9 @@ async def auto_poster() -> None:
     if state["last_posted_date"] == today:
         return
 
+    if state.get("dry_run_auto_post", False) and state.get("last_dry_run_date") == today:
+        return
+
     if now.hour != state["hour"] or now.minute != state["minute"]:
         return
 
@@ -2544,14 +3096,25 @@ async def auto_poster() -> None:
         return
 
     try:
-        chosen_category, question = await post_question(channel)
+        if state.get("dry_run_auto_post", False):
+            chosen_category, question = pick_question(None, True)
+            state["last_dry_run_date"] = today
+            save_state(state)
+            await send_log(
+                guild,
+                "Court Auto-Post Dry Run",
+                f"**Channel:** {channel.mention}\n**Category:** `{chosen_category}`\n**Question:** {question}",
+            )
+            return
+
+        chosen_category, question = await post_question(channel, source="auto")
         await send_log(
             guild,
             "Court Question Auto-Posted",
             f"**Channel:** {channel.mention}\n**Category:** `{chosen_category}`\n**Question:** {question}",
         )
-    except Exception:
-        logger.exception("Auto-post failed")
+    except Exception as error:
+        await send_failure_alert(guild, "Court Auto-Post Failed", error, "auto_poster loop")
 
 
 @auto_poster.before_loop
@@ -2577,13 +3140,16 @@ async def thread_closer() -> None:
             continue
 
         if now - posted_at >= timedelta(hours=THREAD_CLOSE_HOURS):
-            ok, _ = await close_court_post(record, "expired")
-            if ok:
-                await send_log(
-                    guild,
-                    "Court Inquiry Auto-Closed",
-                    f"**Message ID:** `{record['message_id']}`\n**Question:** {record['question']}",
-                )
+            try:
+                ok, _ = await close_court_post(record, "expired")
+                if ok:
+                    await send_log(
+                        guild,
+                        "Court Inquiry Auto-Closed",
+                        f"**Message ID:** `{record['message_id']}`\n**Question:** {record['question']}",
+                    )
+            except Exception as error:
+                await send_failure_alert(guild, "Court Thread Auto-Close Failed", error, "thread_closer loop")
 
 
 @thread_closer.before_loop
@@ -2594,6 +3160,40 @@ async def before_thread_closer() -> None:
 @bot.event
 async def on_ready() -> None:
     logger.info("Logged in as %s (ID: %s)", bot.user, bot.user.id if bot.user else "unknown")
+
+
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError,
+) -> None:
+    command_name = interaction.command.qualified_name if interaction.command else "unknown"
+    record_command_metric(command_name, success=False)
+
+    if isinstance(error, app_commands.CommandOnCooldown):
+        retry_after = int(error.retry_after)
+        message = f"This command is on cooldown. Try again in `{retry_after}` second(s)."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+        return
+
+    underlying = error.original if isinstance(error, app_commands.CommandInvokeError) else error
+
+    if interaction.guild is not None and isinstance(underlying, Exception):
+        await send_failure_alert(
+            interaction.guild,
+            "App Command Failed",
+            underlying,
+            f"/{command_name} by {interaction.user}",
+        )
+
+    user_message = "The command failed unexpectedly and was logged."
+    if interaction.response.is_done():
+        await interaction.followup.send(user_message, ephemeral=True)
+    else:
+        await interaction.response.send_message(user_message, ephemeral=True)
 
 
 @bot.event
@@ -2624,4 +3224,6 @@ async def on_message(message: discord.Message) -> None:
     await handle_reply_mute_trigger(message, reason_text)
 
 
-bot.run(TOKEN)
+if __name__ == "__main__":
+    validate_runtime_config()
+    bot.run(TOKEN)

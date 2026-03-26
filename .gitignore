@@ -6,3 +6,8 @@ forlater.txt
 OPERATIONS.md
 invictus_trigger_patterns.txt
 court.db
+*.db-wal
+*.db-shm
+backups/
+*.log
+.pytest_cache/

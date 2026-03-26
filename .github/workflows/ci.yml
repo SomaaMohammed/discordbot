@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Validate JSON files
+        run: |
+          python -m json.tool questions.json > /dev/null
+          python -m json.tool answers.json > /dev/null
+          python -m json.tool state.json > /dev/null
+
+      - name: Compile check
+        run: python -m py_compile bot.py
+
+      - name: Run tests
+        run: pytest -q
