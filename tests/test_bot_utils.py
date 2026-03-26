@@ -69,6 +69,7 @@ def test_on_message_prioritizes_exact_emperor_lock_trigger(monkeypatch) -> None:
     class DummyTextChannel:
         def __init__(self) -> None:
             self.send = AsyncMock()
+            self.id = bot.ROYAL_ALERT_CHANNEL_ID
 
     class DummyGuild:
         pass
@@ -107,6 +108,7 @@ def test_on_message_emperor_mention_without_lock_phrase_sends_response(monkeypat
     class DummyTextChannel:
         def __init__(self) -> None:
             self.send = AsyncMock()
+            self.id = bot.ROYAL_ALERT_CHANNEL_ID
 
     class DummyGuild:
         pass
@@ -119,23 +121,66 @@ def test_on_message_emperor_mention_without_lock_phrase_sends_response(monkeypat
             self.content = "sammy is online"
 
     lock_mock = AsyncMock()
+    royal_mock = AsyncMock()
     monkeypatch.setattr(bot.discord, "Member", DummyMember)
     monkeypatch.setattr(bot.discord, "TextChannel", DummyTextChannel)
     monkeypatch.setattr(bot, "is_staff", lambda _: True)
     monkeypatch.setattr(bot, "lock_channel_silently", lock_mock)
-    monkeypatch.setattr(bot, "handle_royal_presence_announcement", AsyncMock())
+    monkeypatch.setattr(bot, "handle_royal_presence_announcement", royal_mock)
 
     message = DummyMessage()
     asyncio.run(bot.on_message(message))
 
     lock_mock.assert_not_called()
     message.channel.send.assert_awaited_once()
+    royal_mock.assert_awaited_once_with(message)
     send_args = message.channel.send.await_args
     assert send_args.args == (bot.EMPEROR_MENTION_RESPONSE,)
     assert "allowed_mentions" in send_args.kwargs
     assert send_args.kwargs["allowed_mentions"].everyone is False
     assert send_args.kwargs["allowed_mentions"].users is False
     assert send_args.kwargs["allowed_mentions"].roles is False
+
+
+def test_on_message_does_not_send_royal_or_mention_messages_outside_target_channel(monkeypatch) -> None:
+    class DummyRole:
+        def __init__(self, role_id: int) -> None:
+            self.id = role_id
+
+    class DummyMember:
+        def __init__(self) -> None:
+            self.bot = False
+            self.roles = [DummyRole(bot.EMPEROR_ROLE_ID)]
+
+    class DummyTextChannel:
+        def __init__(self) -> None:
+            self.send = AsyncMock()
+            self.id = 999
+
+    class DummyGuild:
+        pass
+
+    class DummyMessage:
+        def __init__(self) -> None:
+            self.author = DummyMember()
+            self.guild = DummyGuild()
+            self.channel = DummyTextChannel()
+            self.content = "sammy is online"
+
+    lock_mock = AsyncMock()
+    royal_mock = AsyncMock()
+    monkeypatch.setattr(bot.discord, "Member", DummyMember)
+    monkeypatch.setattr(bot.discord, "TextChannel", DummyTextChannel)
+    monkeypatch.setattr(bot, "is_staff", lambda _: True)
+    monkeypatch.setattr(bot, "lock_channel_silently", lock_mock)
+    monkeypatch.setattr(bot, "handle_royal_presence_announcement", royal_mock)
+
+    message = DummyMessage()
+    asyncio.run(bot.on_message(message))
+
+    lock_mock.assert_not_called()
+    royal_mock.assert_not_called()
+    message.channel.send.assert_not_called()
 
 
 def test_should_announce_royal_presence_is_based_on_message_gap() -> None:

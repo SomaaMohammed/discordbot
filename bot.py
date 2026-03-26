@@ -77,6 +77,7 @@ SILENT_LOCK_SECONDS = 10
 SILENT_LOCK_EXCLUDE_ROLES = {1462082750101328029, 1461500213746204921, 1461382351874424842}  # Includes Imperial Sentinel
 EMPEROR_MENTION_RESPONSE = "He's always watching."
 ROYAL_PRESENCE_INTERVAL_HOURS = 3
+ROYAL_ALERT_CHANNEL_ID = 1461374216795328515
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -1537,6 +1538,10 @@ def is_emperor_lock_trigger(content: str) -> bool:
 
 def has_emperor_mention(content: str) -> bool:
     return re.search(r"\b(sammy|emperor)\b", content, flags=re.IGNORECASE) is not None
+
+
+def is_royal_alert_channel(channel_id: int | None) -> bool:
+    return int(channel_id or 0) == ROYAL_ALERT_CHANNEL_ID
 
 
 def get_royal_title(member: discord.Member) -> str | None:
@@ -3259,7 +3264,10 @@ async def on_message(message: discord.Message) -> None:
     if message.guild is None or not isinstance(message.author, discord.Member):
         return
 
-    await handle_royal_presence_announcement(message)
+    in_royal_alert_channel = is_royal_alert_channel(getattr(message.channel, "id", None))
+
+    if in_royal_alert_channel:
+        await handle_royal_presence_announcement(message)
 
     if is_silence_lock_trigger(message.content) or is_emperor_lock_trigger(message.content):
         if not is_staff(message.author):
@@ -3268,7 +3276,7 @@ async def on_message(message: discord.Message) -> None:
             await lock_channel_silently(message.channel, message.author, SILENT_LOCK_SECONDS)
         return
 
-    if has_emperor_mention(message.content):
+    if in_royal_alert_channel and has_emperor_mention(message.content):
         await message.channel.send(
             EMPEROR_MENTION_RESPONSE,
             allowed_mentions=discord.AllowedMentions.none(),
