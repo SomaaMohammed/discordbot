@@ -78,6 +78,7 @@ SILENT_LOCK_EXCLUDE_ROLES = {1462082750101328029, 1461500213746204921, 146138235
 EMPEROR_MENTION_RESPONSE = "He's always watching."
 ROYAL_PRESENCE_INTERVAL_HOURS = 3
 ROYAL_ALERT_CHANNEL_ID = 1461374216795328515
+ROYAL_TITLES = ("Emperor", "Empress")
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -324,6 +325,20 @@ def ensure_metrics_shape(metrics: dict) -> dict:
 
 def ensure_royal_presence_shape(royal_presence: dict) -> dict:
     royal_presence = royal_presence if isinstance(royal_presence, dict) else {}
+
+    by_title = royal_presence.get("last_message_at_by_title")
+    if not isinstance(by_title, dict):
+        by_title = {}
+    for title in ROYAL_TITLES:
+        by_title.setdefault(title, None)
+
+    # Migrate legacy single-timer state into the role-specific timer bucket.
+    legacy_last_message_at = royal_presence.get("last_message_at")
+    legacy_last_speaker = royal_presence.get("last_speaker")
+    if legacy_last_speaker in by_title and by_title.get(legacy_last_speaker) is None:
+        by_title[legacy_last_speaker] = legacy_last_message_at
+
+    royal_presence["last_message_at_by_title"] = by_title
     royal_presence.setdefault("last_message_at", None)
     royal_presence.setdefault("last_speaker", None)
     return royal_presence
@@ -332,6 +347,8 @@ def ensure_royal_presence_shape(royal_presence: dict) -> dict:
 def reset_royal_presence_timer() -> None:
     state = get_state()
     royal_presence = ensure_royal_presence_shape(state.get("royal_presence", {}))
+    for title in ROYAL_TITLES:
+        royal_presence["last_message_at_by_title"][title] = None
     royal_presence["last_message_at"] = None
     royal_presence["last_speaker"] = None
     state["royal_presence"] = royal_presence
@@ -630,6 +647,13 @@ def build_embed(category: str, question: str) -> discord.Embed:
     )
     embed.set_footer(text=f"Category: {category}")
     return embed
+
+
+def build_announcement_mentions(mention_everyone: bool) -> tuple[str | None, discord.AllowedMentions]:
+    if mention_everyone:
+        return MSG_EVERYONE_MENTION, discord.AllowedMentions(everyone=True)
+
+    return None, discord.AllowedMentions(everyone=False, users=False, roles=False)
 
 
 async def fetch_channel_by_id(channel_id: int | str) -> discord.abc.GuildChannel | discord.Thread | None:
@@ -1303,15 +1327,17 @@ async def post_question(
     category: str | None = None,
     randomize: bool = True,
     source: str = "manual",
+    mention_everyone: bool = False,
 ) -> tuple[str, str]:
     chosen_category, question = pick_question(category, randomize)
     embed = build_embed(chosen_category, question)
+    content, allowed_mentions = build_announcement_mentions(mention_everyone)
 
     sent = await channel.send(
-        content=MSG_EVERYONE_MENTION,
+        content=content,
         embed=embed,
         view=AnonymousAnswerView(),
-        allowed_mentions=discord.AllowedMentions(everyone=True),
+        allowed_mentions=allowed_mentions,
     )
     thread = await get_or_create_answer_thread(sent)
 
@@ -1575,12 +1601,13 @@ async def handle_royal_presence_announcement(message: discord.Message) -> None:
 
     state = get_state()
     royal_presence = ensure_royal_presence_shape(state.get("royal_presence", {}))
-    previous_message_at = parse_iso(royal_presence.get("last_message_at"))
+    previous_message_at = parse_iso(royal_presence["last_message_at_by_title"].get(royal_title))
 
     created_at = getattr(message, "created_at", None)
     current_message_at = created_at if created_at is not None else get_now()
     should_announce = should_announce_royal_presence(previous_message_at, current_message_at)
 
+    royal_presence["last_message_at_by_title"][royal_title] = current_message_at.isoformat()
     royal_presence["last_message_at"] = current_message_at.isoformat()
     royal_presence["last_speaker"] = royal_title
     state["royal_presence"] = royal_presence
@@ -1736,9 +1763,10 @@ class AdminSayModal(discord.ui.Modal, title="Send Announcement"):
         max_length=2000,
     )
 
-    def __init__(self, channel: discord.TextChannel):
+    def __init__(self, channel: discord.TextChannel, mention_everyone: bool = False):
         super().__init__(timeout=None)
         self.channel = channel
+        self.mention_everyone = mention_everyone
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not isinstance(interaction.user, discord.Member):
@@ -1755,10 +1783,11 @@ class AdminSayModal(discord.ui.Modal, title="Send Announcement"):
                 color=ROLE_COLOR,
                 timestamp=get_now(),
             )
+            content, allowed_mentions = build_announcement_mentions(self.mention_everyone)
             await self.channel.send(
-                content=MSG_EVERYONE_MENTION,
+                content=content,
                 embed=embed,
-                allowed_mentions=discord.AllowedMentions(everyone=True),
+                allowed_mentions=allowed_mentions,
             )
         except discord.Forbidden:
             await interaction.response.send_message("I do not have permission to send messages there.", ephemeral=True)
@@ -1778,15 +1807,16 @@ class AdminSayModal(discord.ui.Modal, title="Send Announcement"):
 
 
 @admin_group.command(name="say", description="Send an admin announcement in a channel")
-@app_commands.describe(channel="Target channel")
+@app_commands.describe(channel="Target channel", mention_everyone="Whether to ping @everyone (default: false)")
 async def admin_say(
     interaction: discord.Interaction,
     channel: discord.TextChannel,
+    mention_everyone: bool = False,
 ) -> None:
     if not await require_staff(interaction):
         return
 
-    await interaction.response.send_modal(AdminSayModal(channel))
+    await interaction.response.send_modal(AdminSayModal(channel, mention_everyone=mention_everyone))
 
 
 @admin_group.command(name="purge", description="Delete recent messages in this channel")
@@ -2902,6 +2932,7 @@ async def court_post(
             category.value if category else None,
             randomize,
             source="manual",
+            mention_everyone=True,
         )
     except ValueError as e:
         await interaction.followup.send(str(e), ephemeral=True)
@@ -2944,11 +2975,12 @@ async def court_custom(interaction: discord.Interaction, question: str) -> None:
         return
 
     embed = build_embed("custom", clean_question)
+    content, allowed_mentions = build_announcement_mentions(False)
     sent = await channel.send(
-        content=MSG_EVERYONE_MENTION,
+        content=content,
         embed=embed,
         view=AnonymousAnswerView(),
-        allowed_mentions=discord.AllowedMentions(everyone=True),
+        allowed_mentions=allowed_mentions,
     )
     thread = await get_or_create_answer_thread(sent)
 

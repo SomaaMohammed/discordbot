@@ -61,6 +61,20 @@ def test_reply_mute_parser_extracts_optional_reason() -> None:
     assert bot.parse_reply_mute_message("hey invictus timeout too loud") == "too loud"
 
 
+def test_build_announcement_mentions_defaults_to_no_everyone() -> None:
+    content, allowed_mentions = bot.build_announcement_mentions(False)
+    assert content is None
+    assert allowed_mentions.everyone is False
+    assert allowed_mentions.users is False
+    assert allowed_mentions.roles is False
+
+
+def test_build_announcement_mentions_allows_everyone_when_enabled() -> None:
+    content, allowed_mentions = bot.build_announcement_mentions(True)
+    assert content == bot.MSG_EVERYONE_MENTION
+    assert allowed_mentions.everyone is True
+
+
 def test_on_message_prioritizes_exact_emperor_lock_trigger(monkeypatch) -> None:
     class DummyMember:
         def __init__(self) -> None:
@@ -195,6 +209,10 @@ def test_reset_royal_presence_timer_clears_last_message_and_speaker(monkeypatch)
         "royal_presence": {
             "last_message_at": bot.get_now().isoformat(),
             "last_speaker": "Emperor",
+            "last_message_at_by_title": {
+                "Emperor": bot.get_now().isoformat(),
+                "Empress": bot.get_now().isoformat(),
+            },
         }
     }
 
@@ -205,6 +223,8 @@ def test_reset_royal_presence_timer_clears_last_message_and_speaker(monkeypatch)
 
     assert state["royal_presence"]["last_message_at"] is None
     assert state["royal_presence"]["last_speaker"] is None
+    assert state["royal_presence"]["last_message_at_by_title"]["Emperor"] is None
+    assert state["royal_presence"]["last_message_at_by_title"]["Empress"] is None
 
 
 def test_handle_royal_presence_announcement_uses_last_message_interval(monkeypatch) -> None:
@@ -241,7 +261,14 @@ def test_handle_royal_presence_announcement_uses_last_message_interval(monkeypat
         "used_questions": [],
         "posts": [],
         "metrics": {},
-        "royal_presence": {"last_message_at": None, "last_speaker": None},
+        "royal_presence": {
+            "last_message_at": None,
+            "last_speaker": None,
+            "last_message_at_by_title": {
+                "Emperor": None,
+                "Empress": None,
+            },
+        },
     }
 
     monkeypatch.setattr(bot, "get_state", lambda: state)
@@ -257,14 +284,14 @@ def test_handle_royal_presence_announcement_uses_last_message_interval(monkeypat
     assert first_send_args.kwargs["allowed_mentions"].users is False
     assert first_send_args.kwargs["allowed_mentions"].roles is False
 
-    saved_first = state["royal_presence"]["last_message_at"]
+    saved_first = state["royal_presence"]["last_message_at_by_title"]["Emperor"]
     second = DummyMessage(bot.EMPRESS_ROLE_ID)
     second.created_at = bot.parse_iso(saved_first) + timedelta(hours=2, minutes=30)
     asyncio.run(bot.handle_royal_presence_announcement(second))
-    second.channel.send.assert_not_called()
+    second.channel.send.assert_awaited_once()
 
     third = DummyMessage(bot.EMPRESS_ROLE_ID)
-    third.created_at = bot.parse_iso(state["royal_presence"]["last_message_at"]) + timedelta(hours=3, minutes=1)
+    third.created_at = bot.parse_iso(state["royal_presence"]["last_message_at_by_title"]["Empress"]) + timedelta(hours=3, minutes=1)
     asyncio.run(bot.handle_royal_presence_announcement(third))
     third.channel.send.assert_awaited_once()
     third_send_args = third.channel.send.await_args
