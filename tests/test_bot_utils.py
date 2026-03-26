@@ -190,6 +190,23 @@ def test_should_announce_royal_presence_is_based_on_message_gap() -> None:
     assert bot.should_announce_royal_presence(current - timedelta(hours=3), current)
 
 
+def test_reset_royal_presence_timer_clears_last_message_and_speaker(monkeypatch) -> None:
+    state = {
+        "royal_presence": {
+            "last_message_at": bot.get_now().isoformat(),
+            "last_speaker": "Emperor",
+        }
+    }
+
+    monkeypatch.setattr(bot, "get_state", lambda: state)
+    monkeypatch.setattr(bot, "save_state", lambda _: None)
+
+    bot.reset_royal_presence_timer()
+
+    assert state["royal_presence"]["last_message_at"] is None
+    assert state["royal_presence"]["last_speaker"] is None
+
+
 def test_handle_royal_presence_announcement_uses_last_message_interval(monkeypatch) -> None:
     class DummyRole:
         def __init__(self, role_id: int) -> None:
@@ -234,7 +251,7 @@ def test_handle_royal_presence_announcement_uses_last_message_interval(monkeypat
     asyncio.run(bot.handle_royal_presence_announcement(first))
     first.channel.send.assert_awaited_once()
     first_send_args = first.channel.send.await_args
-    assert first_send_args.args == ("# Emperor has spoken",)
+    assert first_send_args.args == ("# The Emperor has spoken",)
     assert "allowed_mentions" in first_send_args.kwargs
     assert first_send_args.kwargs["allowed_mentions"].everyone is False
     assert first_send_args.kwargs["allowed_mentions"].users is False
@@ -251,7 +268,7 @@ def test_handle_royal_presence_announcement_uses_last_message_interval(monkeypat
     asyncio.run(bot.handle_royal_presence_announcement(third))
     third.channel.send.assert_awaited_once()
     third_send_args = third.channel.send.await_args
-    assert third_send_args.args == ("# Empress has spoken",)
+    assert third_send_args.args == ("# The Empress has spoken",)
     assert "allowed_mentions" in third_send_args.kwargs
     assert third_send_args.kwargs["allowed_mentions"].everyone is False
     assert third_send_args.kwargs["allowed_mentions"].users is False

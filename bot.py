@@ -329,6 +329,15 @@ def ensure_royal_presence_shape(royal_presence: dict) -> dict:
     return royal_presence
 
 
+def reset_royal_presence_timer() -> None:
+    state = get_state()
+    royal_presence = ensure_royal_presence_shape(state.get("royal_presence", {}))
+    royal_presence["last_message_at"] = None
+    royal_presence["last_speaker"] = None
+    state["royal_presence"] = royal_presence
+    save_state(state)
+
+
 def increment_counter(counter_map: dict, key: str) -> None:
     counter_map[key] = int(counter_map.get(key, 0)) + 1
 
@@ -1579,7 +1588,7 @@ async def handle_royal_presence_announcement(message: discord.Message) -> None:
 
     if should_announce:
         await message.channel.send(
-            f"# {royal_title} has spoken",
+            f"# The {royal_title} has spoken",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -2349,6 +2358,25 @@ async def court_dryrun(interaction: discord.Interaction, enabled: bool) -> None:
     )
 
 
+@admin_group.command(name="resetroyaltimer", description="Reset the royal announcement timer (testing)")
+async def admin_resetroyaltimer(interaction: discord.Interaction) -> None:
+    if not await require_staff(interaction):
+        return
+
+    reset_royal_presence_timer()
+    record_command_metric("invictus.resetroyaltimer")
+    await interaction.response.send_message(
+        "Royal timer reset. The next message from the Emperor or the Empress can trigger the H1 announcement immediately.",
+        ephemeral=True,
+    )
+
+    await send_log(
+        interaction.guild,
+        "Royal Timer Reset",
+        f"**By:** {interaction.user.mention}",
+    )
+
+
 @questions_group.command(name="audit", description="Audit questions for duplicates and quality issues")
 async def court_questions_audit(interaction: discord.Interaction) -> None:
     if not await require_staff(interaction):
@@ -2441,6 +2469,7 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `/invictus say <channel>` — Send announcement in channel
 `/invictus purge <amount>` — Delete 1-100 recent messages
 `/invictus purgeuser <member> [amount]` — Delete member's messages (scan 1-200)
+`/invictus resetroyaltimer` — Reset royal announcement timer for testing
 `/invictus lock [reason]` — Lock channel for @everyone
 `/invictus unlock [reason]` — Unlock channel for @everyone
 `/invictus slowmode <seconds>` — Set slowmode (0-21600)
