@@ -52,6 +52,8 @@ STAFF_ROLE_IDS = {
     1461513633367330982,  # Grand Marshal
     1461513909130498230,  # Imperial Guard
 }
+EMPEROR_ROLE_ID = 1461376227095875707
+EMPRESS_ROLE_ID = 1461485629178122465
 
 STATE_FILE = "state.json"
 QUESTIONS_FILE = "questions.json"
@@ -74,6 +76,7 @@ REPLY_MUTE_MINUTES = 1
 SILENT_LOCK_SECONDS = 10
 SILENT_LOCK_EXCLUDE_ROLES = {1462082750101328029, 1461500213746204921, 1461382351874424842}  # Includes Imperial Sentinel
 EMPEROR_MENTION_RESPONSE = "He's always watching."
+ROYAL_PRESENCE_INTERVAL_HOURS = 3
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -260,6 +263,7 @@ def get_state() -> dict:
             "used_questions": [],
             "posts": [],
             "metrics": {},
+            "royal_presence": {},
         },
     )
 
@@ -275,7 +279,9 @@ def get_state() -> dict:
     state.setdefault("used_questions", [])
     state.setdefault("posts", [])
     state.setdefault("metrics", {})
+    state.setdefault("royal_presence", {})
     state["metrics"] = ensure_metrics_shape(state.get("metrics", {}))
+    state["royal_presence"] = ensure_royal_presence_shape(state.get("royal_presence", {}))
 
     if state.get("channel_id", 0) == 0:
         state["channel_id"] = COURT_CHANNEL_ID
@@ -297,6 +303,7 @@ def save_state(state: dict) -> None:
 
     state["posts"] = state.get("posts", [])[-POST_RECORD_LIMIT:]
     state["metrics"] = ensure_metrics_shape(state.get("metrics", {}))
+    state["royal_presence"] = ensure_royal_presence_shape(state.get("royal_presence", {}))
     save_json(STATE_FILE, state)
 
 
@@ -312,6 +319,13 @@ def ensure_metrics_shape(metrics: dict) -> dict:
     metrics.setdefault("answers_total", 0)
     metrics.setdefault("last_successful_auto_post", None)
     return metrics
+
+
+def ensure_royal_presence_shape(royal_presence: dict) -> dict:
+    royal_presence = royal_presence if isinstance(royal_presence, dict) else {}
+    royal_presence.setdefault("last_message_at", None)
+    royal_presence.setdefault("last_speaker", None)
+    return royal_presence
 
 
 def increment_counter(counter_map: dict, key: str) -> None:
@@ -1152,6 +1166,7 @@ def merge_imported_state(imported: dict) -> dict:
         "used_questions",
         "posts",
         "metrics",
+        "royal_presence",
     }
     for key in allowed_keys:
         if key in imported:
@@ -1522,6 +1537,46 @@ def is_emperor_lock_trigger(content: str) -> bool:
 
 def has_emperor_mention(content: str) -> bool:
     return re.search(r"\b(sammy|emperor)\b", content, flags=re.IGNORECASE) is not None
+
+
+def get_royal_title(member: discord.Member) -> str | None:
+    for role in getattr(member, "roles", []):
+        if getattr(role, "id", 0) == EMPEROR_ROLE_ID:
+            return "Emperor"
+        if getattr(role, "id", 0) == EMPRESS_ROLE_ID:
+            return "Empress"
+    return None
+
+
+def should_announce_royal_presence(previous_message_at: datetime | None, current_message_at: datetime) -> bool:
+    if previous_message_at is None:
+        return True
+    return (current_message_at - previous_message_at) >= timedelta(hours=ROYAL_PRESENCE_INTERVAL_HOURS)
+
+
+async def handle_royal_presence_announcement(message: discord.Message) -> None:
+    royal_title = get_royal_title(message.author)
+    if royal_title is None:
+        return
+
+    state = get_state()
+    royal_presence = ensure_royal_presence_shape(state.get("royal_presence", {}))
+    previous_message_at = parse_iso(royal_presence.get("last_message_at"))
+
+    created_at = getattr(message, "created_at", None)
+    current_message_at = created_at if created_at is not None else get_now()
+    should_announce = should_announce_royal_presence(previous_message_at, current_message_at)
+
+    royal_presence["last_message_at"] = current_message_at.isoformat()
+    royal_presence["last_speaker"] = royal_title
+    state["royal_presence"] = royal_presence
+    save_state(state)
+
+    if should_announce:
+        await message.channel.send(
+            f"# {royal_title} has spoken",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def lock_channel_silently(channel: discord.TextChannel, actor: discord.Member, seconds: int = SILENT_LOCK_SECONDS) -> None:
@@ -3204,15 +3259,20 @@ async def on_message(message: discord.Message) -> None:
     if message.guild is None or not isinstance(message.author, discord.Member):
         return
 
-    if has_emperor_mention(message.content):
-        await message.channel.send(EMPEROR_MENTION_RESPONSE)
-        return
+    await handle_royal_presence_announcement(message)
 
     if is_silence_lock_trigger(message.content) or is_emperor_lock_trigger(message.content):
         if not is_staff(message.author):
             return
         if isinstance(message.channel, discord.TextChannel):
             await lock_channel_silently(message.channel, message.author, SILENT_LOCK_SECONDS)
+        return
+
+    if has_emperor_mention(message.content):
+        await message.channel.send(
+            EMPEROR_MENTION_RESPONSE,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         return
 
     reason_text = parse_reply_mute_message(message.content)
