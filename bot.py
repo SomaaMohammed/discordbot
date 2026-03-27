@@ -79,6 +79,30 @@ EMPEROR_MENTION_RESPONSE = "He's always watching."
 ROYAL_PRESENCE_INTERVAL_HOURS = 3
 ROYAL_ALERT_CHANNEL_ID = 1461374216795328515
 ROYAL_TITLES = ("Emperor", "Empress")
+REPLY_MUTE_ACTION_PATTERN = r"(?:mute|silence|timeout|quiet|hush)"
+REPLY_MUTE_INTENT_PATTERN = r"(?:you\s+know\s+what\s+to\s+do|u\s+know\s+what\s+to\s+do|do\s+your\s+thing|handle\s+this)"
+REPLY_MUTE_PATTERNS = (
+    re.compile(rf"^\s*(?:hey|yo|oi)[\s,]+invictus[\s,:-]+{REPLY_MUTE_ACTION_PATTERN}\b(.*)$", re.IGNORECASE),
+    re.compile(rf"^\s*invictus[\s,:-]+{REPLY_MUTE_ACTION_PATTERN}\b(.*)$", re.IGNORECASE),
+    re.compile(rf"^\s*(?:hey|yo|oi)[\s,]+invictus[\s,:-]+{REPLY_MUTE_INTENT_PATTERN}\b(?:[\s,:-]*(.*))$", re.IGNORECASE),
+    re.compile(rf"^\s*invictus[\s,:-]+{REPLY_MUTE_INTENT_PATTERN}\b(?:[\s,:-]*(.*))$", re.IGNORECASE),
+)
+SILENCE_LOCK_PHRASES = {
+    "silence",
+    "silence now",
+    "silence the court",
+    "court silence",
+    "order in the court",
+}
+EMPEROR_LOCK_PHRASES = {
+    "the emperor is here",
+    "emperor is here",
+    "the emperor has arrived",
+    "emperor has arrived",
+    "make way for the emperor",
+    "all rise for the emperor",
+}
+EMPEROR_MENTION_PATTERN = re.compile(r"\b(sammy|emperor|his majesty|your majesty)\b", re.IGNORECASE)
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -657,7 +681,11 @@ def build_announcement_mentions(mention_everyone: bool) -> tuple[str | None, dis
 
 
 async def fetch_channel_by_id(channel_id: int | str) -> discord.abc.GuildChannel | discord.Thread | None:
-    channel_id_int = int(channel_id)
+    try:
+        channel_id_int = int(channel_id)
+    except (TypeError, ValueError):
+        return None
+
     channel = bot.get_channel(channel_id_int)
     if channel is not None:
         return channel
@@ -1545,34 +1573,31 @@ def build_timeout_reason(action: str, user: discord.Member, reason: str | None) 
     return base
 
 
-def parse_reply_mute_message(content: str) -> str | None:
-    patterns = [
-        r"^\s*hey[\s,]+invictus\s+mute\b(.*)$",
-        r"^\s*hey[\s,]+invictus\s+silence\b(.*)$",
-        r"^\s*hey[\s,]+invictus\s+timeout\b(.*)$",
-        r"^\s*invictus\s+mute\b(.*)$",
-        r"^\s*invictus\s+silence\b(.*)$",
-        r"^\s*invictus\s+timeout\b(.*)$",
-    ]
+def normalize_trigger_phrase(content: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9'\s]", " ", content.casefold())
+    return " ".join(cleaned.split())
 
-    for pattern in patterns:
-        match = re.match(pattern, content, flags=re.IGNORECASE)
+
+def parse_reply_mute_message(content: str) -> str | None:
+    for pattern in REPLY_MUTE_PATTERNS:
+        match = pattern.match(content)
         if match is not None:
-            return match.group(1).strip()
+            reason = match.group(1) if match.lastindex else ""
+            return reason.strip()
 
     return None
 
 
 def is_silence_lock_trigger(content: str) -> bool:
-    return re.match(r"^\s*silence\.?\s*$", content, flags=re.IGNORECASE) is not None
+    return normalize_trigger_phrase(content) in SILENCE_LOCK_PHRASES
 
 
 def is_emperor_lock_trigger(content: str) -> bool:
-    return re.match(r"^\s*the\s+emperor\s+is\s+here\.?\s*$", content, flags=re.IGNORECASE) is not None
+    return normalize_trigger_phrase(content) in EMPEROR_LOCK_PHRASES
 
 
 def has_emperor_mention(content: str) -> bool:
-    return re.search(r"\b(sammy|emperor)\b", content, flags=re.IGNORECASE) is not None
+    return EMPEROR_MENTION_PATTERN.search(content) is not None
 
 
 def is_royal_alert_channel(channel_id: int | None) -> bool:
@@ -2786,6 +2811,15 @@ async def court_editquestion(
     questions = get_questions()
     items = questions.get(category.value, [])
 
+    if old_clean.casefold() != new_clean.casefold() and any(
+        existing.strip().casefold() == new_clean.casefold() for existing in items
+    ):
+        await interaction.response.send_message(
+            "That replacement question already exists in this category.",
+            ephemeral=True,
+        )
+        return
+
     target = old_clean.casefold()
     replaced = False
 
@@ -3228,7 +3262,11 @@ async def auto_poster() -> None:
             )
             return
 
-        chosen_category, question = await post_question(channel, source="auto")
+        chosen_category, question = await post_question(
+            channel,
+            source="auto",
+            mention_everyone=True,
+        )
         await send_log(
             guild,
             "Court Question Auto-Posted",

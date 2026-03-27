@@ -51,14 +51,40 @@ def test_emperor_lock_trigger_exact_phrase_matches() -> None:
     assert bot.is_emperor_lock_trigger("the emperor is here.")
 
 
+def test_emperor_lock_trigger_accepts_additional_phrases() -> None:
+    assert bot.is_emperor_lock_trigger("Emperor has arrived!")
+    assert bot.is_emperor_lock_trigger("Make way for the emperor.")
+
+
 def test_emperor_mention_still_matches_general_mentions() -> None:
     assert bot.has_emperor_mention("where is sammy")
     assert bot.has_emperor_mention("long live the emperor")
 
 
+def test_emperor_mention_accepts_majesty_titles() -> None:
+    assert bot.has_emperor_mention("Your Majesty, we await your command")
+
+
 def test_reply_mute_parser_extracts_optional_reason() -> None:
     assert bot.parse_reply_mute_message("invictus mute") == ""
     assert bot.parse_reply_mute_message("hey invictus timeout too loud") == "too loud"
+
+
+def test_reply_mute_parser_accepts_more_aliases_and_prefixes() -> None:
+    assert bot.parse_reply_mute_message("hey, invictus: hush stop spamming") == "stop spamming"
+    assert bot.parse_reply_mute_message("yo invictus quiet too loud") == "too loud"
+
+
+def test_reply_mute_parser_accepts_you_know_what_to_do_family() -> None:
+    assert bot.parse_reply_mute_message("invictus you know what to do") == ""
+    assert bot.parse_reply_mute_message("invictus, you know what to do stop now") == "stop now"
+    assert bot.parse_reply_mute_message("hey invictus do your thing being toxic") == "being toxic"
+    assert bot.parse_reply_mute_message("invictus handle this") == ""
+
+
+def test_silence_lock_trigger_accepts_additional_phrases() -> None:
+    assert bot.is_silence_lock_trigger("silence now")
+    assert bot.is_silence_lock_trigger("Order in the court!")
 
 
 def test_build_announcement_mentions_defaults_to_no_everyone() -> None:
@@ -73,6 +99,10 @@ def test_build_announcement_mentions_allows_everyone_when_enabled() -> None:
     content, allowed_mentions = bot.build_announcement_mentions(True)
     assert content == bot.MSG_EVERYONE_MENTION
     assert allowed_mentions.everyone is True
+
+
+def test_fetch_channel_by_id_returns_none_for_invalid_input() -> None:
+    assert asyncio.run(bot.fetch_channel_by_id("invalid")) is None
 
 
 def test_on_message_prioritizes_exact_emperor_lock_trigger(monkeypatch) -> None:
