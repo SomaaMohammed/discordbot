@@ -34,4 +34,4 @@ jobs:
         run: python -m py_compile bot.py
 
       - name: Run tests
-        run: pytest -q
+        run: python -m pytest -q
