@@ -65,6 +65,135 @@ def test_emperor_mention_accepts_majesty_titles() -> None:
     assert bot.has_emperor_mention("Your Majesty, we await your command")
 
 
+def test_empress_mention_matches_majesty_titles() -> None:
+    assert bot.has_empress_mention("Her Majesty will arrive shortly")
+    assert bot.has_empress_mention("Long live the Empress")
+
+
+def test_parse_royal_mentions_detects_both_titles() -> None:
+    mentions = bot.parse_royal_mentions("The Emperor and Empress have entered")
+    assert mentions == ["Emperor", "Empress"]
+
+
+def test_get_royal_afk_response_returns_active_status() -> None:
+    now = bot.get_now()
+    state = {
+        "royal_afk": {
+            "by_title": {
+                "Emperor": {
+                    "active": True,
+                    "reason": "At war council",
+                    "set_at": (now - timedelta(minutes=90)).isoformat(),
+                    "set_by_user_id": "123",
+                },
+                "Empress": {
+                    "active": False,
+                    "reason": "",
+                    "set_at": None,
+                    "set_by_user_id": None,
+                },
+            }
+        }
+    }
+
+    response = bot.get_royal_afk_response("Where is the emperor?", state=state, now=now)
+    assert response is not None
+    assert "The Emperor is currently AFK" in response
+    assert "At war council" in response
+
+
+def test_build_royal_afk_status_report_shows_afk_and_non_afk() -> None:
+    now = bot.get_now()
+    state = {
+        "royal_afk": {
+            "by_title": {
+                "Emperor": {
+                    "active": True,
+                    "reason": "In war council",
+                    "set_at": (now - timedelta(minutes=45)).isoformat(),
+                    "set_by_user_id": "1",
+                },
+                "Empress": {
+                    "active": False,
+                    "reason": "",
+                    "set_at": None,
+                    "set_by_user_id": None,
+                },
+            }
+        }
+    }
+
+    report = bot.build_royal_afk_status_report(state=state, now=now)
+    assert "**Emperor:** AFK for" in report
+    assert "In war council" in report
+    assert "**Empress:** Not AFK" in report
+
+
+def test_build_royal_afk_status_report_defaults_when_missing_timestamp() -> None:
+    state = {
+        "royal_afk": {
+            "by_title": {
+                "Emperor": {
+                    "active": True,
+                    "reason": "Reviewing scrolls",
+                    "set_at": None,
+                    "set_by_user_id": "1",
+                },
+                "Empress": {
+                    "active": False,
+                    "reason": "",
+                    "set_at": None,
+                    "set_by_user_id": None,
+                },
+            }
+        }
+    }
+
+    report = bot.build_royal_afk_status_report(state=state)
+    assert "**Emperor:** AFK - Reviewing scrolls" in report
+
+
+def test_clear_member_royal_afk_resets_active_entries(monkeypatch) -> None:
+    class DummyRole:
+        def __init__(self, role_id: int) -> None:
+            self.id = role_id
+
+    class DummyMember:
+        def __init__(self) -> None:
+            self.roles = [DummyRole(bot.EMPEROR_ROLE_ID)]
+
+    state = {
+        "royal_afk": {
+            "by_title": {
+                "Emperor": {
+                    "active": True,
+                    "reason": "Meeting",
+                    "set_at": bot.iso_now(),
+                    "set_by_user_id": "1",
+                },
+                "Empress": {
+                    "active": False,
+                    "reason": "",
+                    "set_at": None,
+                    "set_by_user_id": None,
+                },
+            }
+        }
+    }
+
+    monkeypatch.setattr(bot, "get_state", lambda: state)
+    monkeypatch.setattr(bot, "save_state", lambda _: None)
+
+    cleared = bot.clear_member_royal_afk(DummyMember())
+
+    assert cleared == ["Emperor"]
+    emperor_state = state["royal_afk"]["by_title"]["Emperor"]
+    assert emperor_state["active"] is False
+    assert emperor_state["reason"] == ""
+    assert emperor_state["set_at"] is None
+    assert emperor_state["set_by_user_id"] is None
+
+
 def test_reply_mute_parser_extracts_optional_reason() -> None:
     assert bot.parse_reply_mute_message("invictus mute") == ""
     assert bot.parse_reply_mute_message("hey invictus timeout too loud") == "too loud"
@@ -181,6 +310,43 @@ def test_on_message_emperor_mention_without_lock_phrase_sends_response(monkeypat
     send_args = message.channel.send.await_args
     assert send_args.args == (bot.EMPEROR_MENTION_RESPONSE,)
     assert "allowed_mentions" in send_args.kwargs
+    assert send_args.kwargs["allowed_mentions"].everyone is False
+    assert send_args.kwargs["allowed_mentions"].users is False
+    assert send_args.kwargs["allowed_mentions"].roles is False
+
+
+def test_on_message_emperor_afk_response_overrides_default_mention(monkeypatch) -> None:
+    class DummyMember:
+        def __init__(self) -> None:
+            self.bot = False
+            self.roles = []
+
+    class DummyTextChannel:
+        def __init__(self) -> None:
+            self.send = AsyncMock()
+            self.id = bot.ROYAL_ALERT_CHANNEL_ID
+
+    class DummyGuild:
+        pass
+
+    class DummyMessage:
+        def __init__(self) -> None:
+            self.author = DummyMember()
+            self.guild = DummyGuild()
+            self.channel = DummyTextChannel()
+            self.content = "sammy where are you"
+
+    monkeypatch.setattr(bot.discord, "Member", DummyMember)
+    monkeypatch.setattr(bot.discord, "TextChannel", DummyTextChannel)
+    monkeypatch.setattr(bot, "handle_royal_presence_announcement", AsyncMock())
+    monkeypatch.setattr(bot, "get_royal_afk_response", lambda _: "The Emperor is currently AFK: At war council")
+
+    message = DummyMessage()
+    asyncio.run(bot.on_message(message))
+
+    message.channel.send.assert_awaited_once()
+    send_args = message.channel.send.await_args
+    assert send_args.args == ("The Emperor is currently AFK: At war council",)
     assert send_args.kwargs["allowed_mentions"].everyone is False
     assert send_args.kwargs["allowed_mentions"].users is False
     assert send_args.kwargs["allowed_mentions"].roles is False

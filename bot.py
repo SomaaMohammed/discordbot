@@ -103,12 +103,14 @@ EMPEROR_LOCK_PHRASES = {
     "all rise for the emperor",
 }
 EMPEROR_MENTION_PATTERN = re.compile(r"\b(sammy|emperor|his majesty|your majesty)\b", re.IGNORECASE)
+EMPRESS_MENTION_PATTERN = re.compile(r"\b(empress|her majesty)\b", re.IGNORECASE)
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
 MSG_BOT_CONTEXT_ERROR = "Could not verify bot permissions in this server."
 MSG_CONFIRM_REQUIRED = "Confirmation failed. Type `CONFIRM` exactly."
 MSG_VERIFY_ROLES = "Could not verify your roles."
+MSG_ROYAL_ONLY = "Only the Emperor or Empress can use this command."
 MSG_EVERYONE_MENTION = "@everyone"
 MSG_INQUIRY_CLOSED = "This court inquiry is already closed."
 MSG_QUESTION_EMPTY = "Question cannot be empty."
@@ -290,6 +292,7 @@ def get_state() -> dict:
             "posts": [],
             "metrics": {},
             "royal_presence": {},
+            "royal_afk": {},
         },
     )
 
@@ -306,8 +309,10 @@ def get_state() -> dict:
     state.setdefault("posts", [])
     state.setdefault("metrics", {})
     state.setdefault("royal_presence", {})
+    state.setdefault("royal_afk", {})
     state["metrics"] = ensure_metrics_shape(state.get("metrics", {}))
     state["royal_presence"] = ensure_royal_presence_shape(state.get("royal_presence", {}))
+    state["royal_afk"] = ensure_royal_afk_shape(state.get("royal_afk", {}))
 
     if state.get("channel_id", 0) == 0:
         state["channel_id"] = COURT_CHANNEL_ID
@@ -330,6 +335,7 @@ def save_state(state: dict) -> None:
     state["posts"] = state.get("posts", [])[-POST_RECORD_LIMIT:]
     state["metrics"] = ensure_metrics_shape(state.get("metrics", {}))
     state["royal_presence"] = ensure_royal_presence_shape(state.get("royal_presence", {}))
+    state["royal_afk"] = ensure_royal_afk_shape(state.get("royal_afk", {}))
     save_json(STATE_FILE, state)
 
 
@@ -366,6 +372,29 @@ def ensure_royal_presence_shape(royal_presence: dict) -> dict:
     royal_presence.setdefault("last_message_at", None)
     royal_presence.setdefault("last_speaker", None)
     return royal_presence
+
+
+def ensure_royal_afk_shape(royal_afk: dict) -> dict:
+    royal_afk = royal_afk if isinstance(royal_afk, dict) else {}
+
+    by_title = royal_afk.get("by_title")
+    if not isinstance(by_title, dict):
+        by_title = {}
+
+    for title in ROYAL_TITLES:
+        entry = by_title.get(title)
+        if not isinstance(entry, dict):
+            entry = {}
+
+        by_title[title] = {
+            "active": bool(entry.get("active", False)),
+            "reason": str(entry.get("reason") or ""),
+            "set_at": entry.get("set_at"),
+            "set_by_user_id": str(entry.get("set_by_user_id")) if entry.get("set_by_user_id") is not None else None,
+        }
+
+    royal_afk["by_title"] = by_title
+    return royal_afk
 
 
 def reset_royal_presence_timer() -> None:
@@ -1229,6 +1258,7 @@ def merge_imported_state(imported: dict) -> dict:
         "posts",
         "metrics",
         "royal_presence",
+        "royal_afk",
     }
     for key in allowed_keys:
         if key in imported:
@@ -1436,6 +1466,23 @@ async def require_staff(interaction: discord.Interaction) -> bool:
     return True
 
 
+async def require_royal(interaction: discord.Interaction) -> tuple[discord.Guild, discord.Member, list[str]] | None:
+    if interaction.guild is None:
+        await interaction.response.send_message(MSG_USE_IN_SERVER, ephemeral=True)
+        return None
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(MSG_VERIFY_ROLES, ephemeral=True)
+        return None
+
+    titles = get_member_royal_titles(interaction.user)
+    if not titles:
+        await interaction.response.send_message(MSG_ROYAL_ONLY, ephemeral=True)
+        return None
+
+    return interaction.guild, interaction.user, titles
+
+
 court_group = app_commands.Group(name="court", description="Imperial Court controls")
 questions_group = app_commands.Group(name="questions", description="Question utilities")
 court_group.add_command(questions_group)
@@ -1600,17 +1647,119 @@ def has_emperor_mention(content: str) -> bool:
     return EMPEROR_MENTION_PATTERN.search(content) is not None
 
 
+def has_empress_mention(content: str) -> bool:
+    return EMPRESS_MENTION_PATTERN.search(content) is not None
+
+
+def parse_royal_mentions(content: str) -> list[str]:
+    mentioned: list[str] = []
+    if has_emperor_mention(content):
+        mentioned.append("Emperor")
+    if has_empress_mention(content):
+        mentioned.append("Empress")
+    return mentioned
+
+
 def is_royal_alert_channel(channel_id: int | None) -> bool:
     return int(channel_id or 0) == ROYAL_ALERT_CHANNEL_ID
 
 
-def get_royal_title(member: discord.Member) -> str | None:
+def get_member_royal_titles(member: discord.Member) -> list[str]:
+    titles: list[str] = []
     for role in getattr(member, "roles", []):
-        if getattr(role, "id", 0) == EMPEROR_ROLE_ID:
-            return "Emperor"
-        if getattr(role, "id", 0) == EMPRESS_ROLE_ID:
-            return "Empress"
-    return None
+        role_id = getattr(role, "id", 0)
+        if role_id == EMPEROR_ROLE_ID and "Emperor" not in titles:
+            titles.append("Emperor")
+        if role_id == EMPRESS_ROLE_ID and "Empress" not in titles:
+            titles.append("Empress")
+    return titles
+
+
+def get_royal_title(member: discord.Member) -> str | None:
+    titles = get_member_royal_titles(member)
+    return titles[0] if titles else None
+
+
+def build_royal_afk_status_line(title: str, afk_entry: dict, now: datetime) -> str:
+    reason = str(afk_entry.get("reason") or "Away from court")
+    set_at = parse_iso(afk_entry.get("set_at"))
+    if set_at is None:
+        return f"The {title} is currently AFK: {reason}"
+    return f"The {title} is currently AFK ({format_duration(now - set_at)}): {reason}"
+
+
+def get_royal_afk_response(content: str, state: dict | None = None, now: datetime | None = None) -> str | None:
+    mentioned_titles = parse_royal_mentions(content)
+    if not mentioned_titles:
+        return None
+
+    effective_state = state if state is not None else get_state()
+    royal_afk = ensure_royal_afk_shape(effective_state.get("royal_afk", {}))
+    by_title = royal_afk.get("by_title", {})
+    current_time = now or get_now()
+
+    lines: list[str] = []
+    for title in mentioned_titles:
+        entry = by_title.get(title, {})
+        if bool(entry.get("active", False)):
+            lines.append(build_royal_afk_status_line(title, entry, current_time))
+
+    if not lines:
+        return None
+
+    return "\n".join(lines)
+
+
+def build_royal_afk_status_report(state: dict | None = None, now: datetime | None = None) -> str:
+    effective_state = state if state is not None else get_state()
+    royal_afk = ensure_royal_afk_shape(effective_state.get("royal_afk", {}))
+    by_title = royal_afk.get("by_title", {})
+    current_time = now or get_now()
+
+    lines: list[str] = []
+    for title in ROYAL_TITLES:
+        entry = by_title.get(title, {})
+        if bool(entry.get("active", False)):
+            reason = str(entry.get("reason") or "Away from court")
+            set_at = parse_iso(entry.get("set_at"))
+            if set_at is None:
+                lines.append(f"**{title}:** AFK - {reason}")
+            else:
+                lines.append(f"**{title}:** AFK for `{format_duration(current_time - set_at)}` - {reason}")
+        else:
+            lines.append(f"**{title}:** Not AFK")
+
+    return "\n".join(lines)
+
+
+def clear_member_royal_afk(member: discord.Member) -> list[str]:
+    titles = get_member_royal_titles(member)
+    if not titles:
+        return []
+
+    state = get_state()
+    royal_afk = ensure_royal_afk_shape(state.get("royal_afk", {}))
+    by_title = royal_afk.get("by_title", {})
+    cleared: list[str] = []
+
+    for title in titles:
+        entry = by_title.get(title, {})
+        if bool(entry.get("active", False)):
+            cleared.append(title)
+
+        by_title[title] = {
+            "active": False,
+            "reason": "",
+            "set_at": None,
+            "set_by_user_id": None,
+        }
+
+    if cleared:
+        royal_afk["by_title"] = by_title
+        state["royal_afk"] = royal_afk
+        save_state(state)
+
+    return cleared
 
 
 def should_announce_royal_presence(previous_message_at: datetime | None, current_message_at: datetime) -> bool:
@@ -1743,6 +1892,28 @@ async def handle_reply_mute_trigger(message: discord.Message, reason_text: str) 
         f"**Minutes:** `{REPLY_MUTE_MINUTES}`\n"
         f"**Reason:** {reason_text or 'No reason provided.'}",
     )
+
+
+async def maybe_send_royal_mention_response(message: discord.Message, in_royal_alert_channel: bool) -> bool:
+    if not in_royal_alert_channel:
+        return False
+
+    afk_response = get_royal_afk_response(message.content)
+    if afk_response is not None:
+        await message.channel.send(
+            afk_response,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+
+    if has_emperor_mention(message.content):
+        await message.channel.send(
+            EMPEROR_MENTION_RESPONSE,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+
+    return False
 
 
 async def apply_timeout_to_targets(
@@ -2432,6 +2603,103 @@ async def admin_resetroyaltimer(interaction: discord.Interaction) -> None:
     )
 
 
+@admin_group.command(name="afk", description="Set or clear AFK status for Emperor and Empress")
+@app_commands.describe(reason="Reason for being AFK. Leave empty to clear your AFK status")
+async def admin_afk(
+    interaction: discord.Interaction,
+    reason: str | None = None,
+) -> None:
+    royal_context = await require_royal(interaction)
+    if royal_context is None:
+        return
+
+    guild, actor, titles = royal_context
+    clean_reason = normalize_question_text(reason or "")
+
+    state = get_state()
+    royal_afk = ensure_royal_afk_shape(state.get("royal_afk", {}))
+    by_title = royal_afk.get("by_title", {})
+
+    if clean_reason:
+        now_iso = iso_now()
+        for title in titles:
+            by_title[title] = {
+                "active": True,
+                "reason": clean_reason,
+                "set_at": now_iso,
+                "set_by_user_id": str(actor.id),
+            }
+
+        royal_afk["by_title"] = by_title
+        state["royal_afk"] = royal_afk
+        save_state(state)
+
+        record_command_metric("invictus.afk")
+        joined_titles = ", ".join(titles)
+        await interaction.response.send_message(
+            f"AFK enabled for {joined_titles}.",
+            ephemeral=True,
+        )
+
+        await send_log(
+            guild,
+            "Royal AFK Enabled",
+            f"**By:** {actor.mention}\n"
+            f"**Titles:** `{joined_titles}`\n"
+            f"**Reason:** {clean_reason}",
+        )
+        return
+
+    cleared: list[str] = []
+    for title in titles:
+        entry = by_title.get(title, {})
+        if bool(entry.get("active", False)):
+            cleared.append(title)
+
+        by_title[title] = {
+            "active": False,
+            "reason": "",
+            "set_at": None,
+            "set_by_user_id": None,
+        }
+
+    royal_afk["by_title"] = by_title
+    state["royal_afk"] = royal_afk
+    save_state(state)
+
+    record_command_metric("invictus.afk")
+    if cleared:
+        joined_titles = ", ".join(cleared)
+        await interaction.response.send_message(
+            f"AFK cleared for {joined_titles}.",
+            ephemeral=True,
+        )
+        await send_log(
+            guild,
+            "Royal AFK Cleared",
+            f"**By:** {actor.mention}\n"
+            f"**Titles:** `{joined_titles}`",
+        )
+        return
+
+    await interaction.response.send_message(
+        "No AFK status was active. Provide a reason to set AFK.",
+        ephemeral=True,
+    )
+
+
+@admin_group.command(name="afkstatus", description="Show current Emperor and Empress AFK status")
+async def admin_afkstatus(interaction: discord.Interaction) -> None:
+    if not await require_staff(interaction):
+        return
+
+    record_command_metric("invictus.afkstatus")
+    await interaction.response.send_message(
+        "**Royal AFK Status**\n" + build_royal_afk_status_report(),
+        ephemeral=True,
+    )
+
+
 @questions_group.command(name="audit", description="Audit questions for duplicates and quality issues")
 async def court_questions_audit(interaction: discord.Interaction) -> None:
     if not await require_staff(interaction):
@@ -2525,6 +2793,8 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `/invictus purge <amount>` — Delete 1-100 recent messages
 `/invictus purgeuser <member> [amount]` — Delete member's messages (scan 1-200)
 `/invictus resetroyaltimer` — Reset royal announcement timer for testing
+`/invictus afk [reason]` — Set AFK for Emperor/Empress (leave reason empty to clear)
+`/invictus afkstatus` — Show current Emperor/Empress AFK status
 `/invictus lock [reason]` — Lock channel for @everyone
 `/invictus unlock [reason]` — Unlock channel for @everyone
 `/invictus slowmode <seconds>` — Set slowmode (0-21600)
@@ -2547,6 +2817,7 @@ async def admin_help(interaction: discord.Interaction) -> None:
 
 **Notes**
 • Staff role required for `/court` and `/invictus` commands
+• Only Emperor/Empress can run `/invictus afk`
 • `/fun battle` is available to everyone
 • Anonymous answers are one per person per inquiry
 • Inquiries auto-close after 24 hours
@@ -3363,6 +3634,8 @@ async def on_message(message: discord.Message) -> None:
     if message.guild is None or not isinstance(message.author, discord.Member):
         return
 
+    clear_member_royal_afk(message.author)
+
     in_royal_alert_channel = is_royal_alert_channel(getattr(message.channel, "id", None))
 
     if in_royal_alert_channel:
@@ -3375,11 +3648,7 @@ async def on_message(message: discord.Message) -> None:
             await lock_channel_silently(message.channel, message.author, SILENT_LOCK_SECONDS)
         return
 
-    if in_royal_alert_channel and has_emperor_mention(message.content):
-        await message.channel.send(
-            EMPEROR_MENTION_RESPONSE,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+    if await maybe_send_royal_mention_response(message, in_royal_alert_channel):
         return
 
     reason_text = parse_reply_mute_message(message.content)
