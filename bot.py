@@ -1920,19 +1920,11 @@ async def maybe_send_royal_mention_response(message: discord.Message, in_royal_a
         return False
 
     mentioned_members = getattr(message, "mentions", None)
-    mentioned_titles = parse_royal_member_mentions(mentioned_members)
 
     afk_response = get_royal_afk_response(message.content, mentioned_members=mentioned_members)
     if afk_response is not None:
         await message.channel.send(
             afk_response,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        return True
-
-    if has_emperor_mention(message.content) or "Emperor" in mentioned_titles:
-        await message.channel.send(
-            EMPEROR_MENTION_RESPONSE,
             allowed_mentions=discord.AllowedMentions.none(),
         )
         return True
