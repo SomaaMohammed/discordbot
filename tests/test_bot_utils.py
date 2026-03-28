@@ -68,11 +68,31 @@ def test_emperor_mention_accepts_majesty_titles() -> None:
 def test_empress_mention_matches_majesty_titles() -> None:
     assert bot.has_empress_mention("Her Majesty will arrive shortly")
     assert bot.has_empress_mention("Long live the Empress")
+    assert bot.has_empress_mention("tay needs to see this")
+    assert bot.has_empress_mention("taytay is online")
+    assert bot.has_empress_mention("taylor has spoken")
+    assert bot.has_empress_mention("tayla gave the order")
 
 
 def test_parse_royal_mentions_detects_both_titles() -> None:
     mentions = bot.parse_royal_mentions("The Emperor and Empress have entered")
     assert mentions == ["Emperor", "Empress"]
+
+
+def test_parse_royal_member_mentions_detects_titles_from_explicit_mentions() -> None:
+    class DummyRole:
+        def __init__(self, role_id: int) -> None:
+            self.id = role_id
+
+    class DummyMember:
+        def __init__(self, roles: list[DummyRole]) -> None:
+            self.roles = roles
+
+    emperor = DummyMember([DummyRole(bot.EMPEROR_ROLE_ID)])
+    empress = DummyMember([DummyRole(bot.EMPRESS_ROLE_ID)])
+
+    titles = bot.parse_royal_member_mentions([emperor, empress])
+    assert titles == ["Emperor", "Empress"]
 
 
 def test_get_royal_afk_response_returns_active_status() -> None:
@@ -100,6 +120,48 @@ def test_get_royal_afk_response_returns_active_status() -> None:
     assert response is not None
     assert "The Emperor is currently AFK" in response
     assert "At war council" in response
+
+
+def test_get_royal_afk_response_handles_explicit_member_mentions_without_keywords() -> None:
+    class DummyRole:
+        def __init__(self, role_id: int) -> None:
+            self.id = role_id
+
+    class DummyMember:
+        def __init__(self, roles: list[DummyRole]) -> None:
+            self.roles = roles
+
+    now = bot.get_now()
+    state = {
+        "royal_afk": {
+            "by_title": {
+                "Emperor": {
+                    "active": False,
+                    "reason": "",
+                    "set_at": None,
+                    "set_by_user_id": None,
+                },
+                "Empress": {
+                    "active": True,
+                    "reason": "Reviewing decrees",
+                    "set_at": (now - timedelta(minutes=15)).isoformat(),
+                    "set_by_user_id": "2",
+                },
+            }
+        }
+    }
+
+    empress_member = DummyMember([DummyRole(bot.EMPRESS_ROLE_ID)])
+    response = bot.get_royal_afk_response(
+        "hello there",
+        mentioned_members=[empress_member],
+        state=state,
+        now=now,
+    )
+
+    assert response is not None
+    assert "The Empress is currently AFK" in response
+    assert "Reviewing decrees" in response
 
 
 def test_build_royal_afk_status_report_shows_afk_and_non_afk() -> None:
@@ -339,7 +401,11 @@ def test_on_message_emperor_afk_response_overrides_default_mention(monkeypatch) 
     monkeypatch.setattr(bot.discord, "Member", DummyMember)
     monkeypatch.setattr(bot.discord, "TextChannel", DummyTextChannel)
     monkeypatch.setattr(bot, "handle_royal_presence_announcement", AsyncMock())
-    monkeypatch.setattr(bot, "get_royal_afk_response", lambda _: "The Emperor is currently AFK: At war council")
+    monkeypatch.setattr(
+        bot,
+        "get_royal_afk_response",
+        lambda *_args, **_kwargs: "The Emperor is currently AFK: At war council",
+    )
 
     message = DummyMessage()
     asyncio.run(bot.on_message(message))

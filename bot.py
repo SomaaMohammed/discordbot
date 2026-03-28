@@ -103,7 +103,7 @@ EMPEROR_LOCK_PHRASES = {
     "all rise for the emperor",
 }
 EMPEROR_MENTION_PATTERN = re.compile(r"\b(sammy|emperor|his majesty|your majesty)\b", re.IGNORECASE)
-EMPRESS_MENTION_PATTERN = re.compile(r"\b(empress|her majesty)\b", re.IGNORECASE)
+EMPRESS_MENTION_PATTERN = re.compile(r"\b(empress|her majesty|tay|taytay|taylor|tayla)\b", re.IGNORECASE)
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -1660,11 +1660,23 @@ def parse_royal_mentions(content: str) -> list[str]:
     return mentioned
 
 
+def parse_royal_member_mentions(mentioned_members: list[object] | None) -> list[str]:
+    if not mentioned_members:
+        return []
+
+    mentioned_titles: list[str] = []
+    for mentioned_member in mentioned_members:
+        for title in get_member_royal_titles(mentioned_member):
+            if title not in mentioned_titles:
+                mentioned_titles.append(title)
+    return mentioned_titles
+
+
 def is_royal_alert_channel(channel_id: int | None) -> bool:
     return int(channel_id or 0) == ROYAL_ALERT_CHANNEL_ID
 
 
-def get_member_royal_titles(member: discord.Member) -> list[str]:
+def get_member_royal_titles(member: discord.Member | object) -> list[str]:
     titles: list[str] = []
     for role in getattr(member, "roles", []):
         role_id = getattr(role, "id", 0)
@@ -1688,8 +1700,17 @@ def build_royal_afk_status_line(title: str, afk_entry: dict, now: datetime) -> s
     return f"The {title} is currently AFK ({format_duration(now - set_at)}): {reason}"
 
 
-def get_royal_afk_response(content: str, state: dict | None = None, now: datetime | None = None) -> str | None:
+def get_royal_afk_response(
+    content: str,
+    mentioned_members: list[object] | None = None,
+    state: dict | None = None,
+    now: datetime | None = None,
+) -> str | None:
     mentioned_titles = parse_royal_mentions(content)
+    for title in parse_royal_member_mentions(mentioned_members):
+        if title not in mentioned_titles:
+            mentioned_titles.append(title)
+
     if not mentioned_titles:
         return None
 
@@ -1898,7 +1919,10 @@ async def maybe_send_royal_mention_response(message: discord.Message, in_royal_a
     if not in_royal_alert_channel:
         return False
 
-    afk_response = get_royal_afk_response(message.content)
+    mentioned_members = getattr(message, "mentions", None)
+    mentioned_titles = parse_royal_member_mentions(mentioned_members)
+
+    afk_response = get_royal_afk_response(message.content, mentioned_members=mentioned_members)
     if afk_response is not None:
         await message.channel.send(
             afk_response,
@@ -1906,7 +1930,7 @@ async def maybe_send_royal_mention_response(message: discord.Message, in_royal_a
         )
         return True
 
-    if has_emperor_mention(message.content):
+    if has_emperor_mention(message.content) or "Emperor" in mentioned_titles:
         await message.channel.send(
             EMPEROR_MENTION_RESPONSE,
             allowed_mentions=discord.AllowedMentions.none(),
