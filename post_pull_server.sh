@@ -18,7 +18,7 @@ APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 VENV_DIR="${VENV_DIR:-$APP_DIR/.venv}"
 PYTHON_BIN="$VENV_DIR/bin/python"
 ENV_FILE="$APP_DIR/.env"
-DB_FILE="$APP_DIR/court.db"
+DB_FILE=""
 BACKUP_DIR="$APP_DIR/backups"
 RUN_TESTS="${RUN_TESTS:-0}"
 RUN_LINT="${RUN_LINT:-0}"
@@ -63,9 +63,43 @@ ensure_env_default() {
   fi
 }
 
+read_env_value() {
+  local key="$1"
+  local value
+  value="$(grep -E "^[[:space:]]*${key}=" "$ENV_FILE" | tail -n1 | cut -d'=' -f2- || true)"
+  echo "$value"
+}
+
+resolve_db_file() {
+  local db_from_env
+  db_from_env="$(read_env_value "DB_FILE")"
+
+  if [[ -n "$db_from_env" ]]; then
+    if [[ "$db_from_env" = /* ]]; then
+      DB_FILE="$db_from_env"
+    else
+      DB_FILE="$APP_DIR/$db_from_env"
+    fi
+  else
+    DB_FILE="$APP_DIR/court.db"
+  fi
+}
+
+run_migration_warmup() {
+  log "Running storage warm-up import"
+  (
+    cd "$APP_DIR"
+    "$PYTHON_BIN" - <<'PY'
+import bot
+print(f"[post-pull] bot DB_FILE resolved to: {bot.DB_FILE}")
+PY
+  )
+}
+
 verify_tables() {
   local tables
   tables="$(sqlite3 "$DB_FILE" ".tables" || true)"
+  log "SQLite tables in $DB_FILE: $tables"
 
   for table in kv posts answers metrics anon_cooldowns; do
     if ! grep -Eq "(^|[[:space:]])${table}($|[[:space:]])" <<<"$tables"; then
@@ -115,6 +149,9 @@ main() {
   ensure_env_default "WEEKLY_DIGEST_HOUR" "19"
   ensure_env_default "ANSWER_RETENTION_DAYS" "90"
 
+  resolve_db_file
+  log "Using DB file: $DB_FILE"
+
   mkdir -p "$BACKUP_DIR"
   if [[ -f "$DB_FILE" ]]; then
     local backup_file
@@ -132,6 +169,8 @@ main() {
   log "Compile check"
   "$PYTHON_BIN" -m py_compile "$APP_DIR/bot.py"
 
+  run_migration_warmup
+
   if [[ "$RUN_LINT" == "1" ]]; then
     log "Running lint/type checks (RUN_LINT=1)"
     "$PYTHON_BIN" -m ruff check "$APP_DIR"
@@ -142,6 +181,9 @@ main() {
     log "Running tests (RUN_TESTS=1)"
     "$PYTHON_BIN" -m pytest -q "$APP_DIR/tests"
   fi
+
+  log "Reloading systemd units"
+  sudo systemctl daemon-reload
 
   log "Restarting service"
   sudo systemctl restart "$SERVICE_NAME"
