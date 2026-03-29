@@ -556,3 +556,44 @@ def test_handle_royal_presence_announcement_uses_last_message_interval(monkeypat
     assert third_send_args.kwargs["allowed_mentions"].everyone is False
     assert third_send_args.kwargs["allowed_mentions"].users is False
     assert third_send_args.kwargs["allowed_mentions"].roles is False
+
+
+def test_validate_anonymous_answer_submission_blocks_links_by_default() -> None:
+    class DummyMember:
+        def __init__(self) -> None:
+            now = bot.get_now()
+            self.id = 1
+            self.roles = []
+            self.created_at = now - timedelta(days=30)
+            self.joined_at = now - timedelta(days=30)
+
+    message = bot.validate_anonymous_answer_submission(DummyMember(), "check this out https://example.com")
+    assert message == "Links are currently disabled for anonymous answers."
+
+
+def test_remaining_anonymous_cooldown_seconds_uses_last_answer_time(monkeypatch) -> None:
+    monkeypatch.setattr(bot, "ANON_COOLDOWN_SECONDS", 60)
+    monkeypatch.setattr(
+        bot,
+        "get_last_answer_time_for_user",
+        lambda _user_id: bot.datetime.now(bot.timezone.utc) - timedelta(seconds=25),
+    )
+
+    remaining = bot.remaining_anonymous_cooldown_seconds(123)
+    assert 30 <= remaining <= 35
+
+
+def test_get_post_close_deadline_uses_record_specific_hours() -> None:
+    now = bot.get_now()
+    record = {
+        "posted_at": now.isoformat(),
+        "close_after_hours": 48,
+    }
+    deadline = bot.get_post_close_deadline(record)
+    assert deadline is not None
+    assert int((deadline - now).total_seconds()) == 48 * 3600
+
+
+def test_get_week_key_is_stable_for_iso_week() -> None:
+    sample = bot.datetime(2026, 1, 5, 12, 0, 0)
+    assert bot.get_week_key(sample) == "2026-W02"

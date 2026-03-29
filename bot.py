@@ -6,14 +6,25 @@ import os
 import random
 import re
 import sqlite3
+from threading import RLock
 from difflib import SequenceMatcher
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+
+from courtbot.config import load_runtime_config
+from courtbot.storage_sql import (
+    ANON_COOLDOWNS_TABLE_SQL,
+    ANSWERS_TABLE_SQL,
+    KV_TABLE_SQL,
+    METRICS_TABLE_SQL,
+    POSTS_TABLE_SQL,
+)
 
 load_dotenv()
 
@@ -22,38 +33,17 @@ logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-def env_int(name: str, default: int = 0) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-
-    raw = raw.strip()
-    if raw == "":
-        return default
-
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer in .env") from exc
-
-
 TOKEN = os.getenv("DISCORD_TOKEN")
-TEST_GUILD_ID = env_int("TEST_GUILD_ID", 0)
-COURT_CHANNEL_ID = env_int("COURT_CHANNEL_ID", 0)
-LOG_CHANNEL_ID_ENV = env_int("LOG_CHANNEL_ID", 0)
-TIMEZONE_NAME = os.getenv("TIMEZONE", "Asia/Qatar")
+RUNTIME_CONFIG = load_runtime_config()
+TEST_GUILD_ID = RUNTIME_CONFIG.test_guild_id
+COURT_CHANNEL_ID = RUNTIME_CONFIG.court_channel_id
+LOG_CHANNEL_ID_ENV = RUNTIME_CONFIG.log_channel_id
+TIMEZONE_NAME = RUNTIME_CONFIG.timezone_name
 
 # Roles allowed to control the bot
-STAFF_ROLE_IDS = {
-    1461376227095875707,  # Emperor
-    1461386876475932806,  # Privileged lock trigger role
-    1461485629178122465,  # Empress
-    1461513633367330982,  # Grand Marshal
-    1461513909130498230,  # Imperial Guard
-}
-EMPEROR_ROLE_ID = 1461376227095875707
-EMPRESS_ROLE_ID = 1461485629178122465
+STAFF_ROLE_IDS = RUNTIME_CONFIG.staff_role_ids
+EMPEROR_ROLE_ID = RUNTIME_CONFIG.emperor_role_id
+EMPRESS_ROLE_ID = RUNTIME_CONFIG.empress_role_id
 
 STATE_FILE = "state.json"
 QUESTIONS_FILE = "questions.json"
@@ -74,11 +64,21 @@ THREAD_AUTO_ARCHIVE_MINUTES = 1440
 MAX_TIMEOUT_MINUTES = 40320
 REPLY_MUTE_MINUTES = 1
 SILENT_LOCK_SECONDS = 10
-SILENT_LOCK_EXCLUDE_ROLES = {1462082750101328029, 1461500213746204921, 1461382351874424842}  # Includes Imperial Sentinel
+SILENT_LOCK_EXCLUDE_ROLES = RUNTIME_CONFIG.silent_lock_exclude_roles
 EMPEROR_MENTION_RESPONSE = "He's always watching."
 ROYAL_PRESENCE_INTERVAL_HOURS = 3
-ROYAL_ALERT_CHANNEL_ID = 1461374216795328515
+ROYAL_ALERT_CHANNEL_ID = RUNTIME_CONFIG.royal_alert_channel_id
 ROYAL_TITLES = ("Emperor", "Empress")
+ANON_MIN_ACCOUNT_AGE_MINUTES = RUNTIME_CONFIG.anon_min_account_age_minutes
+ANON_MIN_MEMBER_AGE_MINUTES = RUNTIME_CONFIG.anon_min_member_age_minutes
+ANON_REQUIRED_ROLE_ID = RUNTIME_CONFIG.anon_required_role_id
+ANON_COOLDOWN_SECONDS = RUNTIME_CONFIG.anon_cooldown_seconds
+ANON_ALLOW_LINKS = RUNTIME_CONFIG.anon_allow_links
+MUTEALL_TARGET_CAP = RUNTIME_CONFIG.muteall_target_cap
+WEEKLY_DIGEST_CHANNEL_ID = RUNTIME_CONFIG.weekly_digest_channel_id
+WEEKLY_DIGEST_WEEKDAY = RUNTIME_CONFIG.weekly_digest_weekday
+WEEKLY_DIGEST_HOUR = RUNTIME_CONFIG.weekly_digest_hour
+ANSWER_RETENTION_DAYS = RUNTIME_CONFIG.answer_retention_days
 REPLY_MUTE_ACTION_PATTERN = r"(?:mute|silence|timeout|quiet|hush)"
 REPLY_MUTE_INTENT_PATTERN = r"(?:you\s+know\s+what\s+to\s+do|u\s+know\s+what\s+to\s+do|do\s+your\s+thing|handle\s+this)"
 REPLY_MUTE_PATTERNS = (
@@ -104,6 +104,7 @@ EMPEROR_LOCK_PHRASES = {
 }
 EMPEROR_MENTION_PATTERN = re.compile(r"\b(sammy|emperor|his majesty|your majesty)\b", re.IGNORECASE)
 EMPRESS_MENTION_PATTERN = re.compile(r"\b(empress|her majesty|tay|taytay|taylor|tayla)\b", re.IGNORECASE)
+URL_PATTERN = re.compile(r"https?://|discord\.gg/", re.IGNORECASE)
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -114,6 +115,8 @@ MSG_ROYAL_ONLY = "Only the Emperor or Empress can use this command."
 MSG_EVERYONE_MENTION = "@everyone"
 MSG_INQUIRY_CLOSED = "This court inquiry is already closed."
 MSG_QUESTION_EMPTY = "Question cannot be empty."
+MSG_UNKNOWN_QUESTION = "Unknown question"
+PREVIEW_ISSUES_PREFIX = "\n\nPreview issues:\n"
 
 CATEGORY_DESCRIPTIONS = {
     "general": "Broad prompts for everyday discussion.",
@@ -132,7 +135,9 @@ CATEGORY_CHOICES = [
 ]
 
 # Special user ID that always wins boss battles
-UNDEFEATED_USER_ID = 934478657114742874
+UNDEFEATED_USER_ID = RUNTIME_CONFIG.undefeated_user_id
+
+STATE_WRITE_LOCK = RLock()
 
 BOSS_STATS = [
     "Strength",
@@ -162,15 +167,11 @@ def init_db() -> None:
     with get_db_connection() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS kv (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
+        conn.execute(KV_TABLE_SQL)
+        conn.execute(POSTS_TABLE_SQL)
+        conn.execute(ANSWERS_TABLE_SQL)
+        conn.execute(METRICS_TABLE_SQL)
+        conn.execute(ANON_COOLDOWNS_TABLE_SQL)
 
 
 def db_has_key(key: str) -> bool:
@@ -210,6 +211,201 @@ def db_set_json(key: str, data: dict) -> None:
         )
 
 
+def metrics_set(key: str, value: str | int) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO metrics (metric_key, metric_value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(metric_key) DO UPDATE SET
+                metric_value = excluded.metric_value,
+                updated_at = excluded.updated_at
+            """,
+            (key, str(value), iso_now()),
+        )
+
+
+def metrics_get(key: str, default: str | int = "0") -> str:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT metric_value FROM metrics WHERE metric_key = ?", (key,)).fetchone()
+    if row is None:
+        return str(default)
+    return str(row["metric_value"])
+
+
+def metrics_increment(key: str, amount: int = 1) -> int:
+    current_value = int(metrics_get(key, 0)) + amount
+    metrics_set(key, current_value)
+    return current_value
+
+
+def metrics_get_prefixed(prefix: str) -> dict[str, int]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT metric_key, metric_value FROM metrics WHERE metric_key LIKE ?",
+            (f"{prefix}%",),
+        ).fetchall()
+
+    result: dict[str, int] = {}
+    for row in rows:
+        key = str(row["metric_key"])
+        suffix = key.removeprefix(prefix)
+        if suffix:
+            result[suffix] = int(row["metric_value"])
+    return result
+
+
+def metrics_snapshot() -> dict:
+    snapshot = {
+        "command_usage": metrics_get_prefixed("command_usage."),
+        "command_failures": metrics_get_prefixed("command_failures."),
+        "posts_by_category": metrics_get_prefixed("posts_by_category."),
+        "posts_total": int(metrics_get("posts_total", 0)),
+        "posts_auto": int(metrics_get("posts_auto", 0)),
+        "posts_manual": int(metrics_get("posts_manual", 0)),
+        "custom_posts": int(metrics_get("custom_posts", 0)),
+        "answers_total": int(metrics_get("answers_total", 0)),
+        "last_successful_auto_post": metrics_get("last_successful_auto_post", "") or None,
+    }
+    return ensure_metrics_shape(snapshot)
+
+
+def flatten_metrics_for_storage(metrics: dict) -> dict[str, str]:
+    shaped = metrics if isinstance(metrics, dict) else {}
+    shaped.setdefault("command_usage", {})
+    shaped.setdefault("command_failures", {})
+    shaped.setdefault("posts_by_category", {})
+    shaped.setdefault("posts_total", 0)
+    shaped.setdefault("posts_auto", 0)
+    shaped.setdefault("posts_manual", 0)
+    shaped.setdefault("custom_posts", 0)
+    shaped.setdefault("answers_total", 0)
+    shaped.setdefault("last_successful_auto_post", None)
+    flattened: dict[str, str] = {
+        "posts_total": str(int(shaped.get("posts_total", 0))),
+        "posts_auto": str(int(shaped.get("posts_auto", 0))),
+        "posts_manual": str(int(shaped.get("posts_manual", 0))),
+        "custom_posts": str(int(shaped.get("custom_posts", 0))),
+        "answers_total": str(int(shaped.get("answers_total", 0))),
+        "last_successful_auto_post": str(shaped.get("last_successful_auto_post") or ""),
+    }
+
+    for command_name, count in shaped.get("command_usage", {}).items():
+        flattened[f"command_usage.{command_name}"] = str(int(count))
+    for command_name, count in shaped.get("command_failures", {}).items():
+        flattened[f"command_failures.{command_name}"] = str(int(count))
+    for category, count in shaped.get("posts_by_category", {}).items():
+        flattened[f"posts_by_category.{category}"] = str(int(count))
+
+    return flattened
+
+
+def parse_post_row(row: sqlite3.Row) -> dict:
+    return {
+        "message_id": str(row["message_id"]),
+        "thread_id": str(row["thread_id"]) if row["thread_id"] is not None else None,
+        "channel_id": str(row["channel_id"]),
+        "category": str(row["category"]),
+        "question": str(row["question"]),
+        "posted_at": str(row["posted_at"]),
+        "close_after_hours": int(row["close_after_hours"]),
+        "closed": bool(row["closed"]),
+        "closed_at": str(row["closed_at"]) if row["closed_at"] is not None else None,
+        "close_reason": str(row["close_reason"]) if row["close_reason"] is not None else None,
+    }
+
+
+def upsert_post_row(record: dict) -> None:
+    close_after_hours = int(record.get("close_after_hours", THREAD_CLOSE_HOURS))
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO posts (
+                message_id, thread_id, channel_id, category, question, posted_at,
+                close_after_hours, closed, closed_at, close_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(message_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                channel_id = excluded.channel_id,
+                category = excluded.category,
+                question = excluded.question,
+                posted_at = excluded.posted_at,
+                close_after_hours = excluded.close_after_hours,
+                closed = excluded.closed,
+                closed_at = excluded.closed_at,
+                close_reason = excluded.close_reason
+            """,
+            (
+                str(record.get("message_id")),
+                str(record.get("thread_id")) if record.get("thread_id") else None,
+                str(record.get("channel_id")),
+                str(record.get("category") or "unknown"),
+                str(record.get("question") or MSG_UNKNOWN_QUESTION),
+                str(record.get("posted_at") or iso_now()),
+                close_after_hours,
+                1 if bool(record.get("closed", False)) else 0,
+                str(record.get("closed_at")) if record.get("closed_at") else None,
+                str(record.get("close_reason")) if record.get("close_reason") else None,
+            ),
+        )
+
+
+def get_structured_table_counts() -> tuple[int, int, int]:
+    with get_db_connection() as conn:
+        posts_count = int(conn.execute("SELECT COUNT(*) AS c FROM posts").fetchone()["c"])
+        answers_count = int(conn.execute("SELECT COUNT(*) AS c FROM answers").fetchone()["c"])
+        metrics_count = int(conn.execute("SELECT COUNT(*) AS c FROM metrics").fetchone()["c"])
+    return posts_count, answers_count, metrics_count
+
+
+def migrate_posts_from_state(state: dict) -> None:
+    for post in state.get("posts", []):
+        if isinstance(post, dict):
+            upsert_post_row(post)
+
+
+def migrate_answers_from_legacy_blob(legacy_answers: dict) -> None:
+    with get_db_connection() as conn:
+        for question_message_id, bucket in legacy_answers.items():
+            users = bucket.get("users", {}) if isinstance(bucket, dict) else {}
+            for user_id, data in users.items():
+                conn.execute(
+                    """
+                    INSERT INTO answers (question_message_id, user_id, answer_message_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(question_message_id, user_id) DO UPDATE SET
+                        answer_message_id = excluded.answer_message_id,
+                        created_at = excluded.created_at
+                    """,
+                    (
+                        str(question_message_id),
+                        str(user_id),
+                        str(data.get("answer_message_id") or ""),
+                        str(data.get("created_at") or iso_now()),
+                    ),
+                )
+
+
+def migrate_metrics_from_state(state: dict) -> None:
+    for metric_key, metric_value in flatten_metrics_for_storage(state.get("metrics", {})).items():
+        metrics_set(metric_key, metric_value)
+
+
+def migrate_structured_tables() -> None:
+    posts_count, answers_count, metrics_count = get_structured_table_counts()
+    state = db_get_json("state", {})
+
+    if posts_count == 0:
+        migrate_posts_from_state(state)
+
+    legacy_answers = db_get_json("answers", {})
+    if answers_count == 0 and isinstance(legacy_answers, dict):
+        migrate_answers_from_legacy_blob(legacy_answers)
+
+    if metrics_count == 0:
+        migrate_metrics_from_state(state)
+
+
 def maybe_migrate_json_files() -> None:
     for path, key in STORAGE_JSON_KEYS.items():
         if db_has_key(key) or not os.path.exists(path):
@@ -228,6 +424,7 @@ def maybe_migrate_json_files() -> None:
 def init_storage() -> None:
     init_db()
     maybe_migrate_json_files()
+    migrate_structured_tables()
 
 
 def save_json(path: str, data: dict) -> None:
@@ -287,10 +484,9 @@ def get_state() -> dict:
             "last_posted_date": None,
             "dry_run_auto_post": False,
             "last_dry_run_date": None,
+            "last_weekly_digest_week": None,
             "history": [],
             "used_questions": [],
-            "posts": [],
-            "metrics": {},
             "royal_presence": {},
             "royal_afk": {},
         },
@@ -304,24 +500,32 @@ def get_state() -> dict:
     state.setdefault("last_posted_date", None)
     state.setdefault("dry_run_auto_post", False)
     state.setdefault("last_dry_run_date", None)
+    state.setdefault("last_weekly_digest_week", None)
     state.setdefault("history", [])
     state.setdefault("used_questions", [])
-    state.setdefault("posts", [])
-    state.setdefault("metrics", {})
     state.setdefault("royal_presence", {})
     state.setdefault("royal_afk", {})
-    state["metrics"] = ensure_metrics_shape(state.get("metrics", {}))
+    state["posts"] = list_post_records(limit=POST_RECORD_LIMIT)
+    state["metrics"] = metrics_snapshot()
     state["royal_presence"] = ensure_royal_presence_shape(state.get("royal_presence", {}))
     state["royal_afk"] = ensure_royal_afk_shape(state.get("royal_afk", {}))
 
     if state.get("channel_id", 0) == 0:
         state["channel_id"] = COURT_CHANNEL_ID
 
-    save_state(state)
+    state_to_persist = dict(state)
+    state_to_persist["posts"] = []
+    state_to_persist["metrics"] = {}
+    save_state(state_to_persist)
     return state
 
 
 def save_state(state: dict) -> None:
+    with STATE_WRITE_LOCK:
+        _save_state_unlocked(state)
+
+
+def _save_state_unlocked(state: dict) -> None:
     state["history"] = state.get("history", [])[-HISTORY_LIMIT:]
 
     used = []
@@ -332,11 +536,45 @@ def save_state(state: dict) -> None:
             seen.add(question)
     state["used_questions"] = used
 
-    state["posts"] = state.get("posts", [])[-POST_RECORD_LIMIT:]
-    state["metrics"] = ensure_metrics_shape(state.get("metrics", {}))
+    for post in state.get("posts", [])[-POST_RECORD_LIMIT:]:
+        if isinstance(post, dict):
+            upsert_post_row(post)
+
+    for metric_key, metric_value in flatten_metrics_for_storage(state.get("metrics", {})).items():
+        metrics_set(metric_key, metric_value)
+
+    state["posts"] = []
+    state["metrics"] = {}
     state["royal_presence"] = ensure_royal_presence_shape(state.get("royal_presence", {}))
     state["royal_afk"] = ensure_royal_afk_shape(state.get("royal_afk", {}))
     save_json(STATE_FILE, state)
+
+
+def update_state_atomic(mutator: Callable[[dict], None]) -> dict:
+    with STATE_WRITE_LOCK:
+        state = load_json(
+            STATE_FILE,
+            {
+                "mode": "manual",
+                "hour": 20,
+                "minute": 0,
+                "channel_id": COURT_CHANNEL_ID,
+                "log_channel_id": LOG_CHANNEL_ID_ENV,
+                "last_posted_date": None,
+                "dry_run_auto_post": False,
+                "last_dry_run_date": None,
+                "last_weekly_digest_week": None,
+                "history": [],
+                "used_questions": [],
+                "royal_presence": {},
+                "royal_afk": {},
+            },
+        )
+        mutator(state)
+        _save_state_unlocked(state)
+        state["posts"] = list_post_records(limit=POST_RECORD_LIMIT)
+        state["metrics"] = metrics_snapshot()
+        return state
 
 
 def ensure_metrics_shape(metrics: dict) -> dict:
@@ -413,42 +651,26 @@ def increment_counter(counter_map: dict, key: str) -> None:
 
 
 def record_command_metric(command_name: str, success: bool = True) -> None:
-    state = get_state()
-    metrics = state.get("metrics", {})
-    usage = metrics.setdefault("command_usage", {})
-    increment_counter(usage, command_name)
+    metrics_increment(f"command_usage.{command_name}")
     if not success:
-        failures = metrics.setdefault("command_failures", {})
-        increment_counter(failures, command_name)
-    state["metrics"] = metrics
-    save_state(state)
+        metrics_increment(f"command_failures.{command_name}")
 
 
 def record_post_metric(category: str, source: str) -> None:
-    state = get_state()
-    metrics = state.get("metrics", {})
-    by_category = metrics.setdefault("posts_by_category", {})
-    increment_counter(by_category, category)
-    metrics["posts_total"] = int(metrics.get("posts_total", 0)) + 1
+    metrics_increment(f"posts_by_category.{category}")
+    metrics_increment("posts_total")
 
     if source == "auto":
-        metrics["posts_auto"] = int(metrics.get("posts_auto", 0)) + 1
-        metrics["last_successful_auto_post"] = iso_now()
+        metrics_increment("posts_auto")
+        metrics_set("last_successful_auto_post", iso_now())
     elif source == "manual":
-        metrics["posts_manual"] = int(metrics.get("posts_manual", 0)) + 1
+        metrics_increment("posts_manual")
     elif source == "custom":
-        metrics["custom_posts"] = int(metrics.get("custom_posts", 0)) + 1
-
-    state["metrics"] = metrics
-    save_state(state)
+        metrics_increment("custom_posts")
 
 
 def record_answer_metric() -> None:
-    state = get_state()
-    metrics = state.get("metrics", {})
-    metrics["answers_total"] = int(metrics.get("answers_total", 0)) + 1
-    state["metrics"] = metrics
-    save_state(state)
+    metrics_increment("answers_total")
 
 
 def get_questions() -> dict:
@@ -470,11 +692,49 @@ def get_questions() -> dict:
 
 
 def get_answers() -> dict:
-    return load_json(ANSWERS_FILE, {})
+    answers: dict[str, dict] = {}
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT question_message_id, user_id, answer_message_id, created_at
+            FROM answers
+            ORDER BY created_at ASC
+            """
+        ).fetchall()
+
+    for row in rows:
+        question_message_id = str(row["question_message_id"])
+        bucket = answers.setdefault(question_message_id, {"count": 0, "users": {}})
+        bucket["count"] += 1
+        bucket["users"][str(row["user_id"])] = {
+            "answer_message_id": str(row["answer_message_id"]),
+            "created_at": str(row["created_at"]),
+        }
+
+    return answers
 
 
 def save_answers(data: dict) -> None:
-    save_json(ANSWERS_FILE, data)
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM answers")
+        for question_message_id, bucket in data.items():
+            users = bucket.get("users", {}) if isinstance(bucket, dict) else {}
+            for user_id, answer_data in users.items():
+                conn.execute(
+                    """
+                    INSERT INTO answers (question_message_id, user_id, answer_message_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(question_message_id, user_id) DO UPDATE SET
+                        answer_message_id = excluded.answer_message_id,
+                        created_at = excluded.created_at
+                    """,
+                    (
+                        str(question_message_id),
+                        str(user_id),
+                        str(answer_data.get("answer_message_id") or ""),
+                        str(answer_data.get("created_at") or iso_now()),
+                    ),
+                )
 
 
 def normalize_question_text(value: str) -> str:
@@ -482,73 +742,113 @@ def normalize_question_text(value: str) -> str:
 
 
 def get_answer_bucket(question_message_id: int | str) -> dict:
-    answers = get_answers()
-    bucket = answers.setdefault(str(question_message_id), {"count": 0, "users": {}})
-    bucket.setdefault("count", 0)
-    bucket.setdefault("users", {})
-    save_answers(answers)
-    return bucket
+    key = str(question_message_id)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT user_id, answer_message_id, created_at FROM answers WHERE question_message_id = ?",
+            (key,),
+        ).fetchall()
+
+    users = {
+        str(row["user_id"]): {
+            "answer_message_id": str(row["answer_message_id"]),
+            "created_at": str(row["created_at"]),
+        }
+        for row in rows
+    }
+    return {"count": len(rows), "users": users}
 
 
 def has_user_answered(question_message_id: int, user_id: int) -> bool:
-    answers = get_answers()
-    bucket = answers.get(str(question_message_id), {"users": {}})
-    return str(user_id) in bucket.get("users", {})
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM answers WHERE question_message_id = ? AND user_id = ?",
+            (str(question_message_id), str(user_id)),
+        ).fetchone()
+    return row is not None
 
 
 def next_answer_number(question_message_id: int) -> int:
-    answers = get_answers()
-    bucket = answers.get(str(question_message_id), {"count": 0})
-    return int(bucket.get("count", 0)) + 1
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM answers WHERE question_message_id = ?",
+            (str(question_message_id),),
+        ).fetchone()
+    return int(row["c"]) + 1
 
 
 def mark_user_answered(question_message_id: int, user_id: int, answer_message_id: int) -> None:
-    answers = get_answers()
-    key = str(question_message_id)
-
-    if key not in answers:
-        answers[key] = {"count": 0, "users": {}}
-
-    answers[key].setdefault("count", 0)
-    answers[key].setdefault("users", {})
-
-    answers[key]["count"] += 1
-    answers[key]["users"][str(user_id)] = {
-        "answer_message_id": str(answer_message_id),
-        "created_at": iso_now(),
-    }
-
-    save_answers(answers)
+    now_iso = iso_now()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO answers (question_message_id, user_id, answer_message_id, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(question_message_id, user_id) DO UPDATE SET
+                answer_message_id = excluded.answer_message_id,
+                created_at = excluded.created_at
+            """,
+            (str(question_message_id), str(user_id), str(answer_message_id), now_iso),
+        )
+        conn.execute(
+            """
+            INSERT INTO anon_cooldowns (user_id, last_answer_at)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                last_answer_at = excluded.last_answer_at
+            """,
+            (str(user_id), now_iso),
+        )
 
 
 def find_answer_record(answer_message_id: str) -> tuple[str, str] | None:
-    answers = get_answers()
-
-    for question_message_id, bucket in answers.items():
-        for user_id, data in bucket.get("users", {}).items():
-            if str(data.get("answer_message_id")) == str(answer_message_id):
-                return question_message_id, user_id
-
-    return None
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT question_message_id, user_id FROM answers WHERE answer_message_id = ?",
+            (str(answer_message_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    return str(row["question_message_id"]), str(row["user_id"])
 
 
 def remove_answer_record(answer_message_id: str) -> tuple[str, str] | None:
-    answers = get_answers()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT question_message_id, user_id FROM answers WHERE answer_message_id = ?",
+            (str(answer_message_id),),
+        ).fetchone()
+        if row is None:
+            return None
 
-    for question_message_id, bucket in answers.items():
-        users = bucket.get("users", {})
-        target_user_id = None
-        for user_id, data in users.items():
-            if str(data.get("answer_message_id")) == str(answer_message_id):
-                target_user_id = user_id
-                break
+        conn.execute("DELETE FROM answers WHERE answer_message_id = ?", (str(answer_message_id),))
+    return str(row["question_message_id"]), str(row["user_id"])
 
-        if target_user_id is not None:
-            del users[target_user_id]
-            save_answers(answers)
-            return question_message_id, target_user_id
 
-    return None
+def count_answers_for_question(question_message_id: int | str) -> int:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM answers WHERE question_message_id = ?",
+            (str(question_message_id),),
+        ).fetchone()
+    return int(row["c"])
+
+
+def count_all_answer_records() -> int:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM answers").fetchone()
+    return int(row["c"])
+
+
+def get_last_answer_time_for_user(user_id: int) -> datetime | None:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT last_answer_at FROM anon_cooldowns WHERE user_id = ?",
+            (str(user_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    return parse_iso(str(row["last_answer_at"]))
 
 
 def is_staff(member: discord.Member) -> bool:
@@ -558,25 +858,28 @@ def is_staff(member: discord.Member) -> bool:
 
 
 def remove_question_from_state(question: str) -> None:
-    state = get_state()
-    state["history"] = [q for q in state.get("history", []) if q != question]
-    state["used_questions"] = [q for q in state.get("used_questions", []) if q != question]
-    save_state(state)
+    def mutator(state: dict) -> None:
+        state["history"] = [q for q in state.get("history", []) if q != question]
+        state["used_questions"] = [q for q in state.get("used_questions", []) if q != question]
+
+    update_state_atomic(mutator)
 
 
 def replace_question_in_state(old_question: str, new_question: str) -> None:
-    state = get_state()
-    state["history"] = [new_question if q == old_question else q for q in state.get("history", [])]
-    state["used_questions"] = [new_question if q == old_question else q for q in state.get("used_questions", [])]
-    save_state(state)
+    def mutator(state: dict) -> None:
+        state["history"] = [new_question if q == old_question else q for q in state.get("history", [])]
+        state["used_questions"] = [new_question if q == old_question else q for q in state.get("used_questions", [])]
+
+    update_state_atomic(mutator)
 
 
 def register_used_question(question: str) -> None:
-    state = get_state()
-    state["history"].append(question)
-    if question not in state["used_questions"]:
-        state["used_questions"].append(question)
-    save_state(state)
+    def mutator(state: dict) -> None:
+        state["history"].append(question)
+        if question not in state["used_questions"]:
+            state["used_questions"].append(question)
+
+    update_state_atomic(mutator)
 
 
 def pick_question(category: str | None = None, randomize: bool = True) -> tuple[str, str]:
@@ -616,39 +919,52 @@ def pick_question(category: str | None = None, randomize: bool = True) -> tuple[
 
 
 def get_post_record(message_id: int | str) -> dict | None:
-    state = get_state()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM posts WHERE message_id = ?",
+            (str(message_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    return parse_post_row(row)
 
-    for post in reversed(state.get("posts", [])):
-        if str(post.get("message_id")) == str(message_id):
-            return post
 
-    return None
+def list_post_records(include_closed: bool = True, limit: int | None = None) -> list[dict]:
+    if limit is None:
+        query = "SELECT * FROM posts"
+        params: list[object] = []
+        if not include_closed:
+            query += " WHERE closed = 0"
+        query += " ORDER BY posted_at ASC"
+    else:
+        query = "SELECT * FROM posts"
+        params = []
+        if not include_closed:
+            query += " WHERE closed = 0"
+        query += " ORDER BY posted_at DESC LIMIT ?"
+        params.append(limit)
+
+    with get_db_connection() as conn:
+        rows = conn.execute(query, tuple(params)).fetchall()
+
+    parsed = [parse_post_row(row) for row in rows]
+    if limit is not None:
+        parsed.reverse()
+    return parsed
 
 
 def get_latest_open_post() -> dict | None:
-    state = get_state()
-
-    for post in reversed(state.get("posts", [])):
-        if not post.get("closed", False):
-            return post
-
-    return None
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM posts WHERE closed = 0 ORDER BY posted_at DESC LIMIT 1"
+        ).fetchone()
+    if row is None:
+        return None
+    return parse_post_row(row)
 
 
 def upsert_post_record(record: dict) -> None:
-    state = get_state()
-    posts = state.get("posts", [])
-
-    for index, existing in enumerate(posts):
-        if str(existing.get("message_id")) == str(record.get("message_id")):
-            posts[index] = record
-            state["posts"] = posts
-            save_state(state)
-            return
-
-    posts.append(record)
-    state["posts"] = posts
-    save_state(state)
+    upsert_post_row(record)
 
 
 def update_post_thread_id(message_id: int | str, thread_id: int | str) -> None:
@@ -670,9 +986,32 @@ def mark_post_closed(message_id: int | str, reason: str) -> None:
     upsert_post_record(record)
 
 
+def mark_post_open(message_id: int | str, close_after_hours: int | None = None) -> dict | None:
+    record = get_post_record(message_id)
+    if record is None:
+        return None
+
+    record["closed"] = False
+    record["closed_at"] = None
+    record["close_reason"] = None
+    if close_after_hours is not None:
+        record["close_after_hours"] = int(close_after_hours)
+    upsert_post_record(record)
+    return record
+
+
+def set_post_close_after_hours(message_id: int | str, close_after_hours: int) -> dict | None:
+    record = get_post_record(message_id)
+    if record is None:
+        return None
+    record["close_after_hours"] = int(close_after_hours)
+    upsert_post_record(record)
+    return record
+
+
 def extract_question_from_message(message: discord.Message | None) -> str:
     if not message or not message.embeds:
-        return "Unknown question"
+        return MSG_UNKNOWN_QUESTION
 
     embed = message.embeds[0]
     description = embed.description or ""
@@ -681,7 +1020,7 @@ def extract_question_from_message(message: discord.Message | None) -> str:
     if marker in description:
         return description.split(marker, 1)[1].strip()
 
-    return "Unknown question"
+    return MSG_UNKNOWN_QUESTION
 
 
 def make_thread_name(question: str) -> str:
@@ -897,13 +1236,61 @@ async def close_court_post(
     return True, "Court inquiry closed."
 
 
+def get_post_close_after_hours(record: dict) -> int:
+    return int(record.get("close_after_hours", THREAD_CLOSE_HOURS))
+
+
+def get_post_close_deadline(record: dict) -> datetime | None:
+    posted_at = parse_iso(record.get("posted_at"))
+    if posted_at is None:
+        return None
+    return posted_at + timedelta(hours=get_post_close_after_hours(record))
+
+
+def get_post_remaining_time(record: dict, now: datetime) -> timedelta | None:
+    deadline = get_post_close_deadline(record)
+    if deadline is None:
+        return None
+    return deadline - now
+
+
+async def reopen_court_post(record: dict, close_after_hours: int | None = None) -> tuple[bool, str]:
+    if not record.get("closed", False):
+        return False, "This court inquiry is already open."
+
+    thread = None
+    if record.get("thread_id"):
+        fetched = await fetch_channel_by_id(record["thread_id"])
+        if isinstance(fetched, discord.Thread):
+            thread = fetched
+
+    if thread is not None:
+        try:
+            await thread.edit(archived=False, locked=False, auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES)
+        except Exception:
+            pass
+
+    message = await get_post_message(record)
+    if message is not None:
+        try:
+            await message.edit(view=AnonymousAnswerView())
+        except Exception:
+            pass
+
+    reopened = mark_post_open(record["message_id"], close_after_hours=close_after_hours)
+    if reopened is None:
+        return False, "Could not reopen this inquiry record."
+
+    return True, "Court inquiry reopened."
+
+
 def status_text() -> str:
     state = get_state()
     channel_id = state["channel_id"]
     log_channel_id = state.get("log_channel_id", 0)
     channel_mention = f"<#{channel_id}>" if channel_id else "Not set"
     log_channel_mention = f"<#{log_channel_id}>" if log_channel_id else "Disabled"
-    open_posts = sum(1 for post in state.get("posts", []) if not post.get("closed", False))
+    open_posts = len(list_post_records(include_closed=False))
 
     return (
         f"**Mode:** `{state['mode']}`\n"
@@ -941,7 +1328,8 @@ def count_open_and_overdue_posts(posts: list[dict], now: datetime) -> tuple[int,
     overdue_posts = 0
     for post in open_posts:
         posted_at = parse_iso(post.get("posted_at"))
-        if posted_at and now - posted_at >= timedelta(hours=THREAD_CLOSE_HOURS):
+        close_after_hours = int(post.get("close_after_hours", THREAD_CLOSE_HOURS))
+        if posted_at and now - posted_at >= timedelta(hours=close_after_hours):
             overdue_posts += 1
     return len(open_posts), overdue_posts
 
@@ -1026,10 +1414,11 @@ def add_warnings_field(embed: discord.Embed, warnings: list[str]) -> None:
 async def build_health_embed(guild: discord.Guild) -> discord.Embed:
     state = get_state()
     questions = get_questions()
-    metrics = state.get("metrics", {})
+    metrics = metrics_snapshot()
+    posts = list_post_records(limit=POST_RECORD_LIMIT)
     now = get_now()
 
-    open_posts_count, overdue_open_posts = count_open_and_overdue_posts(state.get("posts", []), now)
+    open_posts_count, overdue_open_posts = count_open_and_overdue_posts(posts, now)
 
     target_channel = await get_target_channel(guild)
     log_channel = await get_log_channel(guild)
@@ -1086,7 +1475,9 @@ async def build_health_embed(guild: discord.Guild) -> discord.Embed:
         name="Tasks",
         value=(
             f"**Auto Poster Loop:** `{'running' if auto_poster.is_running() else 'stopped'}`\n"
-            f"**Thread Closer Loop:** `{'running' if thread_closer.is_running() else 'stopped'}`"
+            f"**Thread Closer Loop:** `{'running' if thread_closer.is_running() else 'stopped'}`\n"
+            f"**Weekly Digest Loop:** `{'running' if weekly_digest.is_running() else 'stopped'}`\n"
+            f"**Retention Loop:** `{'running' if retention_cleaner.is_running() else 'stopped'}`"
         ),
         inline=True,
     )
@@ -1114,15 +1505,13 @@ async def build_health_embed(guild: discord.Guild) -> discord.Embed:
 
 
 def build_analytics_embed() -> discord.Embed:
-    state = get_state()
-    metrics = state.get("metrics", {})
-    posts = state.get("posts", [])
-    answers = get_answers()
+    metrics = metrics_snapshot()
+    posts = list_post_records(limit=POST_RECORD_LIMIT)
     today = get_now().strftime("%Y-%m-%d")
 
     posts_today = sum(1 for post in posts if str(post.get("posted_at", "")).startswith(today))
     open_posts = sum(1 for post in posts if not post.get("closed", False))
-    total_answers = sum(len(bucket.get("users", {})) for bucket in answers.values())
+    total_answers = count_all_answer_records()
     post_count = max(len(posts), 1)
     average_answers = total_answers / post_count
 
@@ -1253,6 +1642,7 @@ def merge_imported_state(imported: dict) -> dict:
         "last_posted_date",
         "dry_run_auto_post",
         "last_dry_run_date",
+        "last_weekly_digest_week",
         "history",
         "used_questions",
         "posts",
@@ -1264,6 +1654,68 @@ def merge_imported_state(imported: dict) -> dict:
         if key in imported:
             base[key] = imported[key]
     return base
+
+
+def as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def remaining_anonymous_cooldown_seconds(user_id: int) -> int:
+    if ANON_COOLDOWN_SECONDS <= 0:
+        return 0
+
+    last_answer_at = as_utc(get_last_answer_time_for_user(user_id))
+    if last_answer_at is None:
+        return 0
+
+    now_utc = datetime.now(timezone.utc)
+    elapsed = int((now_utc - last_answer_at).total_seconds())
+    return max(ANON_COOLDOWN_SECONDS - elapsed, 0)
+
+
+def validate_anonymous_answer_submission(member: discord.Member, answer_text: str) -> str | None:
+    now_utc = datetime.now(timezone.utc)
+
+    if ANON_REQUIRED_ROLE_ID and not any(role.id == ANON_REQUIRED_ROLE_ID for role in member.roles):
+        return "You are not eligible to submit anonymous court answers yet."
+
+    account_created = as_utc(getattr(member, "created_at", None))
+    if ANON_MIN_ACCOUNT_AGE_MINUTES > 0 and account_created is not None:
+        account_age = now_utc - account_created
+        required = timedelta(minutes=ANON_MIN_ACCOUNT_AGE_MINUTES)
+        if account_age < required:
+            remaining = required - account_age
+            return (
+                "Your account is too new to use anonymous answers. "
+                f"Try again in `{format_duration(remaining)}`."
+            )
+
+    joined_at = as_utc(getattr(member, "joined_at", None))
+    if ANON_MIN_MEMBER_AGE_MINUTES > 0 and joined_at is not None:
+        member_age = now_utc - joined_at
+        required = timedelta(minutes=ANON_MIN_MEMBER_AGE_MINUTES)
+        if member_age < required:
+            remaining = required - member_age
+            return (
+                "You need more time in this server before using anonymous answers. "
+                f"Try again in `{format_duration(remaining)}`."
+            )
+
+    cooldown_left = remaining_anonymous_cooldown_seconds(member.id)
+    if cooldown_left > 0:
+        return (
+            "You are on cooldown for anonymous answers. "
+            f"Try again in `{format_duration(timedelta(seconds=cooldown_left))}`."
+        )
+
+    if not ANON_ALLOW_LINKS and URL_PATTERN.search(answer_text):
+        return "Links are currently disabled for anonymous answers."
+
+    return None
 
 
 class AnonymousAnswerModal(discord.ui.Modal, title="Anonymous Court Answer"):
@@ -1294,6 +1746,13 @@ class AnonymousAnswerModal(discord.ui.Modal, title="Anonymous Court Answer"):
             )
             return
 
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                MSG_USE_IN_SERVER,
+                ephemeral=True,
+            )
+            return
+
         post_record = get_post_record(interaction.message.id)
         if post_record and post_record.get("closed", False):
             await interaction.response.send_message(
@@ -1304,6 +1763,11 @@ class AnonymousAnswerModal(discord.ui.Modal, title="Anonymous Court Answer"):
 
         question_message_id = interaction.message.id
         user_id = interaction.user.id
+
+        validation_error = validate_anonymous_answer_submission(interaction.user, self.answer.value)
+        if validation_error is not None:
+            await interaction.response.send_message(validation_error, ephemeral=True)
+            return
 
         if has_user_answered(question_message_id, user_id):
             await interaction.response.send_message(
@@ -1415,6 +1879,7 @@ async def post_question(
         "category": chosen_category,
         "question": question,
         "posted_at": iso_now(),
+        "close_after_hours": THREAD_CLOSE_HOURS,
         "closed": False,
         "closed_at": None,
         "close_reason": None,
@@ -1442,6 +1907,8 @@ class ImperialCourtBot(commands.Bot):
         logger.info("Synced %s command(s) to guild %s", len(synced), TEST_GUILD_ID)
         auto_poster.start()
         thread_closer.start()
+        weekly_digest.start()
+        retention_cleaner.start()
 
 
 intents = discord.Intents.default()
@@ -1966,6 +2433,39 @@ async def apply_timeout_to_targets(
     return applied, skipped, failed, details
 
 
+def build_target_cap_message(eligible_targets: int) -> str:
+    return (
+        f"Safety cap blocked this action. Eligible targets: `{eligible_targets}` exceeds cap `{MUTEALL_TARGET_CAP}`. "
+        "Set `MUTEALL_TARGET_CAP=0` or raise the cap in config for larger actions."
+    )
+
+
+def preview_timeout_targets(
+    actor: discord.Member,
+    me: discord.Member,
+    targets: list[discord.Member],
+    only_if_timed_out: bool = False,
+) -> tuple[int, int, list[str]]:
+    eligible = 0
+    skipped = 0
+    details: list[str] = []
+
+    for target in targets:
+        allowed, why_not = can_timeout_target(actor, me, target)
+        if not allowed:
+            skipped += 1
+            details.append(f"{target} ({why_not})")
+            continue
+
+        if only_if_timed_out and not target.is_timed_out():
+            skipped += 1
+            continue
+
+        eligible += 1
+
+    return eligible, skipped, details
+
+
 class AdminSayModal(discord.ui.Modal, title="Send Announcement"):
     message_content = discord.ui.TextInput(
         label="Message",
@@ -2326,12 +2826,14 @@ async def admin_untimeout(
 @app_commands.describe(
     members="Mentions or user IDs separated by spaces",
     minutes="Timeout duration in minutes (1-40320)",
+    dry_run="Preview impacts without applying timeouts",
     reason="Optional reason",
 )
 async def admin_mutemany(
     interaction: discord.Interaction,
     members: str,
     minutes: app_commands.Range[int, 1, MAX_TIMEOUT_MINUTES],
+    dry_run: bool = False,
     reason: str | None = None,
 ) -> None:
     if not await require_staff(interaction):
@@ -2350,6 +2852,22 @@ async def admin_mutemany(
     await interaction.response.defer(ephemeral=True)
 
     targets, missing_ids = await resolve_members(guild, member_ids)
+    eligible, preview_skipped, preview_details = preview_timeout_targets(actor, me, targets)
+
+    if MUTEALL_TARGET_CAP > 0 and eligible > MUTEALL_TARGET_CAP:
+        await interaction.followup.send(build_target_cap_message(eligible), ephemeral=True)
+        return
+
+    if dry_run:
+        summary = (
+            f"Dry run only: would mute `{eligible}` member(s) for `{minutes}` minute(s).\n"
+            f"Skipped during preview: `{preview_skipped}` | Unknown IDs: `{len(missing_ids)}`"
+        )
+        if preview_details:
+            summary += PREVIEW_ISSUES_PREFIX + "\n".join(f"- {line}" for line in preview_details[:10])
+        await interaction.followup.send(summary, ephemeral=True)
+        return
+
     mute_until = get_now() + timedelta(minutes=minutes)
     mod_reason = build_timeout_reason("Muted", actor, reason)
     applied, skipped, failed, skipped_details = await apply_timeout_to_targets(
@@ -2385,11 +2903,13 @@ async def admin_mutemany(
 @admin_group.command(name="unmutemany", description="Remove timeout from multiple members")
 @app_commands.describe(
     members="Mentions or user IDs separated by spaces",
+    dry_run="Preview impacts without removing timeouts",
     reason="Optional reason",
 )
 async def admin_unmutemany(
     interaction: discord.Interaction,
     members: str,
+    dry_run: bool = False,
     reason: str | None = None,
 ) -> None:
     if not await require_staff(interaction):
@@ -2408,6 +2928,22 @@ async def admin_unmutemany(
     await interaction.response.defer(ephemeral=True)
 
     targets, missing_ids = await resolve_members(guild, member_ids)
+    eligible, preview_skipped, preview_details = preview_timeout_targets(actor, me, targets, only_if_timed_out=True)
+
+    if MUTEALL_TARGET_CAP > 0 and eligible > MUTEALL_TARGET_CAP:
+        await interaction.followup.send(build_target_cap_message(eligible), ephemeral=True)
+        return
+
+    if dry_run:
+        summary = (
+            f"Dry run only: would unmute `{eligible}` member(s).\n"
+            f"Skipped during preview: `{preview_skipped}` | Unknown IDs: `{len(missing_ids)}`"
+        )
+        if preview_details:
+            summary += PREVIEW_ISSUES_PREFIX + "\n".join(f"- {line}" for line in preview_details[:10])
+        await interaction.followup.send(summary, ephemeral=True)
+        return
+
     mod_reason = build_timeout_reason("Unmuted", actor, reason)
     applied, skipped, failed, skipped_details = await apply_timeout_to_targets(
         actor,
@@ -2442,12 +2978,14 @@ async def admin_unmutemany(
 @app_commands.describe(
     minutes="Timeout duration in minutes (1-40320)",
     confirm="Type CONFIRM to run",
+    dry_run="Preview impacts without applying timeouts",
     reason="Optional reason",
 )
 async def admin_muteall(
     interaction: discord.Interaction,
     minutes: app_commands.Range[int, 1, MAX_TIMEOUT_MINUTES],
     confirm: str,
+    dry_run: bool = False,
     reason: str | None = None,
 ) -> None:
     if not await require_staff(interaction):
@@ -2469,6 +3007,21 @@ async def admin_muteall(
             await guild.chunk(cache=True)
     except Exception:
         pass
+
+    eligible, preview_skipped, preview_details = preview_timeout_targets(actor, me, guild.members)
+    if MUTEALL_TARGET_CAP > 0 and eligible > MUTEALL_TARGET_CAP:
+        await interaction.followup.send(build_target_cap_message(eligible), ephemeral=True)
+        return
+
+    if dry_run:
+        summary = (
+            f"Dry run only: would mute `{eligible}` member(s) for `{minutes}` minute(s).\n"
+            f"Skipped during preview: `{preview_skipped}`"
+        )
+        if preview_details:
+            summary += PREVIEW_ISSUES_PREFIX + "\n".join(f"- {line}" for line in preview_details[:10])
+        await interaction.followup.send(summary, ephemeral=True)
+        return
 
     mute_until = get_now() + timedelta(minutes=minutes)
     mod_reason = build_timeout_reason("Muted", actor, reason)
@@ -2498,10 +3051,11 @@ async def admin_muteall(
 
 
 @admin_group.command(name="unmuteall", description="Remove timeout from all non-bot members")
-@app_commands.describe(confirm="Type CONFIRM to run", reason="Optional reason")
+@app_commands.describe(confirm="Type CONFIRM to run", dry_run="Preview impacts without removing timeouts", reason="Optional reason")
 async def admin_unmuteall(
     interaction: discord.Interaction,
     confirm: str,
+    dry_run: bool = False,
     reason: str | None = None,
 ) -> None:
     if not await require_staff(interaction):
@@ -2523,6 +3077,26 @@ async def admin_unmuteall(
             await guild.chunk(cache=True)
     except Exception:
         pass
+
+    eligible, preview_skipped, preview_details = preview_timeout_targets(
+        actor,
+        me,
+        guild.members,
+        only_if_timed_out=True,
+    )
+    if MUTEALL_TARGET_CAP > 0 and eligible > MUTEALL_TARGET_CAP:
+        await interaction.followup.send(build_target_cap_message(eligible), ephemeral=True)
+        return
+
+    if dry_run:
+        summary = (
+            f"Dry run only: would unmute `{eligible}` member(s).\n"
+            f"Skipped during preview: `{preview_skipped}`"
+        )
+        if preview_details:
+            summary += PREVIEW_ISSUES_PREFIX + "\n".join(f"- {line}" for line in preview_details[:10])
+        await interaction.followup.send(summary, ephemeral=True)
+        return
 
     mod_reason = build_timeout_reason("Unmuted", actor, reason)
     applied, skipped, failed, _ = await apply_timeout_to_targets(
@@ -2802,6 +3376,9 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `/court post [category] [randomize]` — Post a question now (opt: pick category/order)
 `/court custom <question>` — Post a custom question immediately
 `/court close [message_id]` — Close latest inquiry (or specific by ID)
+`/court listopen` — Show open inquiries with age/remaining time/answer counts
+`/court extend <message_id> <additional_hours>` — Extend inquiry auto-close window
+`/court reopen <message_id> [close_after_hours]` — Reopen a closed inquiry
 `/court removeanswer <message_id>` — Remove anonymous answer by message ID
 
 **Invictus Commands**
@@ -2816,10 +3393,10 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `/invictus slowmode <seconds>` — Set slowmode (0-21600)
 `/invictus timeout <member> <minutes> [reason]` — Timeout member (1-40320 min)
 `/invictus untimeout <member> [reason]` — Remove timeout from member
-`/invictus mutemany <members> <minutes> [reason]` — Timeout multiple (space-separated IDs/mentions)
-`/invictus unmutemany <members> [reason]` — Remove timeout from multiple
-`/invictus muteall <minutes> <confirm> [reason]` — Timeout all (type CONFIRM)
-`/invictus unmuteall <confirm> [reason]` — Remove timeout from all (type CONFIRM)
+`/invictus mutemany <members> <minutes> [dry_run] [reason]` — Timeout multiple with dry-run option
+`/invictus unmutemany <members> [dry_run] [reason]` — Remove timeout from multiple with dry-run option
+`/invictus muteall <minutes> <confirm> [dry_run] [reason]` — Timeout all (type CONFIRM)
+`/invictus unmuteall <confirm> [dry_run] [reason]` — Remove timeout from all (type CONFIRM)
 
 **Fun Commands**
 `/fun battle <opponent>` — Battle another member (mentions both users)
@@ -3321,6 +3898,7 @@ async def court_custom(interaction: discord.Interaction, question: str) -> None:
         "category": "custom",
         "question": clean_question,
         "posted_at": iso_now(),
+        "close_after_hours": THREAD_CLOSE_HOURS,
         "closed": False,
         "closed_at": None,
         "close_reason": None,
@@ -3377,6 +3955,108 @@ async def court_close(
             interaction.guild,
             "Court Inquiry Closed",
             f"**By:** {interaction.user.mention}\n**Message ID:** `{record['message_id']}`\n**Question:** {record['question']}",
+        )
+
+
+@court_group.command(name="listopen", description="List currently open court inquiries")
+async def court_listopen(interaction: discord.Interaction) -> None:
+    if not await require_staff(interaction):
+        return
+
+    open_posts = list_post_records(include_closed=False)
+    if not open_posts:
+        await interaction.response.send_message("No open court inquiries.", ephemeral=True)
+        return
+
+    now = get_now()
+    lines: list[str] = []
+    for post in open_posts[-10:]:
+        posted_at = parse_iso(post.get("posted_at"))
+        age_text = format_duration(now - posted_at) if posted_at else "Unknown"
+        remaining = get_post_remaining_time(post, now)
+        if remaining is None:
+            closes_text = "Unknown"
+        elif remaining.total_seconds() <= 0:
+            closes_text = "Overdue"
+        else:
+            closes_text = format_duration(remaining)
+
+        answer_count = count_answers_for_question(post["message_id"])
+        lines.append(
+            f"- `{post['message_id']}` | `{post.get('category', 'unknown')}` | "
+            f"Age `{age_text}` | Closes in `{closes_text}` | Answers `{answer_count}`"
+        )
+
+    record_command_metric("court.listopen")
+    await interaction.response.send_message(
+        "**Open Court Inquiries (latest 10)**\n" + "\n".join(lines),
+        ephemeral=True,
+    )
+
+
+@court_group.command(name="extend", description="Extend auto-close window for a court inquiry")
+@app_commands.describe(message_id="Inquiry message ID", additional_hours="Hours to add (1-168)")
+async def court_extend(
+    interaction: discord.Interaction,
+    message_id: str,
+    additional_hours: app_commands.Range[int, 1, 168],
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    record = get_post_record(message_id)
+    if record is None:
+        await interaction.response.send_message("Court inquiry not found.", ephemeral=True)
+        return
+
+    current_window = get_post_close_after_hours(record)
+    new_window = current_window + int(additional_hours)
+    set_post_close_after_hours(message_id, new_window)
+
+    record_command_metric("court.extend")
+    await interaction.response.send_message(
+        f"Extended inquiry `{message_id}` by `{additional_hours}` hour(s). New close window: `{new_window}` hour(s).",
+        ephemeral=True,
+    )
+
+    if interaction.guild is not None:
+        await send_log(
+            interaction.guild,
+            "Court Inquiry Extended",
+            f"**By:** {interaction.user.mention}\n**Message ID:** `{message_id}`\n"
+            f"**Old Window:** `{current_window}`h\n**New Window:** `{new_window}`h",
+        )
+
+
+@court_group.command(name="reopen", description="Reopen a closed court inquiry")
+@app_commands.describe(message_id="Inquiry message ID", close_after_hours="New auto-close window in hours (1-168)")
+async def court_reopen(
+    interaction: discord.Interaction,
+    message_id: str,
+    close_after_hours: app_commands.Range[int, 1, 168] = THREAD_CLOSE_HOURS,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    if interaction.guild is None:
+        await interaction.response.send_message(MSG_USE_IN_SERVER, ephemeral=True)
+        return
+
+    record = get_post_record(message_id)
+    if record is None:
+        await interaction.response.send_message("Court inquiry not found.", ephemeral=True)
+        return
+
+    ok, message = await reopen_court_post(record, close_after_hours=int(close_after_hours))
+    record_command_metric("court.reopen")
+    await interaction.response.send_message(message, ephemeral=True)
+
+    if ok:
+        await send_log(
+            interaction.guild,
+            "Court Inquiry Reopened",
+            f"**By:** {interaction.user.mention}\n**Message ID:** `{message_id}`\n"
+            f"**Close Window:** `{int(close_after_hours)}`h",
         )
 
 
@@ -3510,6 +4190,137 @@ async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -
     await interaction.response.send_message(content=f"{player1.mention} {player2.mention}", embed=embed)
 
 
+def get_week_key(now: datetime) -> str:
+    iso_year, iso_week, _ = now.isocalendar()
+    return f"{iso_year}-W{iso_week:02d}"
+
+
+async def get_weekly_digest_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    if WEEKLY_DIGEST_CHANNEL_ID:
+        channel = guild.get_channel(int(WEEKLY_DIGEST_CHANNEL_ID))
+        if isinstance(channel, discord.TextChannel):
+            return channel
+        fetched = await fetch_channel_by_id(WEEKLY_DIGEST_CHANNEL_ID)
+        if isinstance(fetched, discord.TextChannel):
+            return fetched
+
+    return await get_log_channel(guild)
+
+
+def build_weekly_digest_embed() -> discord.Embed:
+    now = get_now()
+    metrics = metrics_snapshot()
+    posts = list_post_records(limit=POST_RECORD_LIMIT)
+    answers_total = count_all_answer_records()
+    open_posts = [post for post in posts if not post.get("closed", False)]
+    unanswered_open = [post for post in open_posts if count_answers_for_question(post.get("message_id", "")) == 0]
+    post_count = max(len(posts), 1)
+
+    by_category = metrics.get("posts_by_category", {})
+    top_categories = sorted(by_category.items(), key=lambda item: int(item[1]), reverse=True)[:3]
+    top_category_text = "\n".join(f"- `{cat}`: `{count}`" for cat, count in top_categories) or "No data yet."
+
+    usage = metrics.get("command_usage", {})
+    failures = metrics.get("command_failures", {})
+    usage_total = sum(int(value) for value in usage.values())
+    failure_total = sum(int(value) for value in failures.values())
+    failure_rate = (failure_total / usage_total * 100) if usage_total else 0.0
+
+    embed = discord.Embed(
+        title="Weekly Court Digest",
+        description=f"Week `{get_week_key(now)}` performance summary.",
+        color=ROLE_COLOR,
+        timestamp=now,
+    )
+    embed.add_field(
+        name="Posts & Answers",
+        value=(
+            f"**Posts (recent window):** `{len(posts)}`\n"
+            f"**Open Inquiries:** `{len(open_posts)}`\n"
+            f"**Unanswered Open:** `{len(unanswered_open)}`\n"
+            f"**Answer Records:** `{answers_total}`\n"
+            f"**Avg Answers/Post:** `{answers_total / post_count:.2f}`"
+        ),
+        inline=False,
+    )
+    embed.add_field(name="Top Categories", value=top_category_text, inline=False)
+    embed.add_field(
+        name="Command Reliability",
+        value=(
+            f"**Command Invocations:** `{usage_total}`\n"
+            f"**Command Failures:** `{failure_total}`\n"
+            f"**Failure Rate:** `{failure_rate:.2f}%`"
+        ),
+        inline=False,
+    )
+    return embed
+
+
+def purge_expired_answers(retention_days: int) -> int:
+    cutoff = (get_now() - timedelta(days=retention_days)).isoformat()
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) AS c FROM answers WHERE created_at < ?",
+            (cutoff,),
+        ).fetchone()
+        removed = int(rows["c"])
+        if removed:
+            conn.execute("DELETE FROM answers WHERE created_at < ?", (cutoff,))
+    return removed
+
+
+@tasks.loop(minutes=30)
+async def weekly_digest() -> None:
+    guild = bot.get_guild(TEST_GUILD_ID)
+    if guild is None:
+        return
+
+    now = get_now()
+    if now.weekday() != WEEKLY_DIGEST_WEEKDAY or now.hour != WEEKLY_DIGEST_HOUR:
+        return
+
+    state = get_state()
+    week_key = get_week_key(now)
+    if state.get("last_weekly_digest_week") == week_key:
+        return
+
+    channel = await get_weekly_digest_channel(guild)
+    if channel is None:
+        return
+
+    try:
+        await channel.send(embed=build_weekly_digest_embed())
+
+        def mutator(current_state: dict) -> None:
+            current_state["last_weekly_digest_week"] = week_key
+
+        update_state_atomic(mutator)
+    except Exception as error:
+        await send_failure_alert(guild, "Weekly Digest Failed", error, "weekly_digest loop")
+
+
+@weekly_digest.before_loop
+async def before_weekly_digest() -> None:
+    await bot.wait_until_ready()
+
+
+@tasks.loop(hours=24)
+async def retention_cleaner() -> None:
+    guild = bot.get_guild(TEST_GUILD_ID)
+    removed = purge_expired_answers(ANSWER_RETENTION_DAYS)
+    if guild is not None and removed > 0:
+        await send_log(
+            guild,
+            "Answer Retention Cleanup",
+            f"Removed `{removed}` answer record(s) older than `{ANSWER_RETENTION_DAYS}` day(s).",
+        )
+
+
+@retention_cleaner.before_loop
+async def before_retention_cleaner() -> None:
+    await bot.wait_until_ready()
+
+
 @tasks.loop(minutes=1)
 async def auto_poster() -> None:
     state = get_state()
@@ -3540,8 +4351,11 @@ async def auto_poster() -> None:
     try:
         if state.get("dry_run_auto_post", False):
             chosen_category, question = pick_question(None, True)
-            state["last_dry_run_date"] = today
-            save_state(state)
+
+            def mutator(current_state: dict) -> None:
+                current_state["last_dry_run_date"] = today
+
+            update_state_atomic(mutator)
             await send_log(
                 guild,
                 "Court Auto-Post Dry Run",
@@ -3575,17 +4389,15 @@ async def thread_closer() -> None:
         return
 
     now = get_now()
-    state = get_state()
-
-    for record in state.get("posts", []):
+    for record in list_post_records(include_closed=False):
         if record.get("closed", False):
             continue
 
-        posted_at = parse_iso(record.get("posted_at"))
-        if posted_at is None:
+        remaining = get_post_remaining_time(record, now)
+        if remaining is None:
             continue
 
-        if now - posted_at >= timedelta(hours=THREAD_CLOSE_HOURS):
+        if remaining.total_seconds() <= 0:
             try:
                 ok, _ = await close_court_post(record, "expired")
                 if ok:
