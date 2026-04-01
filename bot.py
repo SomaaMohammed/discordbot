@@ -4695,19 +4695,11 @@ async def send_personal_greeting(
     name: str,
 ) -> None:
     user_mention = f"<@{user_id}>"
-    greeting_text = f"HIIIIIIIIIIIIIIIIIIII {name}-chan\n\n ||{user_mention}||"
-
-    embed = discord.Embed(
-        title=f"Message for {name}-chan",
-        description=greeting_text,
-        color=ROLE_COLOR,
-        timestamp=get_now(),
-    )
-    embed.set_footer(text="Imperial Court Bot")
+    sammy_suffix = " -Sammy" if interaction.user.id == UNDEFEATED_USER_ID else ""
+    greeting_text = f"HIIIIIIIIIIIIIIIIIIII {name}-chan\n\n ||{user_mention}||{sammy_suffix}"
 
     await interaction.response.send_message(
-        content=user_mention,
-        embed=embed,
+        content=greeting_text,
         allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
     )
 
