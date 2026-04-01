@@ -143,6 +143,8 @@ CATEGORY_CHOICES = [
 
 # Special user ID that always wins boss battles
 UNDEFEATED_USER_ID = RUNTIME_CONFIG.undefeated_user_id
+RIO_USER_ID = 1206572825100685365
+TAYLOR_USER_ID = 661069422869610537
 
 STATE_WRITE_LOCK = RLock()
 
@@ -2129,6 +2131,7 @@ class ImperialCourtBot(commands.Bot):
         self.tree.add_command(court_group, guild=guild)
         self.tree.add_command(admin_group, guild=guild)
         self.tree.add_command(fun_group, guild=guild)
+        self.tree.add_command(greetings_group, guild=guild)
         self.add_view(AnonymousAnswerView())
         self.add_view(RolePanelView(button_labels=[f"Role {i}" for i in range(1, ROLE_PANEL_MAX_BUTTONS + 1)]))
         synced = await self.tree.sync(guild=guild)
@@ -2183,6 +2186,7 @@ questions_group = app_commands.Group(name="questions", description="Question uti
 court_group.add_command(questions_group)
 admin_group = app_commands.Group(name="invictus", description="Server admin and moderation tools")
 fun_group = app_commands.Group(name="fun", description="Fun commands for everyone")
+greetings_group = app_commands.Group(name="greetings", description="Friendly greeting commands")
 
 
 def get_manage_target_channel(interaction: discord.Interaction) -> discord.TextChannel | None:
@@ -3891,6 +3895,10 @@ async def admin_help(interaction: discord.Interaction) -> None:
 **Fun Commands**
 `/fun battle <opponent>` — Battle another member (mentions both users)
 
+**Greetings Commands**
+`/greetings rio` — Send Rio-chan a friendly ping with an embed
+`/greetings taylor` — Send Taylor-chan a friendly ping with an embed
+
 **Categories**
 `general` — Broad prompts for everyday discussion
 `gaming` — Games, consoles, mechanics, franchises, hot takes
@@ -4678,6 +4686,48 @@ async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -
     embed.add_field(name="Opponent", value=f"{player2.mention}", inline=True)
     embed.add_field(name="Champion", value=f"{winner.mention}", inline=False)
     await interaction.response.send_message(content=f"{player1.mention} {player2.mention}", embed=embed)
+
+
+async def send_personal_greeting(
+    interaction: discord.Interaction,
+    *,
+    user_id: int,
+    name: str,
+) -> None:
+    user_mention = f"<@{user_id}>"
+    greeting_text = f"HIIIIIIIIIIIIIIIIIIII {name}-chan\n\n ||{user_mention}||"
+
+    embed = discord.Embed(
+        title=f"Message for {name}-chan",
+        description=greeting_text,
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    embed.set_footer(text="Imperial Court Bot")
+
+    await interaction.response.send_message(
+        content=user_mention,
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True),
+    )
+
+
+@greetings_group.command(name="rio", description="Send a nice hello to Rio-chan")
+async def greetings_rio(interaction: discord.Interaction) -> None:
+    await send_personal_greeting(
+        interaction,
+        user_id=RIO_USER_ID,
+        name="Rio",
+    )
+
+
+@greetings_group.command(name="taylor", description="Send a nice hello to Taylor-chan")
+async def greetings_taylor(interaction: discord.Interaction) -> None:
+    await send_personal_greeting(
+        interaction,
+        user_id=TAYLOR_USER_ID,
+        name="Taylor",
+    )
 
 
 def get_week_key(now: datetime) -> str:
