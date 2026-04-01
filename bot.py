@@ -4696,7 +4696,7 @@ async def send_personal_greeting(
 ) -> None:
     user_mention = f"<@{user_id}>"
     sammy_suffix = " -Sammy" if interaction.user.id == UNDEFEATED_USER_ID else ""
-    greeting_text = f"HIIIIIIIIIIIIIIIIIIII {name}-chan\n\n ||{user_mention}||{sammy_suffix}"
+    greeting_text = f"HIIIIIIIIIIIIIIIIIIII {name}-chan {sammy_suffix}\n\n ||{user_mention}||"
 
     await interaction.response.send_message(
         content=greeting_text,
