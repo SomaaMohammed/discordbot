@@ -105,6 +105,13 @@ EMPEROR_LOCK_PHRASES = {
 EMPEROR_MENTION_PATTERN = re.compile(r"\b(sammy|emperor|his majesty|your majesty)\b", re.IGNORECASE)
 EMPRESS_MENTION_PATTERN = re.compile(r"\b(empress|her majesty|tay|taytay|taylor|tayla)\b", re.IGNORECASE)
 URL_PATTERN = re.compile(r"https?://|discord\.gg/", re.IGNORECASE)
+ROLE_PANEL_BUTTON_CUSTOM_ID = "court:role_panel_claim"
+ROLE_PANEL_FOOTER_PREFIX = "RolePanelTarget:"
+ROLE_PANEL_TARGETS_FOOTER_PREFIX = "RolePanelTargets:"
+ROLE_PANEL_ROLE_ID_PATTERN = re.compile(r"^RolePanelTarget:(\d+)$")
+ROLE_PANEL_DEFAULT_BUTTON_LABEL = "Claim Role"
+ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH = 80
+ROLE_PANEL_MAX_BUTTONS = 5
 
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
@@ -1145,6 +1152,226 @@ class ClosedAnswerView(discord.ui.View):
         self.add_item(button)
 
 
+def build_role_panel_embed(
+    roles: list[discord.Role],
+    title: str | None = None,
+    description: str | None = None,
+) -> discord.Embed:
+    panel_roles = roles[:ROLE_PANEL_MAX_BUTTONS]
+    panel_title = (title or "").strip() or "Imperial Role Panel"
+
+    if len(panel_roles) == 1:
+        default_description = f"Click the button below to add or remove the **{panel_roles[0].name}** role."
+    else:
+        default_description = "Click one of the buttons below to toggle the matching role."
+    panel_description = (description or "").strip() or default_description
+
+    embed = discord.Embed(
+        title=panel_title,
+        description=panel_description,
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+
+    if len(panel_roles) == 1:
+        role = panel_roles[0]
+        embed.add_field(name="Role", value=f"{role.mention} (`{role.id}`)", inline=False)
+        embed.set_footer(text=f"{ROLE_PANEL_FOOTER_PREFIX}{role.id}")
+        return embed
+
+    role_lines = [f"{index}. {role.mention} (`{role.id}`)" for index, role in enumerate(panel_roles, start=1)]
+    footer_targets = [f"{index}={role.id}" for index, role in enumerate(panel_roles, start=1)]
+    embed.add_field(name="Roles", value="\n".join(role_lines), inline=False)
+    embed.set_footer(text=f"{ROLE_PANEL_TARGETS_FOOTER_PREFIX}{','.join(footer_targets)}")
+    return embed
+
+
+def parse_role_panel_targets_from_footer(footer_text: str) -> dict[int, int]:
+    cleaned = footer_text.strip()
+    single_match = ROLE_PANEL_ROLE_ID_PATTERN.match(cleaned)
+    if single_match is not None:
+        try:
+            return {1: int(single_match.group(1))}
+        except ValueError:
+            return {}
+
+    if not cleaned.startswith(ROLE_PANEL_TARGETS_FOOTER_PREFIX):
+        return {}
+
+    payload = cleaned.removeprefix(ROLE_PANEL_TARGETS_FOOTER_PREFIX).strip()
+    if not payload:
+        return {}
+
+    targets: dict[int, int] = {}
+    for entry in payload.split(","):
+        segment = entry.strip()
+        if not segment or "=" not in segment:
+            continue
+        slot_raw, role_id_raw = (item.strip() for item in segment.split("=", 1))
+        if not slot_raw.isdigit() or not role_id_raw.isdigit():
+            continue
+
+        slot = int(slot_raw)
+        role_id = int(role_id_raw)
+        if 1 <= slot <= ROLE_PANEL_MAX_BUTTONS and slot not in targets:
+            targets[slot] = role_id
+
+    return targets
+
+
+def extract_role_panel_role_id_for_slot(message: discord.Message | None, slot: int) -> int | None:
+    if message is None or slot < 1 or slot > ROLE_PANEL_MAX_BUTTONS:
+        return None
+
+    for embed in message.embeds:
+        footer_text = str(embed.footer.text or "")
+        targets = parse_role_panel_targets_from_footer(footer_text)
+        if slot in targets:
+            return targets[slot]
+
+    return None
+
+
+def extract_role_panel_role_id(message: discord.Message | None) -> int | None:
+    return extract_role_panel_role_id_for_slot(message, 1)
+
+
+def extract_role_panel_button_slot(custom_id: str | None) -> int | None:
+    if custom_id is None:
+        return None
+
+    if custom_id == ROLE_PANEL_BUTTON_CUSTOM_ID:
+        return 1
+
+    expected_prefix = f"{ROLE_PANEL_BUTTON_CUSTOM_ID}:"
+    if not custom_id.startswith(expected_prefix):
+        return None
+
+    slot_value = custom_id.removeprefix(expected_prefix)
+    if not slot_value.isdigit():
+        return None
+
+    slot = int(slot_value)
+    if 1 <= slot <= ROLE_PANEL_MAX_BUTTONS:
+        return slot
+
+    return None
+
+
+def get_role_panel_claim_role(interaction: discord.Interaction) -> tuple[discord.Role | None, str | None]:
+    guild = interaction.guild
+    message = interaction.message
+    if guild is None or message is None:
+        return None, MSG_USE_IN_SERVER
+
+    interaction_data = interaction.data if isinstance(interaction.data, dict) else {}
+    button_slot = extract_role_panel_button_slot(str(interaction_data.get("custom_id") or ""))
+    if button_slot is None:
+        return None, "Could not determine which role button was clicked."
+
+    role_id = extract_role_panel_role_id_for_slot(message, button_slot)
+    if role_id is None:
+        return None, "This role panel is missing role metadata."
+
+    role = guild.get_role(role_id)
+    if role is None:
+        return None, "The configured role no longer exists."
+
+    return role, None
+
+
+def get_role_panel_claim_permission_error(role: discord.Role, me: discord.Member | None) -> str | None:
+    if role.is_default() or role.managed:
+        return "This role cannot be self-assigned from this panel."
+
+    if me is None or not me.guild_permissions.manage_roles:
+        return "I need Manage Roles permission to manage this role."
+
+    if me.top_role <= role:
+        return "I cannot manage this role because it is above or equal to my top role."
+
+    return None
+
+
+async def toggle_role_for_member(
+    member: discord.Member,
+    role: discord.Role,
+    message_id: int,
+) -> tuple[str | None, str | None]:
+    has_role = member.get_role(role.id) is not None
+
+    if has_role:
+        try:
+            await member.remove_roles(
+                role,
+                reason=f"Self-removed via role panel ({message_id})",
+            )
+        except discord.Forbidden:
+            return None, "I do not have permission to remove this role."
+        except discord.HTTPException:
+            return None, "Failed to remove role due to a Discord API error."
+
+        return f"Removed {role.mention}.", None
+
+    try:
+        await member.add_roles(
+            role,
+            reason=f"Self-assigned via role panel ({message_id})",
+        )
+    except discord.Forbidden:
+        return None, "I do not have permission to grant this role."
+    except discord.HTTPException:
+        return None, "Failed to grant role due to a Discord API error."
+
+    return f"You now have {role.mention}.", None
+
+
+class RolePanelView(discord.ui.View):
+    def __init__(self, button_labels: list[str] | None = None):
+        super().__init__(timeout=None)
+        labels = button_labels or [ROLE_PANEL_DEFAULT_BUTTON_LABEL]
+        trimmed_labels = labels[:ROLE_PANEL_MAX_BUTTONS]
+
+        for index, raw_label in enumerate(trimmed_labels, start=1):
+            fallback = ROLE_PANEL_DEFAULT_BUTTON_LABEL if index == 1 else f"Claim Role {index}"
+            label = (raw_label or "").strip() or fallback
+            custom_id = ROLE_PANEL_BUTTON_CUSTOM_ID if index == 1 else f"{ROLE_PANEL_BUTTON_CUSTOM_ID}:{index}"
+            button = discord.ui.Button(
+                label=label[:ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH],
+                style=discord.ButtonStyle.secondary,
+                custom_id=custom_id,
+            )
+            button.callback = self.claim_role_button
+            self.add_item(button)
+
+    async def claim_role_button(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.message is None:
+            await interaction.response.send_message(MSG_USE_IN_SERVER, ephemeral=True)
+            return
+
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(MSG_VERIFY_ROLES, ephemeral=True)
+            return
+
+        role, role_error = get_role_panel_claim_role(interaction)
+        if role_error is not None:
+            await interaction.response.send_message(role_error, ephemeral=True)
+            return
+
+        me = interaction.guild.me
+        permission_error = get_role_panel_claim_permission_error(role, me)
+        if permission_error is not None:
+            await interaction.response.send_message(permission_error, ephemeral=True)
+            return
+
+        success_message, error_message = await toggle_role_for_member(interaction.user, role, interaction.message.id)
+        if error_message is not None:
+            await interaction.response.send_message(error_message, ephemeral=True)
+            return
+
+        await interaction.response.send_message(success_message or "Role updated.", ephemeral=True)
+
+
 async def create_answer_thread(message: discord.Message) -> discord.Thread | None:
     question = extract_question_from_message(message)
 
@@ -1903,6 +2130,7 @@ class ImperialCourtBot(commands.Bot):
         self.tree.add_command(admin_group, guild=guild)
         self.tree.add_command(fun_group, guild=guild)
         self.add_view(AnonymousAnswerView())
+        self.add_view(RolePanelView(button_labels=[f"Role {i}" for i in range(1, ROLE_PANEL_MAX_BUTTONS + 1)]))
         synced = await self.tree.sync(guild=guild)
         logger.info("Synced %s command(s) to guild %s", len(synced), TEST_GUILD_ID)
         auto_poster.start()
@@ -1962,6 +2190,77 @@ def get_manage_target_channel(interaction: discord.Interaction) -> discord.TextC
         return None
     if isinstance(interaction.channel, discord.TextChannel):
         return interaction.channel
+    return None
+
+
+def can_member_manage_role(member: discord.Member, role: discord.Role) -> bool:
+    if member.id == member.guild.owner_id:
+        return True
+    return member.top_role > role
+
+
+def get_role_panel_role_error(actor: discord.Member, me: discord.Member, role: discord.Role) -> str | None:
+    if role.is_default():
+        return "You cannot create a panel for @everyone."
+
+    if role.managed:
+        return "Managed/integration roles cannot be self-assigned."
+
+    if not can_member_manage_role(actor, role):
+        return "You can only create panels for roles lower than your highest role."
+
+    if not me.guild_permissions.manage_roles:
+        return "I need Manage Roles permission to grant roles."
+
+    if me.top_role <= role:
+        return "I cannot grant that role because it is above or equal to my top role."
+
+    return None
+
+
+def get_role_panel_channel_permission_error(channel: discord.TextChannel, me: discord.Member) -> str | None:
+    channel_permissions = channel.permissions_for(me)
+    missing_permissions = []
+    if not channel_permissions.view_channel:
+        missing_permissions.append("View Channel")
+    if not channel_permissions.send_messages:
+        missing_permissions.append("Send Messages")
+    if not channel_permissions.embed_links:
+        missing_permissions.append("Embed Links")
+
+    if not missing_permissions:
+        return None
+
+    return "I am missing required channel permissions: " + ", ".join(missing_permissions)
+
+
+def collect_role_panel_roles(
+    role_1: discord.Role,
+    role_2: discord.Role,
+    role_3: discord.Role | None = None,
+    role_4: discord.Role | None = None,
+    role_5: discord.Role | None = None,
+) -> tuple[list[discord.Role], str | None]:
+    selected_roles = [role_1, role_2]
+    for optional_role in (role_3, role_4, role_5):
+        if optional_role is not None:
+            selected_roles.append(optional_role)
+
+    unique_ids: set[int] = set()
+    for selected_role in selected_roles:
+        if selected_role.id in unique_ids:
+            return [], "Each role in a multi panel must be unique."
+        unique_ids.add(selected_role.id)
+
+    return selected_roles, None
+
+
+def get_multi_role_panel_error(actor: discord.Member, me: discord.Member, roles: list[discord.Role]) -> str | None:
+    for selected_role in roles:
+        role_error = get_role_panel_role_error(actor, me, selected_role)
+        if role_error is not None:
+            return f"{selected_role.mention}: {role_error}"
+
     return None
 
 
@@ -2529,6 +2828,195 @@ async def admin_say(
         return
 
     await interaction.response.send_modal(AdminSayModal(channel, mention_everyone=mention_everyone))
+
+
+@admin_group.command(name="rolepanel", description="Post an embed panel with a button that toggles a role")
+@app_commands.describe(
+    role="Role to toggle when the button is clicked",
+    channel="Target text channel (defaults to current channel)",
+    title="Optional embed title",
+    description="Optional embed description",
+    button_label="Optional button label (max 80 characters)",
+    mention_everyone="Whether to ping @everyone above the panel",
+)
+async def admin_rolepanel(
+    interaction: discord.Interaction,
+    role: discord.Role,
+    channel: discord.TextChannel | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    button_label: str | None = None,
+    mention_everyone: bool = False,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    admin_context = await get_admin_context(interaction)
+    if admin_context is None:
+        return
+    guild, actor = admin_context
+
+    target_channel = channel or get_manage_target_channel(interaction)
+    if target_channel is None:
+        await interaction.response.send_message(
+            "Provide a text channel, or run this command from a text channel.",
+            ephemeral=True,
+        )
+        return
+
+    panel_button_label = (button_label or "").strip() or ROLE_PANEL_DEFAULT_BUTTON_LABEL
+    if len(panel_button_label) > ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH:
+        await interaction.response.send_message(
+            f"Button label must be {ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH} characters or fewer.",
+            ephemeral=True,
+        )
+        return
+
+    me = guild.me
+    if me is None:
+        await interaction.response.send_message(MSG_BOT_CONTEXT_ERROR, ephemeral=True)
+        return
+
+    role_error = get_role_panel_role_error(actor, me, role)
+    if role_error is not None:
+        await interaction.response.send_message(role_error, ephemeral=True)
+        return
+
+    channel_error = get_role_panel_channel_permission_error(target_channel, me)
+    if channel_error is not None:
+        await interaction.response.send_message(channel_error, ephemeral=True)
+        return
+
+    panel_embed = build_role_panel_embed([role], title=title, description=description)
+    panel_view = RolePanelView(button_labels=[panel_button_label])
+    content, allowed_mentions = build_announcement_mentions(mention_everyone)
+
+    try:
+        await target_channel.send(
+            content=content,
+            embed=panel_embed,
+            view=panel_view,
+            allowed_mentions=allowed_mentions,
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message("I do not have permission to post in that channel.", ephemeral=True)
+        return
+    except discord.HTTPException:
+        await interaction.response.send_message("Failed to create the role panel.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Role panel posted in {target_channel.mention} for {role.mention}.",
+        ephemeral=True,
+    )
+
+    await send_admin_log(
+        guild,
+        actor,
+        "Role Panel Created",
+        [
+            f"**Channel:** {target_channel.mention}",
+            f"**Role:** {role.mention} (`{role.id}`)",
+            f"**Button:** {panel_button_label}",
+            f"**Mention Everyone:** {'Yes' if mention_everyone else 'No'}",
+        ],
+    )
+
+
+@admin_group.command(name="rolepanelmulti", description="Post an embed panel with multiple role toggle buttons")
+@app_commands.describe(
+    role_1="First role button",
+    role_2="Second role button",
+    role_3="Optional third role button",
+    role_4="Optional fourth role button",
+    role_5="Optional fifth role button",
+    channel="Target text channel (defaults to current channel)",
+    title="Optional embed title",
+    description="Optional embed description",
+    mention_everyone="Whether to ping @everyone above the panel",
+)
+async def admin_rolepanelmulti(
+    interaction: discord.Interaction,
+    role_1: discord.Role,
+    role_2: discord.Role,
+    role_3: discord.Role | None = None,
+    role_4: discord.Role | None = None,
+    role_5: discord.Role | None = None,
+    channel: discord.TextChannel | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    mention_everyone: bool = False,
+) -> None:
+    if not await require_staff(interaction):
+        return
+
+    admin_context = await get_admin_context(interaction)
+    if admin_context is None:
+        return
+    guild, actor = admin_context
+
+    target_channel = channel or get_manage_target_channel(interaction)
+    if target_channel is None:
+        await interaction.response.send_message(
+            "Provide a text channel, or run this command from a text channel.",
+            ephemeral=True,
+        )
+        return
+
+    selected_roles, collection_error = collect_role_panel_roles(role_1, role_2, role_3, role_4, role_5)
+    if collection_error is not None:
+        await interaction.response.send_message(collection_error, ephemeral=True)
+        return
+
+    me = guild.me
+    if me is None:
+        await interaction.response.send_message(MSG_BOT_CONTEXT_ERROR, ephemeral=True)
+        return
+
+    role_error = get_multi_role_panel_error(actor, me, selected_roles)
+    if role_error is not None:
+        await interaction.response.send_message(role_error, ephemeral=True)
+        return
+
+    channel_error = get_role_panel_channel_permission_error(target_channel, me)
+    if channel_error is not None:
+        await interaction.response.send_message(channel_error, ephemeral=True)
+        return
+
+    panel_embed = build_role_panel_embed(selected_roles, title=title, description=description)
+    panel_view = RolePanelView(button_labels=[selected_role.name for selected_role in selected_roles])
+    content, allowed_mentions = build_announcement_mentions(mention_everyone)
+
+    try:
+        await target_channel.send(
+            content=content,
+            embed=panel_embed,
+            view=panel_view,
+            allowed_mentions=allowed_mentions,
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message("I do not have permission to post in that channel.", ephemeral=True)
+        return
+    except discord.HTTPException:
+        await interaction.response.send_message("Failed to create the multi-role panel.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"Multi-role panel posted in {target_channel.mention} with `{len(selected_roles)}` role button(s).",
+        ephemeral=True,
+    )
+
+    role_lines = [f"- {selected_role.mention} (`{selected_role.id}`)" for selected_role in selected_roles]
+    await send_admin_log(
+        guild,
+        actor,
+        "Multi Role Panel Created",
+        [
+            f"**Channel:** {target_channel.mention}",
+            "**Roles:**\n" + "\n".join(role_lines),
+            f"**Mention Everyone:** {'Yes' if mention_everyone else 'No'}",
+        ],
+    )
 
 
 @admin_group.command(name="purge", description="Delete recent messages in this channel")
@@ -3383,6 +3871,8 @@ async def admin_help(interaction: discord.Interaction) -> None:
 
 **Invictus Commands**
 `/invictus say <channel>` — Send announcement in channel
+`/invictus rolepanel <role> [channel] [title] [description] [button_label] [mention_everyone]` — Post a role toggle panel
+`/invictus rolepanelmulti <role_1> <role_2> [role_3] [role_4] [role_5] [channel] [title] [description] [mention_everyone]` — Post a multi-role toggle panel with multiple buttons
 `/invictus purge <amount>` — Delete 1-100 recent messages
 `/invictus purgeuser <member> [amount]` — Delete member's messages (scan 1-200)
 `/invictus resetroyaltimer` — Reset royal announcement timer for testing
@@ -4470,7 +4960,7 @@ async def on_message(message: discord.Message) -> None:
         await handle_royal_presence_announcement(message)
 
     if is_silence_lock_trigger(message.content) or is_emperor_lock_trigger(message.content):
-        if not is_staff(message.author):
+        if "Emperor" not in get_member_royal_titles(message.author):
             return
         if isinstance(message.channel, discord.TextChannel):
             await lock_channel_silently(message.channel, message.author, SILENT_LOCK_SECONDS)

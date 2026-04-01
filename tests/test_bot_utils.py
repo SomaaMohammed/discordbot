@@ -15,6 +15,101 @@ def test_normalize_question_text_collapses_whitespace() -> None:
     assert bot.normalize_question_text("  hello   world  ") == "hello world"
 
 
+def test_extract_role_panel_role_id_reads_footer_marker() -> None:
+    embed = bot.discord.Embed(title="Role Panel")
+    embed.set_footer(text=f"{bot.ROLE_PANEL_FOOTER_PREFIX}123456789")
+
+    class DummyMessage:
+        def __init__(self) -> None:
+            self.embeds = [embed]
+
+    assert bot.extract_role_panel_role_id(DummyMessage()) == 123456789
+
+
+def test_extract_role_panel_role_id_returns_none_without_marker() -> None:
+    embed = bot.discord.Embed(title="Role Panel")
+    embed.set_footer(text="NoRoleHere")
+
+    class DummyMessage:
+        def __init__(self) -> None:
+            self.embeds = [embed]
+
+    assert bot.extract_role_panel_role_id(DummyMessage()) is None
+
+
+def test_extract_role_panel_role_id_for_slot_reads_multi_footer() -> None:
+    embed = bot.discord.Embed(title="Role Panel")
+    embed.set_footer(text=f"{bot.ROLE_PANEL_TARGETS_FOOTER_PREFIX}1=111,2=222,3=333")
+
+    class DummyMessage:
+        def __init__(self) -> None:
+            self.embeds = [embed]
+
+    message = DummyMessage()
+    assert bot.extract_role_panel_role_id_for_slot(message, 1) == 111
+    assert bot.extract_role_panel_role_id_for_slot(message, 2) == 222
+    assert bot.extract_role_panel_role_id_for_slot(message, 3) == 333
+    assert bot.extract_role_panel_role_id_for_slot(message, 4) is None
+
+
+def test_extract_role_panel_button_slot_parses_expected_custom_ids() -> None:
+    assert bot.extract_role_panel_button_slot(bot.ROLE_PANEL_BUTTON_CUSTOM_ID) == 1
+    assert bot.extract_role_panel_button_slot(f"{bot.ROLE_PANEL_BUTTON_CUSTOM_ID}:2") == 2
+    assert bot.extract_role_panel_button_slot(f"{bot.ROLE_PANEL_BUTTON_CUSTOM_ID}:5") == 5
+    assert bot.extract_role_panel_button_slot(f"{bot.ROLE_PANEL_BUTTON_CUSTOM_ID}:6") is None
+    assert bot.extract_role_panel_button_slot("court:other") is None
+
+
+def test_toggle_role_for_member_adds_role_when_missing() -> None:
+    class DummyRole:
+        def __init__(self) -> None:
+            self.id = 123
+            self.mention = "@Role"
+
+    class DummyMember:
+        def __init__(self) -> None:
+            self.add_roles = AsyncMock()
+            self.remove_roles = AsyncMock()
+
+        def get_role(self, role_id: int) -> None:
+            return None
+
+    member = DummyMember()
+    role = DummyRole()
+
+    success, error = asyncio.run(bot.toggle_role_for_member(member, role, 999))
+
+    assert error is None
+    assert success == "You now have @Role."
+    member.add_roles.assert_awaited_once()
+    member.remove_roles.assert_not_awaited()
+
+
+def test_toggle_role_for_member_removes_role_when_present() -> None:
+    class DummyRole:
+        def __init__(self) -> None:
+            self.id = 456
+            self.mention = "@Role2"
+
+    class DummyMember:
+        def __init__(self) -> None:
+            self.add_roles = AsyncMock()
+            self.remove_roles = AsyncMock()
+
+        def get_role(self, role_id: int) -> object:
+            return object()
+
+    member = DummyMember()
+    role = DummyRole()
+
+    success, error = asyncio.run(bot.toggle_role_for_member(member, role, 1001))
+
+    assert error is None
+    assert success == "Removed @Role2."
+    member.remove_roles.assert_awaited_once()
+    member.add_roles.assert_not_awaited()
+
+
 def test_format_duration_hours_minutes() -> None:
     assert bot.format_duration(timedelta(hours=2, minutes=5, seconds=30)) == "2h 5m"
 
@@ -297,9 +392,14 @@ def test_fetch_channel_by_id_returns_none_for_invalid_input() -> None:
 
 
 def test_on_message_prioritizes_exact_emperor_lock_trigger(monkeypatch) -> None:
+    class DummyRole:
+        def __init__(self, role_id: int) -> None:
+            self.id = role_id
+
     class DummyMember:
         def __init__(self) -> None:
             self.bot = False
+            self.roles = [DummyRole(bot.EMPEROR_ROLE_ID)]
 
     class DummyTextChannel:
         def __init__(self) -> None:
@@ -328,6 +428,45 @@ def test_on_message_prioritizes_exact_emperor_lock_trigger(monkeypatch) -> None:
 
     lock_mock.assert_awaited_once_with(message.channel, message.author, bot.SILENT_LOCK_SECONDS)
     message.channel.send.assert_not_called()
+
+
+def test_on_message_lock_trigger_ignores_non_emperor_even_if_staff(monkeypatch) -> None:
+    class DummyRole:
+        def __init__(self, role_id: int) -> None:
+            self.id = role_id
+
+    class DummyMember:
+        def __init__(self) -> None:
+            self.bot = False
+            self.roles = [DummyRole(999)]
+
+    class DummyTextChannel:
+        def __init__(self) -> None:
+            self.send = AsyncMock()
+            self.id = bot.ROYAL_ALERT_CHANNEL_ID
+
+    class DummyGuild:
+        pass
+
+    class DummyMessage:
+        def __init__(self) -> None:
+            self.author = DummyMember()
+            self.guild = DummyGuild()
+            self.channel = DummyTextChannel()
+            self.content = "silence now"
+
+    lock_mock = AsyncMock()
+    royal_mock = AsyncMock()
+    monkeypatch.setattr(bot.discord, "Member", DummyMember)
+    monkeypatch.setattr(bot.discord, "TextChannel", DummyTextChannel)
+    monkeypatch.setattr(bot, "is_staff", lambda _: True)
+    monkeypatch.setattr(bot, "lock_channel_silently", lock_mock)
+    monkeypatch.setattr(bot, "handle_royal_presence_announcement", royal_mock)
+
+    message = DummyMessage()
+    asyncio.run(bot.on_message(message))
+
+    lock_mock.assert_not_called()
 
 
 def test_on_message_emperor_mention_without_lock_phrase_does_not_send_when_not_afk(monkeypatch) -> None:
