@@ -360,6 +360,32 @@ What the script does:
 - Verifies expected SQLite tables exist after rollout.
 - Prints service status and recent logs.
 
+### `deploy_vm.sh` and Local Change Policy
+
+`deploy_vm.sh` now checks for local git changes before pulling updates.
+
+Supported behavior is controlled by `LOCAL_CHANGES_POLICY`:
+
+- `abort` (default): stop and print recovery options.
+- `stash`: auto-stash local changes, then continue deployment.
+- `discard`: hard reset and clean untracked files, then continue (destructive).
+
+Examples:
+
+```bash
+./deploy_vm.sh
+LOCAL_CHANGES_POLICY=stash ./deploy_vm.sh
+LOCAL_CHANGES_POLICY=discard ./deploy_vm.sh   # destructive
+```
+
+If deployment fails with "local changes would be overwritten by merge", run:
+
+```bash
+git status --short
+git stash push -u -m "pre-deploy stash"
+./deploy_vm.sh
+```
+
 ## Observability and Safety Notes
 
 - Anonymous answers are anonymous to regular users in-thread, but operators with DB/log access can still correlate metadata.
