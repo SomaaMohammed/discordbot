@@ -18,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
+from courtbot import __version__ as PACKAGE_VERSION
 from courtbot.config import load_runtime_config
 from courtbot.storage_sql import (
     ANON_COOLDOWNS_TABLE_SQL,
@@ -38,6 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 TOKEN = os.getenv("DISCORD_TOKEN")
+BOT_VERSION = (os.getenv("BOT_VERSION") or PACKAGE_VERSION).strip() or PACKAGE_VERSION
 RUNTIME_CONFIG = load_runtime_config()
 TEST_GUILD_ID = RUNTIME_CONFIG.test_guild_id
 COURT_CHANNEL_ID = RUNTIME_CONFIG.court_channel_id
@@ -647,6 +649,7 @@ async def run_user_activity_backfill(
     guild: discord.Guild,
     initiated_by: discord.Member | discord.User,
     lookback_days: int,
+    source_channel_id: int | None = None,
 ) -> None:
     async with USER_METRICS_BACKFILL_LOCK:
         initiator_id = int(getattr(initiated_by, "id", 0) or 0)
@@ -655,8 +658,45 @@ async def run_user_activity_backfill(
         started_at = get_now()
         lookback_text = backfill_lookback_text(lookback_days)
 
+        start_description = (
+            f"**By:** {getattr(initiated_by, 'mention', str(initiated_by))}\n"
+            f"**Lookback:** {lookback_text}\n"
+            "**Status:** `running`"
+        )
+        logger.info("User stats backfill started | %s", start_description.replace("\n", " | "))
+        sent = await send_log(
+            guild,
+            "User Stats Backfill Started",
+            start_description,
+            fallback_channel_id=source_channel_id,
+        )
+        if not sent:
+            logger.info("User stats backfill started but no log destination is configured.")
+
         try:
             result = await backfill_user_activity_metrics(guild, lookback_days=lookback_days)
+        except asyncio.CancelledError:
+            interrupt_error = "Task cancelled before completion (shutdown/restart likely)."
+            mark_backfill_finished("interrupted", error=interrupt_error)
+
+            interrupt_description = (
+                f"**By:** {getattr(initiated_by, 'mention', str(initiated_by))}\n"
+                f"**Lookback:** {lookback_text}\n"
+                f"**Status:** `interrupted`\n"
+                f"**Details:** `{interrupt_error}`"
+            )
+
+            sent = await send_log(
+                guild,
+                "User Stats Backfill Interrupted",
+                interrupt_description,
+                fallback_channel_id=source_channel_id,
+            )
+            if not sent:
+                logger.warning("User stats backfill interrupted but no log destination is configured.")
+
+            logger.warning("User stats backfill interrupted | %s", interrupt_description.replace("\n", " | "))
+            raise
         except Exception as error:
             mark_backfill_finished(
                 "failed",
@@ -667,6 +707,7 @@ async def run_user_activity_backfill(
                 "User Stats Backfill Failed",
                 error,
                 f"invictus.backfillstats by {initiated_by}",
+                fallback_channel_id=source_channel_id,
             )
             return
 
@@ -691,7 +732,14 @@ async def run_user_activity_backfill(
         mark_backfill_finished("completed", summary=summary)
 
         logger.info("User stats backfill completed | %s", description.replace("\n", " | "))
-        await send_log(guild, "User Stats Backfill Complete", description)
+        sent = await send_log(
+            guild,
+            "User Stats Backfill Complete",
+            description,
+            fallback_channel_id=source_channel_id,
+        )
+        if not sent:
+            logger.warning("User stats backfill completed but no log destination is configured.")
 
 
 def metrics_snapshot() -> dict:
@@ -1580,10 +1628,21 @@ async def get_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
     return None
 
 
-async def send_log(guild: discord.Guild, title: str, description: str) -> None:
+async def send_log(
+    guild: discord.Guild,
+    title: str,
+    description: str,
+    fallback_channel_id: int | None = None,
+) -> bool:
     channel = await get_log_channel(guild)
+
+    if channel is None and fallback_channel_id is not None:
+        fallback_channel = await fetch_channel_by_id(fallback_channel_id)
+        if isinstance(fallback_channel, (discord.TextChannel, discord.Thread)):
+            channel = fallback_channel
+
     if channel is None:
-        return
+        return False
 
     embed = discord.Embed(
         title=title,
@@ -1592,6 +1651,7 @@ async def send_log(guild: discord.Guild, title: str, description: str) -> None:
         timestamp=get_now(),
     )
     await channel.send(embed=embed)
+    return True
 
 
 async def send_failure_alert(
@@ -1599,6 +1659,7 @@ async def send_failure_alert(
     title: str,
     error: Exception,
     context: str,
+    fallback_channel_id: int | None = None,
 ) -> None:
     logger.exception("%s | %s", title, context)
     if guild is None:
@@ -1609,7 +1670,7 @@ async def send_failure_alert(
         f"**Error Type:** `{type(error).__name__}`\n"
         f"**Error:** `{str(error)[:1000]}`"
     )
-    await send_log(guild, title, description)
+    await send_log(guild, title, description, fallback_channel_id=fallback_channel_id)
 
 
 class ClosedAnswerView(discord.ui.View):
@@ -1991,6 +2052,7 @@ def status_text() -> str:
     open_posts = len(list_post_records(include_closed=False))
 
     return (
+        f"**Version:** `{BOT_VERSION}`\n"
         f"**Mode:** `{state['mode']}`\n"
         f"**Channel:** {channel_mention}\n"
         f"**Log Channel:** {log_channel_mention}\n"
@@ -4403,7 +4465,14 @@ async def admin_backfillstats(
     )
 
     record_command_metric("invictus.backfillstats")
-    start_background_task(run_user_activity_backfill(interaction.guild, interaction.user, int(days)))
+    start_background_task(
+        run_user_activity_backfill(
+            interaction.guild,
+            interaction.user,
+            int(days),
+            source_channel_id=getattr(interaction.channel, "id", None),
+        )
+    )
 
 
 @admin_group.command(name="backfillstatus", description="Show status of the user stats backfill")
@@ -5650,7 +5719,12 @@ async def before_thread_closer() -> None:
 
 @bot.event
 async def on_ready() -> None:
-    logger.info("Logged in as %s (ID: %s)", bot.user, bot.user.id if bot.user else "unknown")
+    logger.info(
+        "Logged in as %s (ID: %s) | version=%s",
+        bot.user,
+        bot.user.id if bot.user else "unknown",
+        BOT_VERSION,
+    )
 
 
 @bot.tree.error

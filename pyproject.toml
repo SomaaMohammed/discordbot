@@ -1,3 +1,8 @@
+[project]
+name = "imperial-court-bot"
+version = "0.1.0"
+requires-python = ">=3.11"
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

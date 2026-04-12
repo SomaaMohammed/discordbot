@@ -147,6 +147,7 @@ Create `.env` in the project root.
 | `LOG_CHANNEL_ID` |          `0` | Staff log channel (`0` disables)       |
 | `TIMEZONE`       | `Asia/Qatar` | Timezone used for scheduling/reporting |
 | `DB_FILE`        |   `court.db` | SQLite database path                   |
+| `BOT_VERSION`    | package ver. | Optional release/build identifier      |
 
 ### Role and Royal Keys
 
@@ -260,6 +261,11 @@ Public social commands.
 - `fate`
 
 Note: `messages_sent`, `reactions_sent`, and `reactions_received` can be backfilled from historical channel history with `/invictus backfillstats`. Check run progress and last result with `/invictus backfillstatus`.
+
+Backfill observability:
+
+- Backfill emits `Started`, `Complete`, `Failed`, and `Interrupted` log entries.
+- If `LOG_CHANNEL_ID` is not configured or unavailable, backfill logs fall back to the channel where `/invictus backfillstats` was triggered.
 
 ### `/greetings`
 
@@ -395,6 +401,8 @@ git stash push -u -m "pre-deploy stash"
 - Anonymous answers are anonymous to regular users in-thread, but operators with DB/log access can still correlate metadata.
 - Moderation commands are intentionally guarded by role/admin checks in code.
 - Metrics include both operational command counters and user-facing fun activity counters.
+- Runtime version tracking is available via `BOT_VERSION` (optional). If unset, the package version is used.
+- `/court status` and startup logs include the effective bot version for deployment traceability.
 
 ## Troubleshooting
 

@@ -669,6 +669,166 @@ def test_fetch_channel_by_id_returns_none_for_invalid_input() -> None:
     assert asyncio.run(bot.fetch_channel_by_id("invalid")) is None
 
 
+def test_send_log_uses_fallback_channel_when_log_channel_missing(monkeypatch) -> None:
+    class DummyGuild:
+        pass
+
+    class DummyChannel:
+        def __init__(self) -> None:
+            self.send = AsyncMock()
+
+    fallback_channel = DummyChannel()
+
+    monkeypatch.setattr(bot.discord, "TextChannel", DummyChannel)
+    monkeypatch.setattr(bot, "get_log_channel", AsyncMock(return_value=None))
+    monkeypatch.setattr(bot, "fetch_channel_by_id", AsyncMock(return_value=fallback_channel))
+
+    sent = asyncio.run(bot.send_log(DummyGuild(), "Backfill Done", "summary", fallback_channel_id=123))
+
+    assert sent is True
+    fallback_channel.send.assert_awaited_once()
+    embed = fallback_channel.send.await_args.kwargs["embed"]
+    assert embed.title == "Backfill Done"
+
+
+def test_run_user_activity_backfill_passes_fallback_channel_to_send_log(monkeypatch) -> None:
+    class DummyGuild:
+        pass
+
+    class DummyUser:
+        def __init__(self) -> None:
+            self.id = 123
+            self.mention = "@royal"
+
+        def __str__(self) -> str:
+            return "royal"
+
+    send_log_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        bot,
+        "backfill_user_activity_metrics",
+        AsyncMock(
+            return_value={
+                "scanned_channels": 1,
+                "skipped_channels": 0,
+                "scanned_messages": 10,
+                "scanned_reactions": 3,
+                "message_users_seen": 2,
+                "reaction_sent_users_seen": 2,
+                "reaction_received_users_seen": 2,
+                "message_updates": 2,
+                "reaction_sent_updates": 1,
+                "reaction_received_updates": 1,
+            }
+        ),
+    )
+    monkeypatch.setattr(bot, "send_log", send_log_mock)
+
+    asyncio.run(
+        bot.run_user_activity_backfill(
+            DummyGuild(),
+            DummyUser(),
+            7,
+            source_channel_id=999,
+        )
+    )
+
+    assert send_log_mock.await_count == 2
+
+    started_args = send_log_mock.await_args_list[0].args
+    started_kwargs = send_log_mock.await_args_list[0].kwargs
+    assert started_args[1] == "User Stats Backfill Started"
+    assert started_kwargs["fallback_channel_id"] == 999
+
+    completed_args = send_log_mock.await_args_list[1].args
+    completed_kwargs = send_log_mock.await_args_list[1].kwargs
+    assert completed_args[1] == "User Stats Backfill Complete"
+    assert completed_kwargs["fallback_channel_id"] == 999
+
+
+def test_run_user_activity_backfill_logs_interrupted_state(monkeypatch) -> None:
+    class DummyGuild:
+        pass
+
+    class DummyUser:
+        def __init__(self) -> None:
+            self.id = 123
+            self.mention = "@royal"
+
+        def __str__(self) -> str:
+            return "royal"
+
+    original_state = dict(bot.USER_METRICS_BACKFILL_STATE)
+    send_log_mock = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(
+        bot,
+        "backfill_user_activity_metrics",
+        AsyncMock(side_effect=asyncio.CancelledError()),
+    )
+    monkeypatch.setattr(bot, "send_log", send_log_mock)
+
+    try:
+        interrupted = False
+        try:
+            asyncio.run(
+                bot.run_user_activity_backfill(
+                    DummyGuild(),
+                    DummyUser(),
+                    7,
+                    source_channel_id=777,
+                )
+            )
+        except asyncio.CancelledError:
+            interrupted = True
+
+        assert interrupted is True
+
+        assert send_log_mock.await_count == 2
+        started_args = send_log_mock.await_args_list[0].args
+        started_kwargs = send_log_mock.await_args_list[0].kwargs
+        interrupted_args = send_log_mock.await_args_list[1].args
+        interrupted_kwargs = send_log_mock.await_args_list[1].kwargs
+
+        assert started_args[1] == "User Stats Backfill Started"
+        assert started_kwargs["fallback_channel_id"] == 777
+
+        sent_guild, sent_title, sent_description = interrupted_args
+        assert sent_guild is not None
+        assert sent_title == "User Stats Backfill Interrupted"
+        assert "**Status:** `interrupted`" in sent_description
+        assert interrupted_kwargs["fallback_channel_id"] == 777
+
+        snapshot = bot.get_backfill_status_snapshot()
+        assert snapshot["running"] is False
+        assert snapshot["last_status"] == "interrupted"
+    finally:
+        bot.USER_METRICS_BACKFILL_STATE.clear()
+        bot.USER_METRICS_BACKFILL_STATE.update(original_state)
+
+
+def test_status_text_includes_bot_version(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bot,
+        "get_state",
+        lambda: {
+            "mode": "auto",
+            "channel_id": 123,
+            "log_channel_id": 456,
+            "hour": 20,
+            "minute": 30,
+            "last_posted_date": None,
+            "history": [],
+            "used_questions": [],
+        },
+    )
+    monkeypatch.setattr(bot, "list_post_records", lambda include_closed=False: [])
+
+    status = bot.status_text()
+
+    assert f"**Version:** `{bot.BOT_VERSION}`" in status
+
+
 def test_on_message_prioritizes_exact_emperor_lock_trigger(monkeypatch) -> None:
     class DummyRole:
         def __init__(self, role_id: int) -> None:
