@@ -431,6 +431,36 @@ def test_merge_user_metric_backfill_only_increases_values(monkeypatch) -> None:
     assert store["user_stats.3.messages_sent"] == "2"
 
 
+def test_backfill_lookback_text_formats_days() -> None:
+    assert bot.backfill_lookback_text(None) == "all available history"
+    assert bot.backfill_lookback_text(0) == "all available history"
+    assert bot.backfill_lookback_text(14) == "last 14 day(s)"
+
+
+def test_backfill_state_tracking_updates_snapshot() -> None:
+    original_state = dict(bot.USER_METRICS_BACKFILL_STATE)
+
+    try:
+        bot.mark_backfill_started(123, 0)
+        running_snapshot = bot.get_backfill_status_snapshot()
+
+        assert running_snapshot["running"] is True
+        assert running_snapshot["lookback_days"] == 0
+        assert running_snapshot["initiated_by_user_id"] == "123"
+        assert isinstance(running_snapshot["started_at"], str)
+
+        bot.mark_backfill_finished("completed", summary="channels=5")
+        completed_snapshot = bot.get_backfill_status_snapshot()
+
+        assert completed_snapshot["running"] is False
+        assert completed_snapshot["last_status"] == "completed"
+        assert completed_snapshot["last_summary"] == "channels=5"
+        assert isinstance(completed_snapshot["last_completed_at"], str)
+    finally:
+        bot.USER_METRICS_BACKFILL_STATE.clear()
+        bot.USER_METRICS_BACKFILL_STATE.update(original_state)
+
+
 def test_on_message_records_user_message_metric(monkeypatch) -> None:
     class DummyMember:
         def __init__(self) -> None:

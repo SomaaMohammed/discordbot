@@ -173,6 +173,17 @@ TAYLOR_USER_ID = 661069422869610537
 STATE_WRITE_LOCK = RLock()
 USER_METRICS_BACKFILL_LOCK = asyncio.Lock()
 BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+USER_METRICS_BACKFILL_STATE: dict[str, object | None] = {
+    "running": False,
+    "started_at": None,
+    "lookback_days": None,
+    "initiated_by_user_id": None,
+    "last_started_at": None,
+    "last_completed_at": None,
+    "last_status": "never",
+    "last_summary": None,
+    "last_error": None,
+}
 
 BOSS_STATS = [
     "Strength",
@@ -394,6 +405,89 @@ def merge_user_metric_backfill(scanned_counts: dict[int, int], metric_name: str)
     return users_seen, updated
 
 
+def backfill_lookback_text(lookback_days: int | None) -> str:
+    if lookback_days is None or int(lookback_days) <= 0:
+        return "all available history"
+    return f"last {int(lookback_days)} day(s)"
+
+
+def get_backfill_status_snapshot() -> dict[str, object | None]:
+    return dict(USER_METRICS_BACKFILL_STATE)
+
+
+def mark_backfill_started(initiated_by_user_id: int | str, lookback_days: int) -> None:
+    started_at = iso_now()
+    USER_METRICS_BACKFILL_STATE["running"] = True
+    USER_METRICS_BACKFILL_STATE["started_at"] = started_at
+    USER_METRICS_BACKFILL_STATE["lookback_days"] = int(lookback_days)
+    USER_METRICS_BACKFILL_STATE["initiated_by_user_id"] = str(initiated_by_user_id)
+    USER_METRICS_BACKFILL_STATE["last_started_at"] = started_at
+    USER_METRICS_BACKFILL_STATE["last_status"] = "running"
+    USER_METRICS_BACKFILL_STATE["last_summary"] = None
+    USER_METRICS_BACKFILL_STATE["last_error"] = None
+
+
+def mark_backfill_finished(status: str, summary: str | None = None, error: str | None = None) -> None:
+    USER_METRICS_BACKFILL_STATE["running"] = False
+    USER_METRICS_BACKFILL_STATE["started_at"] = None
+    USER_METRICS_BACKFILL_STATE["last_completed_at"] = iso_now()
+    USER_METRICS_BACKFILL_STATE["last_status"] = status
+    USER_METRICS_BACKFILL_STATE["last_summary"] = summary
+    USER_METRICS_BACKFILL_STATE["last_error"] = error
+
+
+def format_iso_as_discord_time(value: str | None) -> str:
+    parsed = parse_iso(value)
+    if parsed is None:
+        return "Not available"
+
+    timestamp = int(parsed.timestamp())
+    return f"<t:{timestamp}:F> (<t:{timestamp}:R>)"
+
+
+def build_backfill_status_embed(snapshot: dict[str, object | None]) -> discord.Embed:
+    running = bool(snapshot.get("running", False))
+    lookback_days = snapshot.get("lookback_days")
+    initiated_by_user_id = str(snapshot.get("initiated_by_user_id") or "")
+    initiated_by_text = f"<@{initiated_by_user_id}>" if initiated_by_user_id else "Unknown"
+
+    state_text = "running" if running else str(snapshot.get("last_status") or "idle")
+
+    embed = discord.Embed(
+        title="User Stats Backfill Status",
+        description=f"**State:** `{state_text}`",
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+
+    embed.add_field(
+        name="Lookback",
+        value=backfill_lookback_text(lookback_days if isinstance(lookback_days, int) else None),
+        inline=True,
+    )
+    embed.add_field(name="Initiated By", value=initiated_by_text, inline=True)
+
+    started_at_text = format_iso_as_discord_time(str(snapshot.get("started_at") or ""))
+    last_started_text = format_iso_as_discord_time(str(snapshot.get("last_started_at") or ""))
+    last_completed_text = format_iso_as_discord_time(str(snapshot.get("last_completed_at") or ""))
+
+    if running:
+        embed.add_field(name="Started", value=started_at_text, inline=False)
+    else:
+        embed.add_field(name="Last Started", value=last_started_text, inline=False)
+        embed.add_field(name="Last Completed", value=last_completed_text, inline=False)
+
+    last_summary = str(snapshot.get("last_summary") or "")
+    if last_summary:
+        embed.add_field(name="Last Summary", value=last_summary[:1000], inline=False)
+
+    last_error = str(snapshot.get("last_error") or "")
+    if last_error:
+        embed.add_field(name="Last Error", value=last_error[:1000], inline=False)
+
+    return embed
+
+
 def start_background_task(coro: Coroutine[object, object, None]) -> None:
     task = asyncio.create_task(coro)
     BACKGROUND_TASKS.add(task)
@@ -555,12 +649,19 @@ async def run_user_activity_backfill(
     lookback_days: int,
 ) -> None:
     async with USER_METRICS_BACKFILL_LOCK:
+        initiator_id = int(getattr(initiated_by, "id", 0) or 0)
+        mark_backfill_started(initiator_id, lookback_days)
+
         started_at = get_now()
-        lookback_text = "all available history" if lookback_days == 0 else f"last {lookback_days} day(s)"
+        lookback_text = backfill_lookback_text(lookback_days)
 
         try:
             result = await backfill_user_activity_metrics(guild, lookback_days=lookback_days)
         except Exception as error:
+            mark_backfill_finished(
+                "failed",
+                error=f"{type(error).__name__}: {str(error)[:400]}",
+            )
             await send_failure_alert(
                 guild,
                 "User Stats Backfill Failed",
@@ -582,6 +683,12 @@ async def run_user_activity_backfill(
             f"**Reactions Sent Users Seen:** `{result['reaction_sent_users_seen']}` (updated `{result['reaction_sent_updates']}`)\n"
             f"**Reactions Received Users Seen:** `{result['reaction_received_users_seen']}` (updated `{result['reaction_received_updates']}`)"
         )
+
+        summary = (
+            f"channels={result['scanned_channels']}, messages={result['scanned_messages']}, "
+            f"reactions={result['scanned_reactions']}, updates={result['message_updates'] + result['reaction_sent_updates'] + result['reaction_received_updates']}"
+        )
+        mark_backfill_finished("completed", summary=summary)
 
         logger.info("User stats backfill completed | %s", description.replace("\n", " | "))
         await send_log(guild, "User Stats Backfill Complete", description)
@@ -4284,7 +4391,7 @@ async def admin_backfillstats(
         )
         return
 
-    lookback_text = "all available history" if int(days) == 0 else f"last `{int(days)}` day(s)"
+    lookback_text = backfill_lookback_text(int(days))
     await interaction.response.send_message(
         "Starting user stats backfill for "
         f"{lookback_text}. This can take a while and may hit API rate limits on large servers. "
@@ -4294,6 +4401,18 @@ async def admin_backfillstats(
 
     record_command_metric("invictus.backfillstats")
     start_background_task(run_user_activity_backfill(interaction.guild, interaction.user, int(days)))
+
+
+@admin_group.command(name="backfillstatus", description="Show status of the user stats backfill")
+async def admin_backfillstatus(interaction: discord.Interaction) -> None:
+    if not await require_admin(interaction):
+        return
+
+    snapshot = get_backfill_status_snapshot()
+    status_embed = build_backfill_status_embed(snapshot)
+
+    record_command_metric("invictus.backfillstatus")
+    await interaction.response.send_message(embed=status_embed, ephemeral=True)
 
 
 @admin_group.command(name="help", description="Show all available commands")
@@ -4354,6 +4473,7 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `/invictus muteall <minutes> <confirm> [dry_run] [reason]` — Timeout all (type CONFIRM)
 `/invictus unmuteall <confirm> [dry_run] [reason]` — Remove timeout from all (type CONFIRM)
 `/invictus backfillstats [days]` — Backfill historical message/reaction stats
+`/invictus backfillstatus` — Show running/last status for user stats backfill
 
 **Fun Commands**
 `/fun battle <opponent>` — Battle another member (mentions both users)
