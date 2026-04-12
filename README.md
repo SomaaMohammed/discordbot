@@ -134,50 +134,50 @@ Create `.env` in the project root.
 
 ### Required Keys
 
-| Key | Purpose |
-|---|---|
-| `DISCORD_TOKEN` | Bot token from Discord Developer Portal |
-| `TEST_GUILD_ID` | Guild ID for command sync and task scope |
-| `COURT_CHANNEL_ID` | Default inquiry post channel |
+| Key                | Purpose                                  |
+| ------------------ | ---------------------------------------- |
+| `DISCORD_TOKEN`    | Bot token from Discord Developer Portal  |
+| `TEST_GUILD_ID`    | Guild ID for command sync and task scope |
+| `COURT_CHANNEL_ID` | Default inquiry post channel             |
 
 ### Optional Core Keys
 
-| Key | Default | Purpose |
-|---|---:|---|
-| `LOG_CHANNEL_ID` | `0` | Staff log channel (`0` disables) |
-| `TIMEZONE` | `Asia/Qatar` | Timezone used for scheduling/reporting |
-| `DB_FILE` | `court.db` | SQLite database path |
+| Key              |      Default | Purpose                                |
+| ---------------- | -----------: | -------------------------------------- |
+| `LOG_CHANNEL_ID` |          `0` | Staff log channel (`0` disables)       |
+| `TIMEZONE`       | `Asia/Qatar` | Timezone used for scheduling/reporting |
+| `DB_FILE`        |   `court.db` | SQLite database path                   |
 
 ### Role and Royal Keys
 
-| Key | Default | Purpose |
-|---|---:|---|
-| `STAFF_ROLE_IDS` | empty | Comma-separated role IDs allowed for `/court` commands |
-| `EMPEROR_ROLE_ID` | `0` | Emperor role ID |
-| `EMPRESS_ROLE_ID` | `0` | Empress role ID |
-| `SILENT_LOCK_EXCLUDE_ROLES` | empty | Roles excluded from silent lock behavior |
-| `ROYAL_ALERT_CHANNEL_ID` | `0` | Channel that triggers royal response behavior |
-| `UNDEFEATED_USER_ID` | `0` | User ID that always wins `/fun battle` |
+| Key                         | Default | Purpose                                                |
+| --------------------------- | ------: | ------------------------------------------------------ |
+| `STAFF_ROLE_IDS`            |   empty | Comma-separated role IDs allowed for `/court` commands |
+| `EMPEROR_ROLE_ID`           |     `0` | Emperor role ID                                        |
+| `EMPRESS_ROLE_ID`           |     `0` | Empress role ID                                        |
+| `SILENT_LOCK_EXCLUDE_ROLES` |   empty | Roles excluded from silent lock behavior               |
+| `ROYAL_ALERT_CHANNEL_ID`    |     `0` | Channel that triggers royal response behavior          |
+| `UNDEFEATED_USER_ID`        |     `0` | User ID that always wins `/fun battle`                 |
 
 ### Anonymous Answer Guardrails
 
-| Key | Default | Purpose |
-|---|---:|---|
-| `ANON_MIN_ACCOUNT_AGE_MINUTES` | `0` | Minimum account age to submit anonymous answer |
-| `ANON_MIN_MEMBER_AGE_MINUTES` | `0` | Minimum guild membership age |
-| `ANON_REQUIRED_ROLE_ID` | `0` | Required role for anonymous answer eligibility |
-| `ANON_COOLDOWN_SECONDS` | `0` | Minimum time between anonymous submissions |
-| `ANON_ALLOW_LINKS` | `false` | Whether links are allowed in anonymous answers |
+| Key                            | Default | Purpose                                        |
+| ------------------------------ | ------: | ---------------------------------------------- |
+| `ANON_MIN_ACCOUNT_AGE_MINUTES` |     `0` | Minimum account age to submit anonymous answer |
+| `ANON_MIN_MEMBER_AGE_MINUTES`  |     `0` | Minimum guild membership age                   |
+| `ANON_REQUIRED_ROLE_ID`        |     `0` | Required role for anonymous answer eligibility |
+| `ANON_COOLDOWN_SECONDS`        |     `0` | Minimum time between anonymous submissions     |
+| `ANON_ALLOW_LINKS`             | `false` | Whether links are allowed in anonymous answers |
 
 ### Operations and Retention
 
-| Key | Default | Purpose |
-|---|---:|---|
-| `MUTEALL_TARGET_CAP` | `0` | Safety cap for mass timeout commands (`0` = unlimited) |
-| `WEEKLY_DIGEST_CHANNEL_ID` | `0` | Override digest channel (`0` falls back to log channel) |
-| `WEEKLY_DIGEST_WEEKDAY` | `0` | Digest weekday (`0` = Monday in Python weekday scale) |
-| `WEEKLY_DIGEST_HOUR` | `19` | Digest posting hour |
-| `ANSWER_RETENTION_DAYS` | `90` | Days before old answer records are purged |
+| Key                        | Default | Purpose                                                 |
+| -------------------------- | ------: | ------------------------------------------------------- |
+| `MUTEALL_TARGET_CAP`       |     `0` | Safety cap for mass timeout commands (`0` = unlimited)  |
+| `WEEKLY_DIGEST_CHANNEL_ID` |     `0` | Override digest channel (`0` falls back to log channel) |
+| `WEEKLY_DIGEST_WEEKDAY`    |     `0` | Digest weekday (`0` = Monday in Python weekday scale)   |
+| `WEEKLY_DIGEST_HOUR`       |    `19` | Digest posting hour                                     |
+| `ANSWER_RETENTION_DAYS`    |    `90` | Days before old answer records are purged               |
 
 ## Access and Permission Model
 
@@ -266,12 +266,12 @@ Public social commands.
 
 ### SQLite Tables
 
-| Table | Purpose |
-|---|---|
-| `kv` | JSON blobs and core state persistence |
-| `posts` | Inquiry post records and lifecycle fields |
-| `answers` | Anonymous answer records |
-| `metrics` | Command usage and activity counters |
+| Table            | Purpose                                       |
+| ---------------- | --------------------------------------------- |
+| `kv`             | JSON blobs and core state persistence         |
+| `posts`          | Inquiry post records and lifecycle fields     |
+| `answers`        | Anonymous answer records                      |
+| `metrics`        | Command usage and activity counters           |
 | `anon_cooldowns` | Per-user anonymous answer cooldown timestamps |
 
 ### SQL Indexes
