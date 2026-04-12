@@ -343,9 +343,29 @@ python -m py_compile bot.py
 
 This repository includes deployment helpers:
 
+- `deploy_server.sh` (recommended all-in-one server deploy)
 - `deploy_vm.sh`
 - `post_pull_server.sh`
 - `backup_db.sh`
+
+### One Command Server Deploy (`deploy_server.sh`) - Recommended
+
+```bash
+cd /path/to/imperial-court-bot
+chmod +x deploy_server.sh
+RUN_TESTS=1 RUN_LINT=1 ./deploy_server.sh main
+```
+
+What this script does:
+
+- Handles local git changes using `LOCAL_CHANGES_POLICY` (`abort`, `stash`, `discard`).
+- Pulls latest code from the selected branch.
+- Runs `post_pull_server.sh` for dependency install, compile checks, optional lint/tests, DB checks, and service restart.
+
+Useful options:
+
+- `LOCAL_CHANGES_POLICY=stash` to auto-stash local edits before pull.
+- `SKIP_PULL=1` to run rollout checks/restart only on current checkout.
 
 ### Recommended Server Rollout (`post_pull_server.sh`)
 
