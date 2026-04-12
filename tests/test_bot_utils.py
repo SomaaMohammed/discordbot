@@ -407,6 +407,30 @@ def test_get_user_fun_metrics_reads_all_fields(monkeypatch) -> None:
     assert stats["battles_won"] == 3
 
 
+def test_merge_user_metric_backfill_only_increases_values(monkeypatch) -> None:
+    store = {
+        "user_stats.1.messages_sent": "10",
+        "user_stats.2.messages_sent": "4",
+    }
+
+    def fake_get(key: str, default: str | int = "0") -> str:
+        return store.get(key, str(default))
+
+    def fake_set(key: str, value: str | int) -> None:
+        store[key] = str(value)
+
+    monkeypatch.setattr(bot, "metrics_get", fake_get)
+    monkeypatch.setattr(bot, "metrics_set", fake_set)
+
+    users_seen, updated = bot.merge_user_metric_backfill({1: 8, 2: 9, 3: 2}, "messages_sent")
+
+    assert users_seen == 3
+    assert updated == 2
+    assert store["user_stats.1.messages_sent"] == "10"
+    assert store["user_stats.2.messages_sent"] == "9"
+    assert store["user_stats.3.messages_sent"] == "2"
+
+
 def test_on_message_records_user_message_metric(monkeypatch) -> None:
     class DummyMember:
         def __init__(self) -> None:

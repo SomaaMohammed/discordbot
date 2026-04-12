@@ -241,6 +241,7 @@ Admin moderation and utility controls.
 - `unmutemany`
 - `muteall`
 - `unmuteall`
+- `backfillstats`
 - `afk`
 - `afkstatus`
 - `resetroyaltimer`
@@ -256,6 +257,8 @@ Public social commands.
 - `verdict`
 - `title`
 - `fate`
+
+Note: `messages_sent`, `reactions_sent`, and `reactions_received` can be backfilled from historical channel history with `/invictus backfillstats`.
 
 ### `/greetings`
 

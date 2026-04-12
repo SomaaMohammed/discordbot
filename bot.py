@@ -6,10 +6,11 @@ import os
 import random
 import re
 import sqlite3
+from collections import defaultdict
 from threading import RLock
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Coroutine
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
@@ -170,6 +171,8 @@ RIO_USER_ID = 1206572825100685365
 TAYLOR_USER_ID = 661069422869610537
 
 STATE_WRITE_LOCK = RLock()
+USER_METRICS_BACKFILL_LOCK = asyncio.Lock()
+BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 
 BOSS_STATS = [
     "Strength",
@@ -369,6 +372,219 @@ def list_top_users_for_metric(metric_name: str, limit: int = 5) -> list[tuple[in
 
     ranked.sort(key=lambda item: item[1], reverse=True)
     return ranked[: max(1, int(limit))]
+
+
+def merge_user_metric_backfill(scanned_counts: dict[int, int], metric_name: str) -> tuple[int, int]:
+    users_seen = 0
+    updated = 0
+
+    for user_id, scanned_value in scanned_counts.items():
+        value = int(scanned_value)
+        if value <= 0:
+            continue
+
+        users_seen += 1
+        metric_key = build_user_metric_key(user_id, metric_name)
+        existing_value = int(metrics_get(metric_key, 0))
+        merged_value = max(existing_value, value)
+        if merged_value > existing_value:
+            metrics_set(metric_key, merged_value)
+            updated += 1
+
+    return users_seen, updated
+
+
+def start_background_task(coro: Coroutine[object, object, None]) -> None:
+    task = asyncio.create_task(coro)
+    BACKGROUND_TASKS.add(task)
+    task.add_done_callback(BACKGROUND_TASKS.discard)
+
+
+def get_backfill_after_datetime(lookback_days: int) -> datetime | None:
+    if lookback_days <= 0:
+        return None
+    return datetime.now(timezone.utc) - timedelta(days=lookback_days)
+
+
+def get_history_kwargs(after_dt: datetime | None) -> dict[str, object]:
+    kwargs: dict[str, object] = {"limit": None}
+    if after_dt is not None:
+        kwargs["after"] = after_dt
+    return kwargs
+
+
+def get_non_bot_user_id(user: object | None) -> int | None:
+    if user is None or getattr(user, "bot", False):
+        return None
+
+    user_id = int(getattr(user, "id", 0) or 0)
+    if user_id <= 0:
+        return None
+    return user_id
+
+
+def get_backfill_history_targets(guild: discord.Guild) -> list[discord.TextChannel | discord.Thread]:
+    targets: list[discord.TextChannel | discord.Thread] = []
+    seen_ids: set[int] = set()
+
+    for channel in guild.text_channels:
+        if channel.id not in seen_ids:
+            targets.append(channel)
+            seen_ids.add(channel.id)
+
+    for thread in guild.threads:
+        if thread.id not in seen_ids:
+            targets.append(thread)
+            seen_ids.add(thread.id)
+
+    return targets
+
+
+async def tally_reaction_counts_for_message(
+    message: discord.Message,
+    reactions_sent_counts: dict[int, int],
+    reactions_received_counts: dict[int, int],
+) -> int:
+    async def count_reactors_for_reaction(reaction: discord.Reaction) -> int:
+        non_bot_reactors_local = 0
+        async for reactor in reaction.users(limit=None):
+            reactor_id = get_non_bot_user_id(reactor)
+            if reactor_id is None:
+                continue
+
+            reactions_sent_counts[reactor_id] += 1
+            non_bot_reactors_local += 1
+        return non_bot_reactors_local
+
+    scanned_reactions = 0
+    recipient_id = get_non_bot_user_id(message.author)
+
+    for reaction in message.reactions:
+        try:
+            non_bot_reactors = await count_reactors_for_reaction(reaction)
+        except (discord.Forbidden, discord.HTTPException):
+            continue
+
+        scanned_reactions += non_bot_reactors
+        if recipient_id is not None and non_bot_reactors > 0:
+            reactions_received_counts[recipient_id] += non_bot_reactors
+
+    return scanned_reactions
+
+
+async def scan_backfill_history_target(
+    target: discord.TextChannel | discord.Thread,
+    after_dt: datetime | None,
+    message_counts: dict[int, int],
+    reactions_sent_counts: dict[int, int],
+    reactions_received_counts: dict[int, int],
+) -> tuple[int, int]:
+    scanned_messages = 0
+    scanned_reactions = 0
+
+    async for message in target.history(**get_history_kwargs(after_dt)):
+        scanned_messages += 1
+        message_author_id = get_non_bot_user_id(message.author)
+        if message_author_id is not None:
+            message_counts[message_author_id] += 1
+
+        scanned_reactions += await tally_reaction_counts_for_message(
+            message,
+            reactions_sent_counts,
+            reactions_received_counts,
+        )
+
+    return scanned_messages, scanned_reactions
+
+
+async def backfill_user_activity_metrics(guild: discord.Guild, lookback_days: int = 0) -> dict[str, int]:
+    after_dt = get_backfill_after_datetime(lookback_days)
+
+    message_counts: dict[int, int] = defaultdict(int)
+    reactions_sent_counts: dict[int, int] = defaultdict(int)
+    reactions_received_counts: dict[int, int] = defaultdict(int)
+
+    scanned_channels = 0
+    skipped_channels = 0
+    scanned_messages = 0
+    scanned_reactions = 0
+
+    for target in get_backfill_history_targets(guild):
+        scanned_channels += 1
+        try:
+            channel_messages, channel_reactions = await scan_backfill_history_target(
+                target,
+                after_dt,
+                message_counts,
+                reactions_sent_counts,
+                reactions_received_counts,
+            )
+            scanned_messages += channel_messages
+            scanned_reactions += channel_reactions
+        except (discord.Forbidden, discord.HTTPException):
+            skipped_channels += 1
+            continue
+
+    message_users_seen, message_updates = merge_user_metric_backfill(dict(message_counts), "messages_sent")
+    reaction_sent_users_seen, reaction_sent_updates = merge_user_metric_backfill(
+        dict(reactions_sent_counts),
+        "reactions_sent",
+    )
+    reaction_received_users_seen, reaction_received_updates = merge_user_metric_backfill(
+        dict(reactions_received_counts),
+        "reactions_received",
+    )
+
+    return {
+        "scanned_channels": scanned_channels,
+        "skipped_channels": skipped_channels,
+        "scanned_messages": scanned_messages,
+        "scanned_reactions": scanned_reactions,
+        "message_users_seen": message_users_seen,
+        "reaction_sent_users_seen": reaction_sent_users_seen,
+        "reaction_received_users_seen": reaction_received_users_seen,
+        "message_updates": message_updates,
+        "reaction_sent_updates": reaction_sent_updates,
+        "reaction_received_updates": reaction_received_updates,
+    }
+
+
+async def run_user_activity_backfill(
+    guild: discord.Guild,
+    initiated_by: discord.Member | discord.User,
+    lookback_days: int,
+) -> None:
+    async with USER_METRICS_BACKFILL_LOCK:
+        started_at = get_now()
+        lookback_text = "all available history" if lookback_days == 0 else f"last {lookback_days} day(s)"
+
+        try:
+            result = await backfill_user_activity_metrics(guild, lookback_days=lookback_days)
+        except Exception as error:
+            await send_failure_alert(
+                guild,
+                "User Stats Backfill Failed",
+                error,
+                f"invictus.backfillstats by {initiated_by}",
+            )
+            return
+
+        elapsed = format_duration(get_now() - started_at)
+        description = (
+            f"**By:** {getattr(initiated_by, 'mention', str(initiated_by))}\n"
+            f"**Lookback:** {lookback_text}\n"
+            f"**Elapsed:** `{elapsed}`\n"
+            f"**Scanned Channels:** `{result['scanned_channels']}`\n"
+            f"**Skipped Channels:** `{result['skipped_channels']}`\n"
+            f"**Scanned Messages:** `{result['scanned_messages']}`\n"
+            f"**Scanned Reactions:** `{result['scanned_reactions']}`\n"
+            f"**Messages Users Seen:** `{result['message_users_seen']}` (updated `{result['message_updates']}`)\n"
+            f"**Reactions Sent Users Seen:** `{result['reaction_sent_users_seen']}` (updated `{result['reaction_sent_updates']}`)\n"
+            f"**Reactions Received Users Seen:** `{result['reaction_received_users_seen']}` (updated `{result['reaction_received_updates']}`)"
+        )
+
+        logger.info("User stats backfill completed | %s", description.replace("\n", " | "))
+        await send_log(guild, "User Stats Backfill Complete", description)
 
 
 def metrics_snapshot() -> dict:
@@ -4048,6 +4264,38 @@ async def court_importstate(
     await interaction.response.send_message("State imported successfully.", ephemeral=True)
 
 
+@admin_group.command(name="backfillstats", description="Backfill message/reaction stats from historical channel history")
+@app_commands.describe(days="How many days to scan (0 scans all available history)")
+async def admin_backfillstats(
+    interaction: discord.Interaction,
+    days: app_commands.Range[int, 0, 3650] = 0,
+) -> None:
+    if not await require_admin(interaction):
+        return
+
+    if interaction.guild is None:
+        await interaction.response.send_message(MSG_USE_IN_SERVER, ephemeral=True)
+        return
+
+    if USER_METRICS_BACKFILL_LOCK.locked():
+        await interaction.response.send_message(
+            "A user stats backfill is already running. Wait for it to finish before starting another.",
+            ephemeral=True,
+        )
+        return
+
+    lookback_text = "all available history" if int(days) == 0 else f"last `{int(days)}` day(s)"
+    await interaction.response.send_message(
+        "Starting user stats backfill for "
+        f"{lookback_text}. This can take a while and may hit API rate limits on large servers. "
+        "A completion summary will be sent to the configured log channel.",
+        ephemeral=True,
+    )
+
+    record_command_metric("invictus.backfillstats")
+    start_background_task(run_user_activity_backfill(interaction.guild, interaction.user, int(days)))
+
+
 @admin_group.command(name="help", description="Show all available commands")
 async def admin_help(interaction: discord.Interaction) -> None:
     if not await require_admin(interaction):
@@ -4105,6 +4353,7 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `/invictus unmutemany <members> [dry_run] [reason]` — Remove timeout from multiple with dry-run option
 `/invictus muteall <minutes> <confirm> [dry_run] [reason]` — Timeout all (type CONFIRM)
 `/invictus unmuteall <confirm> [dry_run] [reason]` — Remove timeout from all (type CONFIRM)
+`/invictus backfillstats [days]` — Backfill historical message/reaction stats
 
 **Fun Commands**
 `/fun battle <opponent>` — Battle another member (mentions both users)
