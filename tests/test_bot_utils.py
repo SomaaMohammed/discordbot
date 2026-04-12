@@ -139,6 +139,31 @@ def test_count_open_and_overdue_posts() -> None:
     assert overdue_count == 1
 
 
+def test_flatten_metrics_for_storage_tolerates_invalid_values() -> None:
+    flattened = bot.flatten_metrics_for_storage(
+        {
+            "posts_total": "not-a-number",
+            "posts_auto": "3",
+            "posts_manual": -2,
+            "custom_posts": None,
+            "answers_total": "bad",
+            "command_usage": {"court.status": "7", "": 4},
+            "command_failures": {"court.post": "oops"},
+            "posts_by_category": {"general": "x"},
+        }
+    )
+
+    assert flattened["posts_total"] == "0"
+    assert flattened["posts_auto"] == "3"
+    assert flattened["posts_manual"] == "0"
+    assert flattened["custom_posts"] == "0"
+    assert flattened["answers_total"] == "0"
+    assert flattened["command_usage.court.status"] == "7"
+    assert "command_usage." not in flattened
+    assert flattened["command_failures.court.post"] == "0"
+    assert flattened["posts_by_category.general"] == "0"
+
+
 def test_merge_imported_state_only_applies_allowed_keys() -> None:
     merged = bot.merge_imported_state(
         {
@@ -152,6 +177,72 @@ def test_merge_imported_state_only_applies_allowed_keys() -> None:
     assert merged["hour"] == 9
     assert merged["minute"] == 30
     assert "unknown_key" not in merged
+
+
+def test_merge_imported_state_sanitizes_invalid_values(monkeypatch) -> None:
+    base_state = {
+        "mode": "manual",
+        "hour": 20,
+        "minute": 0,
+        "channel_id": 123,
+        "log_channel_id": 456,
+        "last_posted_date": None,
+        "dry_run_auto_post": False,
+        "last_dry_run_date": None,
+        "last_weekly_digest_week": None,
+        "history": [],
+        "used_questions": [],
+        "posts": [],
+        "metrics": {},
+        "royal_presence": bot.ensure_royal_presence_shape({}),
+        "royal_afk": bot.ensure_royal_afk_shape({}),
+    }
+
+    monkeypatch.setattr(bot, "get_state", lambda: dict(base_state))
+
+    merged = bot.merge_imported_state(
+        {
+            "mode": "invalid",
+            "hour": 99,
+            "minute": -5,
+            "channel_id": "bad-channel",
+            "log_channel_id": "bad-log",
+            "dry_run_auto_post": "yes",
+            "history": ["", "  first  ", 42, "second"],
+            "used_questions": ["same", "same", "other", None],
+            "posts": [
+                {"message_id": "1", "channel_id": "2", "question": "ok"},
+                {"message_id": "bad", "channel_id": "2", "question": "skip"},
+            ],
+            "metrics": {
+                "posts_total": "oops",
+                "command_usage": {"court.status": "9", "": 3},
+            },
+            "royal_presence": {"last_message_at_by_title": {"Emperor": "x"}},
+            "royal_afk": {"by_title": {"Empress": {"active": 1, "reason": "Away"}}},
+            "unknown_key": "ignored",
+        }
+    )
+
+    assert merged["mode"] == "manual"
+    assert merged["hour"] == 23
+    assert merged["minute"] == 0
+    assert merged["channel_id"] == 123
+    assert merged["log_channel_id"] == 456
+    assert merged["dry_run_auto_post"] is True
+    assert merged["history"] == ["first", "second"]
+    assert merged["used_questions"] == ["same", "other"]
+    assert len(merged["posts"]) == 1
+    assert merged["posts"][0]["message_id"] == "1"
+    assert "unknown_key" not in merged
+
+    flattened_metrics = bot.flatten_metrics_for_storage(merged["metrics"])
+    assert flattened_metrics["posts_total"] == "0"
+    assert flattened_metrics["command_usage.court.status"] == "9"
+
+    assert "Emperor" in merged["royal_presence"]["last_message_at_by_title"]
+    assert "Empress" in merged["royal_presence"]["last_message_at_by_title"]
+    assert merged["royal_afk"]["by_title"]["Empress"]["active"] is True
 
 
 def test_emperor_lock_trigger_exact_phrase_matches() -> None:
@@ -669,6 +760,28 @@ def test_fetch_channel_by_id_returns_none_for_invalid_input() -> None:
     assert asyncio.run(bot.fetch_channel_by_id("invalid")) is None
 
 
+def test_upsert_post_row_skips_invalid_identifiers(monkeypatch) -> None:
+    executed: list[str] = []
+
+    class DummyConnection:
+        def __enter__(self) -> "DummyConnection":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, _query: str, _params: tuple[object, ...] | None = None) -> "DummyConnection":
+            executed.append("execute")
+            return self
+
+    monkeypatch.setattr(bot, "get_db_connection", lambda: DummyConnection())
+
+    bot.upsert_post_row({"message_id": "bad", "channel_id": "2"})
+    bot.upsert_post_row({"message_id": "1", "channel_id": "bad"})
+
+    assert executed == []
+
+
 def test_send_log_uses_fallback_channel_when_log_channel_missing(monkeypatch) -> None:
     class DummyGuild:
         pass
@@ -689,6 +802,21 @@ def test_send_log_uses_fallback_channel_when_log_channel_missing(monkeypatch) ->
     fallback_channel.send.assert_awaited_once()
     embed = fallback_channel.send.await_args.kwargs["embed"]
     assert embed.title == "Backfill Done"
+
+
+def test_send_log_returns_false_when_channel_send_fails(monkeypatch) -> None:
+    class DummyGuild:
+        pass
+
+    class DummyChannel:
+        async def send(self, *args, **kwargs) -> None:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(bot, "get_log_channel", AsyncMock(return_value=DummyChannel()))
+
+    sent = asyncio.run(bot.send_log(DummyGuild(), "Backfill Done", "summary"))
+
+    assert sent is False
 
 
 def test_run_user_activity_backfill_passes_fallback_channel_to_send_log(monkeypatch) -> None:

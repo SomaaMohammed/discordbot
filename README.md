@@ -89,7 +89,8 @@ It is designed for a "court" style workflow:
 ├── pyproject.toml
 ├── post_pull_server.sh
 ├── deploy_vm.sh
-└── backup_db.sh
+├── backup_db.sh
+└── restore_db.sh
 ```
 
 ## Prerequisites
@@ -126,7 +127,7 @@ python bot.py
 ## Dependency Files
 
 - `requirements.txt`: runtime dependencies used in production.
-- `requirements-dev.txt`: local/CI tooling (`pytest`, `ruff`, `mypy`) plus runtime deps.
+- `requirements-dev.txt`: local/CI tooling (`pytest`, `pytest-cov`, `ruff`, `mypy`) plus runtime deps.
 
 ## Environment Configuration
 
@@ -330,7 +331,7 @@ Install dev tooling and run checks:
 pip install -r requirements-dev.txt
 ruff check .
 mypy bot.py courtbot
-pytest -q
+pytest -q --cov=bot --cov=courtbot --cov-report=term-missing
 ```
 
 Optional quick compile smoke test:
@@ -347,6 +348,7 @@ This repository includes deployment helpers:
 - `deploy_vm.sh`
 - `post_pull_server.sh`
 - `backup_db.sh`
+- `restore_db.sh`
 
 ### One Command Server Deploy (`deploy_server.sh`) - Recommended
 
@@ -389,6 +391,27 @@ What the script does:
 - Restarts the systemd service and validates active status.
 - Verifies expected SQLite tables exist after rollout.
 - Prints service status and recent logs.
+
+### Backup and Restore Validation
+
+Create and validate a database backup:
+
+```bash
+chmod +x backup_db.sh
+./backup_db.sh
+```
+
+Restore from a validated backup file:
+
+```bash
+chmod +x restore_db.sh
+./restore_db.sh ./backups/court-YYYYMMDD-HHMMSS.db
+```
+
+Useful restore options:
+
+- `DRY_RUN=1 ./restore_db.sh <backup-file>` validates the backup without replacing the live DB.
+- `BACKUP_BEFORE_RESTORE=1` (default) creates a pre-restore safety snapshot in `backups/`.
 
 ### `deploy_vm.sh` and Local Change Policy
 

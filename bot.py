@@ -757,32 +757,66 @@ def metrics_snapshot() -> dict:
     return ensure_metrics_shape(snapshot)
 
 
+def coerce_int(value: object, default: int = 0, minimum: int | None = None, maximum: int | None = None) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+
+    if minimum is not None:
+        parsed = max(parsed, minimum)
+    if maximum is not None:
+        parsed = min(parsed, maximum)
+    return parsed
+
+
 def flatten_metrics_for_storage(metrics: dict) -> dict[str, str]:
-    shaped = metrics if isinstance(metrics, dict) else {}
-    shaped.setdefault("command_usage", {})
-    shaped.setdefault("command_failures", {})
-    shaped.setdefault("posts_by_category", {})
+    shaped = dict(metrics) if isinstance(metrics, dict) else {}
     shaped.setdefault("posts_total", 0)
     shaped.setdefault("posts_auto", 0)
     shaped.setdefault("posts_manual", 0)
     shaped.setdefault("custom_posts", 0)
     shaped.setdefault("answers_total", 0)
     shaped.setdefault("last_successful_auto_post", None)
+
+    command_usage = shaped.get("command_usage")
+    if not isinstance(command_usage, dict):
+        command_usage = {}
+
+    command_failures = shaped.get("command_failures")
+    if not isinstance(command_failures, dict):
+        command_failures = {}
+
+    posts_by_category = shaped.get("posts_by_category")
+    if not isinstance(posts_by_category, dict):
+        posts_by_category = {}
+
     flattened: dict[str, str] = {
-        "posts_total": str(int(shaped.get("posts_total", 0))),
-        "posts_auto": str(int(shaped.get("posts_auto", 0))),
-        "posts_manual": str(int(shaped.get("posts_manual", 0))),
-        "custom_posts": str(int(shaped.get("custom_posts", 0))),
-        "answers_total": str(int(shaped.get("answers_total", 0))),
+        "posts_total": str(coerce_int(shaped.get("posts_total", 0), minimum=0)),
+        "posts_auto": str(coerce_int(shaped.get("posts_auto", 0), minimum=0)),
+        "posts_manual": str(coerce_int(shaped.get("posts_manual", 0), minimum=0)),
+        "custom_posts": str(coerce_int(shaped.get("custom_posts", 0), minimum=0)),
+        "answers_total": str(coerce_int(shaped.get("answers_total", 0), minimum=0)),
         "last_successful_auto_post": str(shaped.get("last_successful_auto_post") or ""),
     }
 
-    for command_name, count in shaped.get("command_usage", {}).items():
-        flattened[f"command_usage.{command_name}"] = str(int(count))
-    for command_name, count in shaped.get("command_failures", {}).items():
-        flattened[f"command_failures.{command_name}"] = str(int(count))
-    for category, count in shaped.get("posts_by_category", {}).items():
-        flattened[f"posts_by_category.{category}"] = str(int(count))
+    for command_name, count in command_usage.items():
+        key = str(command_name).strip()
+        if not key:
+            continue
+        flattened[f"command_usage.{key}"] = str(coerce_int(count, minimum=0))
+
+    for command_name, count in command_failures.items():
+        key = str(command_name).strip()
+        if not key:
+            continue
+        flattened[f"command_failures.{key}"] = str(coerce_int(count, minimum=0))
+
+    for category, count in posts_by_category.items():
+        key = str(category).strip()
+        if not key:
+            continue
+        flattened[f"posts_by_category.{key}"] = str(coerce_int(count, minimum=0))
 
     return flattened
 
@@ -802,8 +836,63 @@ def parse_post_row(row: sqlite3.Row) -> dict:
     }
 
 
+def normalize_optional_text(value: object) -> str | None:
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
+def get_post_identifiers(record: dict) -> tuple[str, str, str | None] | None:
+    message_id = normalize_optional_text(record.get("message_id")) or ""
+    channel_id = normalize_optional_text(record.get("channel_id")) or ""
+    if not message_id.isdigit() or not channel_id.isdigit():
+        logger.warning(
+            "Skipping post upsert due to invalid identifiers: message_id=%r channel_id=%r",
+            record.get("message_id"),
+            record.get("channel_id"),
+        )
+        return None
+
+    thread_id_raw = normalize_optional_text(record.get("thread_id")) or ""
+    thread_id = thread_id_raw if thread_id_raw.isdigit() else None
+    return message_id, channel_id, thread_id
+
+
+def build_post_upsert_values(
+    record: dict,
+    message_id: str,
+    channel_id: str,
+    thread_id: str | None,
+) -> tuple[str, str | None, str, str, str, str, int, int, str | None, str | None]:
+    posted_at = normalize_optional_text(record.get("posted_at")) or iso_now()
+    close_after_hours = coerce_int(record.get("close_after_hours", THREAD_CLOSE_HOURS), THREAD_CLOSE_HOURS, minimum=1)
+    category = normalize_optional_text(record.get("category")) or "unknown"
+    question = normalize_optional_text(record.get("question")) or MSG_UNKNOWN_QUESTION
+    closed_at = normalize_optional_text(record.get("closed_at"))
+    close_reason = normalize_optional_text(record.get("close_reason"))
+    closed = 1 if bool(record.get("closed", False)) else 0
+
+    return (
+        message_id,
+        thread_id,
+        channel_id,
+        category,
+        question,
+        posted_at,
+        close_after_hours,
+        closed,
+        closed_at,
+        close_reason,
+    )
+
+
 def upsert_post_row(record: dict) -> None:
-    close_after_hours = int(record.get("close_after_hours", THREAD_CLOSE_HOURS))
+    identifiers = get_post_identifiers(record)
+    if identifiers is None:
+        return
+
+    message_id, channel_id, thread_id = identifiers
+    values = build_post_upsert_values(record, message_id, channel_id, thread_id)
+
     with get_db_connection() as conn:
         conn.execute(
             """
@@ -822,18 +911,7 @@ def upsert_post_row(record: dict) -> None:
                 closed_at = excluded.closed_at,
                 close_reason = excluded.close_reason
             """,
-            (
-                str(record.get("message_id")),
-                str(record.get("thread_id")) if record.get("thread_id") else None,
-                str(record.get("channel_id")),
-                str(record.get("category") or "unknown"),
-                str(record.get("question") or MSG_UNKNOWN_QUESTION),
-                str(record.get("posted_at") or iso_now()),
-                close_after_hours,
-                1 if bool(record.get("closed", False)) else 0,
-                str(record.get("closed_at")) if record.get("closed_at") else None,
-                str(record.get("close_reason")) if record.get("close_reason") else None,
-            ),
+            values,
         )
 
 
@@ -1650,7 +1728,16 @@ async def send_log(
         color=ROLE_COLOR,
         timestamp=get_now(),
     )
-    await channel.send(embed=embed)
+
+    try:
+        await channel.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException) as error:
+        logger.warning("Failed to send log '%s': %s", title, error)
+        return False
+    except Exception as error:
+        logger.warning("Unexpected error while sending log '%s': %s", title, error)
+        return False
+
     return True
 
 
@@ -2440,29 +2527,160 @@ def build_question_audit_report() -> str:
     return "\n".join(lines)
 
 
+IMPORT_STATE_DATE_KEYS = (
+    "last_posted_date",
+    "last_dry_run_date",
+    "last_weekly_digest_week",
+)
+VALID_BOT_MODES = {"off", "manual", "auto"}
+
+
+def parse_boolish(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+
+    return None
+
+
+def sanitize_imported_history(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+
+    return [
+        item.strip()
+        for item in value
+        if isinstance(item, str) and item.strip()
+    ][-HISTORY_LIMIT:]
+
+
+def sanitize_imported_used_questions(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+
+    deduped_used_questions: list[str] = []
+    seen_questions: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+
+        clean_item = item.strip()
+        if not clean_item or clean_item in seen_questions:
+            continue
+
+        seen_questions.add(clean_item)
+        deduped_used_questions.append(clean_item)
+
+    return deduped_used_questions
+
+
+def is_valid_imported_post(post: object) -> bool:
+    return (
+        isinstance(post, dict)
+        and str(post.get("message_id") or "").strip().isdigit()
+        and str(post.get("channel_id") or "").strip().isdigit()
+    )
+
+
+def sanitize_imported_posts(value: object) -> list[dict] | None:
+    if not isinstance(value, list):
+        return None
+    return [post for post in value if is_valid_imported_post(post)]
+
+
+def apply_imported_mode(merged: dict, imported: dict) -> None:
+    mode = imported.get("mode")
+    if isinstance(mode, str) and mode in VALID_BOT_MODES:
+        merged["mode"] = mode
+
+
+def apply_imported_schedule_fields(merged: dict, imported: dict, base: dict) -> None:
+    if "hour" in imported:
+        merged["hour"] = coerce_int(imported.get("hour"), coerce_int(base.get("hour"), 20), minimum=0, maximum=23)
+
+    if "minute" in imported:
+        merged["minute"] = coerce_int(imported.get("minute"), coerce_int(base.get("minute"), 0), minimum=0, maximum=59)
+
+
+def apply_imported_channel_fields(merged: dict, imported: dict, base: dict) -> None:
+    if "channel_id" in imported:
+        default_channel_id = coerce_int(base.get("channel_id"), COURT_CHANNEL_ID, minimum=1)
+        merged["channel_id"] = coerce_int(imported.get("channel_id"), default_channel_id, minimum=1)
+
+    if "log_channel_id" in imported:
+        default_log_channel_id = coerce_int(base.get("log_channel_id"), 0, minimum=0)
+        merged["log_channel_id"] = coerce_int(imported.get("log_channel_id"), default_log_channel_id, minimum=0)
+
+
+def apply_imported_date_fields(merged: dict, imported: dict) -> None:
+    for key in IMPORT_STATE_DATE_KEYS:
+        if key not in imported:
+            continue
+
+        value = imported.get(key)
+        if value is None or isinstance(value, str):
+            merged[key] = value
+
+
+def apply_imported_dry_run_field(merged: dict, imported: dict) -> None:
+    if "dry_run_auto_post" not in imported:
+        return
+
+    parsed_value = parse_boolish(imported.get("dry_run_auto_post"))
+    if parsed_value is not None:
+        merged["dry_run_auto_post"] = parsed_value
+
+
+def apply_imported_collection_fields(merged: dict, imported: dict) -> None:
+    history = sanitize_imported_history(imported.get("history"))
+    if history is not None:
+        merged["history"] = history
+
+    used_questions = sanitize_imported_used_questions(imported.get("used_questions"))
+    if used_questions is not None:
+        merged["used_questions"] = used_questions
+
+    posts = sanitize_imported_posts(imported.get("posts"))
+    if posts is not None:
+        merged["posts"] = posts
+
+
+def apply_imported_structured_fields(merged: dict, imported: dict) -> None:
+    metrics = imported.get("metrics")
+    if isinstance(metrics, dict):
+        merged["metrics"] = ensure_metrics_shape(dict(metrics))
+
+    royal_presence = imported.get("royal_presence")
+    if isinstance(royal_presence, dict):
+        merged["royal_presence"] = ensure_royal_presence_shape(royal_presence)
+
+    royal_afk = imported.get("royal_afk")
+    if isinstance(royal_afk, dict):
+        merged["royal_afk"] = ensure_royal_afk_shape(royal_afk)
+
+
 def merge_imported_state(imported: dict) -> dict:
     base = get_state()
-    allowed_keys = {
-        "mode",
-        "hour",
-        "minute",
-        "channel_id",
-        "log_channel_id",
-        "last_posted_date",
-        "dry_run_auto_post",
-        "last_dry_run_date",
-        "last_weekly_digest_week",
-        "history",
-        "used_questions",
-        "posts",
-        "metrics",
-        "royal_presence",
-        "royal_afk",
-    }
-    for key in allowed_keys:
-        if key in imported:
-            base[key] = imported[key]
-    return base
+    if not isinstance(imported, dict):
+        return base
+
+    merged = dict(base)
+
+    apply_imported_mode(merged, imported)
+    apply_imported_schedule_fields(merged, imported, base)
+    apply_imported_channel_fields(merged, imported, base)
+    apply_imported_date_fields(merged, imported)
+    apply_imported_dry_run_field(merged, imported)
+    apply_imported_collection_fields(merged, imported)
+    apply_imported_structured_fields(merged, imported)
+
+    return merged
 
 
 def as_utc(dt: datetime | None) -> datetime | None:
