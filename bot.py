@@ -3044,15 +3044,18 @@ def build_royal_afk_status_report(state: dict | None = None, now: datetime | Non
     lines: list[str] = []
     for title in ROYAL_TITLES:
         entry = by_title.get(title, {})
-        if bool(entry.get("active", False)):
-            reason = str(entry.get("reason") or "Away from court")
-            set_at = parse_iso(entry.get("set_at"))
-            if set_at is None:
-                lines.append(f"**{title}:** AFK - {reason}")
-            else:
-                lines.append(f"**{title}:** AFK for `{format_duration(current_time - set_at)}` - {reason}")
+        if not bool(entry.get("active", False)):
+            continue
+
+        reason = str(entry.get("reason") or "Away from court")
+        set_at = parse_iso(entry.get("set_at"))
+        if set_at is None:
+            lines.append(f"**{title}:** AFK - {reason}")
         else:
-            lines.append(f"**{title}:** Not AFK")
+            lines.append(f"**{title}:** AFK for `{format_duration(current_time - set_at)}` - {reason}")
+
+    if not lines:
+        return "No royal AFK statuses are enabled."
 
     return "\n".join(lines)
 

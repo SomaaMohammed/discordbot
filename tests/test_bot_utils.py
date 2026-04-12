@@ -272,7 +272,7 @@ def test_get_royal_afk_response_handles_explicit_member_mentions_without_keyword
     assert "Reviewing decrees" in response
 
 
-def test_build_royal_afk_status_report_shows_afk_and_non_afk() -> None:
+def test_build_royal_afk_status_report_shows_only_active_entries() -> None:
     now = bot.get_now()
     state = {
         "royal_afk": {
@@ -296,7 +296,7 @@ def test_build_royal_afk_status_report_shows_afk_and_non_afk() -> None:
     report = bot.build_royal_afk_status_report(state=state, now=now)
     assert "**Emperor:** AFK for" in report
     assert "In war council" in report
-    assert "**Empress:** Not AFK" in report
+    assert "**Empress:**" not in report
 
 
 def test_build_royal_afk_status_report_defaults_when_missing_timestamp() -> None:
@@ -321,6 +321,30 @@ def test_build_royal_afk_status_report_defaults_when_missing_timestamp() -> None
 
     report = bot.build_royal_afk_status_report(state=state)
     assert "**Emperor:** AFK - Reviewing scrolls" in report
+
+
+def test_build_royal_afk_status_report_shows_none_enabled_message() -> None:
+    state = {
+        "royal_afk": {
+            "by_title": {
+                "Emperor": {
+                    "active": False,
+                    "reason": "",
+                    "set_at": None,
+                    "set_by_user_id": None,
+                },
+                "Empress": {
+                    "active": False,
+                    "reason": "",
+                    "set_at": None,
+                    "set_by_user_id": None,
+                },
+            }
+        }
+    }
+
+    report = bot.build_royal_afk_status_report(state=state)
+    assert report == "No royal AFK statuses are enabled."
 
 
 def test_clear_member_royal_afk_resets_active_entries(monkeypatch) -> None:
