@@ -166,6 +166,15 @@ main() {
   "$PYTHON_BIN" -m pip install --upgrade pip
   "$PYTHON_BIN" -m pip install -r "$APP_DIR/requirements.txt"
 
+  if [[ "$RUN_LINT" == "1" || "$RUN_TESTS" == "1" ]]; then
+    if [[ -f "$APP_DIR/requirements-dev.txt" ]]; then
+      log "Installing development dependencies for lint/tests"
+      "$PYTHON_BIN" -m pip install -r "$APP_DIR/requirements-dev.txt"
+    else
+      log "requirements-dev.txt not found; continuing without extra dev dependencies"
+    fi
+  fi
+
   log "Compile check"
   "$PYTHON_BIN" -m py_compile "$APP_DIR/bot.py"
 

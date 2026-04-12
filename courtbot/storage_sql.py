@@ -45,3 +45,18 @@ CREATE TABLE IF NOT EXISTS anon_cooldowns (
     last_answer_at TEXT NOT NULL
 )
 """
+
+POSTS_CLOSED_POSTED_AT_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_posts_closed_posted_at
+ON posts (closed, posted_at)
+"""
+
+ANSWERS_QUESTION_CREATED_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_answers_question_created
+ON answers (question_message_id, created_at)
+"""
+
+ANSWERS_MESSAGE_ID_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_answers_message_id
+ON answers (answer_message_id)
+"""

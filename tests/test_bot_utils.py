@@ -114,6 +114,19 @@ def test_format_duration_hours_minutes() -> None:
     assert bot.format_duration(timedelta(hours=2, minutes=5, seconds=30)) == "2h 5m"
 
 
+def test_get_fate_reading_bands() -> None:
+    assert bot.get_fate_reading(5)[0] == "Dire Omen"
+    assert bot.get_fate_reading(25)[0] == "Trial Ahead"
+    assert bot.get_fate_reading(50)[0] == "Balanced Winds"
+    assert bot.get_fate_reading(80)[0] == "Favorable Tide"
+    assert bot.get_fate_reading(99)[0] == "Imperial Blessing"
+
+
+def test_get_fate_reading_clamps_out_of_range_values() -> None:
+    assert bot.get_fate_reading(-10) == bot.get_fate_reading(1)
+    assert bot.get_fate_reading(500) == bot.get_fate_reading(100)
+
+
 def test_count_open_and_overdue_posts() -> None:
     now = bot.get_now()
     posts = [
@@ -366,6 +379,147 @@ def test_reply_mute_parser_accepts_you_know_what_to_do_family() -> None:
     assert bot.parse_reply_mute_message("invictus, you know what to do stop now") == "stop now"
     assert bot.parse_reply_mute_message("hey invictus do your thing being toxic") == "being toxic"
     assert bot.parse_reply_mute_message("invictus handle this") == ""
+
+
+def test_build_user_metric_key_uses_expected_format() -> None:
+    assert bot.build_user_metric_key(42, "messages_sent") == "user_stats.42.messages_sent"
+
+
+def test_get_user_fun_metrics_reads_all_fields(monkeypatch) -> None:
+    mocked = {
+        "user_stats.42.messages_sent": "12",
+        "user_stats.42.reactions_sent": "4",
+        "user_stats.42.reactions_received": "9",
+        "user_stats.42.anonymous_answers_sent": "2",
+        "user_stats.42.battles_played": "7",
+        "user_stats.42.battles_won": "3",
+    }
+
+    monkeypatch.setattr(bot, "metrics_get", lambda key, default="0": mocked.get(key, str(default)))
+
+    stats = bot.get_user_fun_metrics(42)
+
+    assert stats["messages_sent"] == 12
+    assert stats["reactions_sent"] == 4
+    assert stats["reactions_received"] == 9
+    assert stats["anonymous_answers_sent"] == 2
+    assert stats["battles_played"] == 7
+    assert stats["battles_won"] == 3
+
+
+def test_on_message_records_user_message_metric(monkeypatch) -> None:
+    class DummyMember:
+        def __init__(self) -> None:
+            self.bot = False
+            self.id = 777
+            self.roles = []
+
+    class DummyTextChannel:
+        def __init__(self) -> None:
+            self.send = AsyncMock()
+            self.id = 999
+
+    class DummyGuild:
+        pass
+
+    class DummyMessage:
+        def __init__(self) -> None:
+            self.author = DummyMember()
+            self.guild = DummyGuild()
+            self.channel = DummyTextChannel()
+            self.content = "hello court"
+
+    tracked: list[int] = []
+
+    monkeypatch.setattr(bot.discord, "Member", DummyMember)
+    monkeypatch.setattr(bot, "record_user_message_metric", lambda member: tracked.append(getattr(member, "id", 0)))
+    monkeypatch.setattr(bot, "clear_member_royal_afk", lambda _member: [])
+    monkeypatch.setattr(bot, "handle_royal_presence_announcement", AsyncMock())
+    monkeypatch.setattr(bot, "maybe_send_royal_mention_response", AsyncMock(return_value=False))
+    monkeypatch.setattr(bot, "parse_reply_mute_message", lambda _content: None)
+
+    asyncio.run(bot.on_message(DummyMessage()))
+
+    assert tracked == [777]
+
+
+def test_on_message_reply_mute_trigger_ignores_non_admin_users(monkeypatch) -> None:
+    class DummyPermissions:
+        def __init__(self, administrator: bool) -> None:
+            self.administrator = administrator
+
+    class DummyGuild:
+        owner_id = 999
+
+    class DummyMember:
+        def __init__(self, administrator: bool) -> None:
+            self.bot = False
+            self.id = 123
+            self.guild = DummyGuild()
+            self.guild_permissions = DummyPermissions(administrator)
+            self.roles = []
+
+    class DummyTextChannel:
+        def __init__(self) -> None:
+            self.send = AsyncMock()
+            self.id = 999
+
+    class DummyMessage:
+        def __init__(self) -> None:
+            self.author = DummyMember(administrator=False)
+            self.guild = DummyGuild()
+            self.channel = DummyTextChannel()
+            self.content = "invictus mute"
+
+    trigger_mock = AsyncMock()
+    monkeypatch.setattr(bot.discord, "Member", DummyMember)
+    monkeypatch.setattr(bot, "handle_reply_mute_trigger", trigger_mock)
+    monkeypatch.setattr(bot, "parse_reply_mute_message", lambda _content: "")
+    monkeypatch.setattr(bot, "handle_royal_presence_announcement", AsyncMock())
+
+    asyncio.run(bot.on_message(DummyMessage()))
+
+    trigger_mock.assert_not_awaited()
+
+
+def test_on_message_reply_mute_trigger_allows_admin_users(monkeypatch) -> None:
+    class DummyPermissions:
+        def __init__(self, administrator: bool) -> None:
+            self.administrator = administrator
+
+    class DummyGuild:
+        owner_id = 999
+
+    class DummyMember:
+        def __init__(self, administrator: bool) -> None:
+            self.bot = False
+            self.id = 123
+            self.guild = DummyGuild()
+            self.guild_permissions = DummyPermissions(administrator)
+            self.roles = []
+
+    class DummyTextChannel:
+        def __init__(self) -> None:
+            self.send = AsyncMock()
+            self.id = 999
+
+    class DummyMessage:
+        def __init__(self) -> None:
+            self.author = DummyMember(administrator=True)
+            self.guild = DummyGuild()
+            self.channel = DummyTextChannel()
+            self.content = "invictus mute"
+
+    trigger_mock = AsyncMock()
+    monkeypatch.setattr(bot.discord, "Member", DummyMember)
+    monkeypatch.setattr(bot, "handle_reply_mute_trigger", trigger_mock)
+    monkeypatch.setattr(bot, "parse_reply_mute_message", lambda _content: "for spam")
+    monkeypatch.setattr(bot, "handle_royal_presence_announcement", AsyncMock())
+
+    message = DummyMessage()
+    asyncio.run(bot.on_message(message))
+
+    trigger_mock.assert_awaited_once_with(message, "for spam")
 
 
 def test_silence_lock_trigger_accepts_additional_phrases() -> None:

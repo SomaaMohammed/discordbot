@@ -20,3 +20,5 @@ court.db
 backups/
 *.log
 .pytest_cache/
+lore.txt
+lore_snippets.txt

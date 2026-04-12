@@ -21,9 +21,12 @@ from courtbot.config import load_runtime_config
 from courtbot.storage_sql import (
     ANON_COOLDOWNS_TABLE_SQL,
     ANSWERS_TABLE_SQL,
+    ANSWERS_MESSAGE_ID_INDEX_SQL,
+    ANSWERS_QUESTION_CREATED_INDEX_SQL,
     KV_TABLE_SQL,
     METRICS_TABLE_SQL,
     POSTS_TABLE_SQL,
+    POSTS_CLOSED_POSTED_AT_INDEX_SQL,
 )
 
 load_dotenv()
@@ -113,11 +116,31 @@ ROLE_PANEL_DEFAULT_BUTTON_LABEL = "Claim Role"
 ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH = 80
 ROLE_PANEL_MAX_BUTTONS = 5
 
+USER_METRIC_PREFIX = "user_stats."
+USER_FUN_METRIC_FIELDS: tuple[tuple[str, str], ...] = (
+    ("messages_sent", "Messages Sent"),
+    ("reactions_sent", "Reactions Sent"),
+    ("reactions_received", "Reactions Received"),
+    ("anonymous_answers_sent", "Anonymous Answers"),
+    ("battles_played", "Battles Played"),
+    ("battles_won", "Battles Won"),
+)
+USER_FUN_METRIC_LABELS = dict(USER_FUN_METRIC_FIELDS)
+USER_FUN_LEADERBOARD_CHOICES = [
+    app_commands.Choice(name="Messages Sent", value="messages_sent"),
+    app_commands.Choice(name="Reactions Sent", value="reactions_sent"),
+    app_commands.Choice(name="Reactions Received", value="reactions_received"),
+    app_commands.Choice(name="Anonymous Answers", value="anonymous_answers_sent"),
+    app_commands.Choice(name="Battles Played", value="battles_played"),
+    app_commands.Choice(name="Battles Won", value="battles_won"),
+]
+
 MSG_USE_IN_SERVER = "Use this inside the server."
 MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel."
 MSG_BOT_CONTEXT_ERROR = "Could not verify bot permissions in this server."
 MSG_CONFIRM_REQUIRED = "Confirmation failed. Type `CONFIRM` exactly."
 MSG_VERIFY_ROLES = "Could not verify your roles."
+MSG_ADMIN_ONLY = "Only server administrators can use this command."
 MSG_ROYAL_ONLY = "Only the Emperor or Empress can use this command."
 MSG_EVERYONE_MENTION = "@everyone"
 MSG_INQUIRY_CLOSED = "This court inquiry is already closed."
@@ -156,6 +179,32 @@ BOSS_STATS = [
     "Luck",
     "Endurance",
 ]
+IMPERIAL_VERDICTS = (
+    "Approved. The throne nods in your favor.",
+    "Denied. The court demands stronger resolve.",
+    "Delayed. Return once your allies are prepared.",
+    "Conditionally approved. Pay your debts before dawn.",
+    "Accepted. Proceed, but carry steel and patience.",
+    "Rejected. Fate advises a different road.",
+)
+IMPERIAL_TITLES = (
+    "Warden of the Iron Gate",
+    "Keeper of Midnight Oaths",
+    "High Marshal of Courtly Chaos",
+    "Bearer of the Black Standard",
+    "Chancellor of Loud Opinions",
+    "Sovereign of Unhinged Takes",
+    "Archivist of Forbidden Memes",
+    "Champion of the Inner Court",
+)
+IMPERIAL_OMENS = (
+    "A quiet hallway means someone already heard your plan.",
+    "Steel sings only for those who laugh first.",
+    "When candles bend, old rivals wake.",
+    "The loudest boast usually hides the weakest shield.",
+    "Tonight favors bold words and careful exits.",
+    "A sealed letter is worth more than ten promises.",
+)
 
 def validate_runtime_config() -> None:
     if not TOKEN:
@@ -181,6 +230,9 @@ def init_db() -> None:
         conn.execute(ANSWERS_TABLE_SQL)
         conn.execute(METRICS_TABLE_SQL)
         conn.execute(ANON_COOLDOWNS_TABLE_SQL)
+        conn.execute(POSTS_CLOSED_POSTED_AT_INDEX_SQL)
+        conn.execute(ANSWERS_QUESTION_CREATED_INDEX_SQL)
+        conn.execute(ANSWERS_MESSAGE_ID_INDEX_SQL)
 
 
 def db_has_key(key: str) -> bool:
@@ -262,6 +314,61 @@ def metrics_get_prefixed(prefix: str) -> dict[str, int]:
         if suffix:
             result[suffix] = int(row["metric_value"])
     return result
+
+
+def build_user_metric_key(user_id: int | str, metric_name: str) -> str:
+    return f"{USER_METRIC_PREFIX}{int(user_id)}.{metric_name}"
+
+
+def parse_user_id_from_metric_key(metric_key: str, metric_name: str) -> int | None:
+    prefix = USER_METRIC_PREFIX
+    suffix = f".{metric_name}"
+
+    if not metric_key.startswith(prefix) or not metric_key.endswith(suffix):
+        return None
+
+    user_id_raw = metric_key[len(prefix) : -len(suffix)]
+    if not user_id_raw.isdigit():
+        return None
+
+    return int(user_id_raw)
+
+
+def increment_user_metric(user_id: int | str, metric_name: str, amount: int = 1) -> int:
+    return metrics_increment(build_user_metric_key(user_id, metric_name), amount=amount)
+
+
+def get_user_fun_metrics(user_id: int | str) -> dict[str, int]:
+    return {
+        metric_name: int(metrics_get(build_user_metric_key(user_id, metric_name), 0))
+        for metric_name, _label in USER_FUN_METRIC_FIELDS
+    }
+
+
+def list_top_users_for_metric(metric_name: str, limit: int = 5) -> list[tuple[int, int]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT metric_key, metric_value FROM metrics WHERE metric_key LIKE ?",
+            (f"{USER_METRIC_PREFIX}%.{metric_name}",),
+        ).fetchall()
+
+    ranked: list[tuple[int, int]] = []
+    for row in rows:
+        metric_key = str(row["metric_key"])
+        user_id = parse_user_id_from_metric_key(metric_key, metric_name)
+        if user_id is None:
+            continue
+
+        try:
+            metric_value = int(row["metric_value"])
+        except (TypeError, ValueError):
+            continue
+
+        if metric_value > 0:
+            ranked.append((user_id, metric_value))
+
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return ranked[: max(1, int(limit))]
 
 
 def metrics_snapshot() -> dict:
@@ -682,6 +789,35 @@ def record_answer_metric() -> None:
     metrics_increment("answers_total")
 
 
+def record_user_message_metric(user: discord.Member | object) -> None:
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        return
+
+    try:
+        increment_user_metric(int(user_id), "messages_sent")
+    except (TypeError, ValueError):
+        return
+
+
+def record_user_reaction_sent_metric(user_id: int) -> None:
+    increment_user_metric(user_id, "reactions_sent")
+
+
+def record_user_reaction_received_metric(user_id: int) -> None:
+    increment_user_metric(user_id, "reactions_received")
+
+
+def record_user_anonymous_answer_metric(user_id: int) -> None:
+    increment_user_metric(user_id, "anonymous_answers_sent")
+
+
+def record_user_battle_metrics(player1_id: int, player2_id: int, winner_id: int) -> None:
+    increment_user_metric(player1_id, "battles_played")
+    increment_user_metric(player2_id, "battles_played")
+    increment_user_metric(winner_id, "battles_won")
+
+
 def get_questions() -> dict:
     questions = load_json(
         QUESTIONS_FILE,
@@ -808,6 +944,7 @@ def mark_user_answered(question_message_id: int, user_id: int, answer_message_id
             """,
             (str(user_id), now_iso),
         )
+    record_user_anonymous_answer_metric(user_id)
 
 
 def find_answer_record(answer_message_id: str) -> tuple[str, str] | None:
@@ -860,8 +997,17 @@ def get_last_answer_time_for_user(user_id: int) -> datetime | None:
     return parse_iso(str(row["last_answer_at"]))
 
 
+def is_admin(member: discord.Member) -> bool:
+    if getattr(getattr(member, "guild_permissions", None), "administrator", False):
+        return True
+
+    guild = getattr(member, "guild", None)
+    owner_id = getattr(guild, "owner_id", None)
+    return owner_id is not None and getattr(member, "id", None) == owner_id
+
+
 def is_staff(member: discord.Member) -> bool:
-    if member.guild_permissions.administrator:
+    if is_admin(member):
         return True
     return any(role.id in STAFF_ROLE_IDS for role in member.roles)
 
@@ -1784,6 +1930,55 @@ def build_analytics_embed() -> discord.Embed:
     return embed
 
 
+def build_user_fun_metrics_embed(member: discord.Member, stats: dict[str, int]) -> discord.Embed:
+    embed = discord.Embed(
+        title=f"{member.display_name}'s Court Activity",
+        description="Just-for-fun community activity tracking.",
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+
+    for metric_name, label in USER_FUN_METRIC_FIELDS:
+        embed.add_field(name=label, value=f"`{int(stats.get(metric_name, 0))}`", inline=True)
+
+    embed.set_footer(text="Stats are tracked from this bot runtime onward.")
+    return embed
+
+
+def get_fate_reading(roll: int) -> tuple[str, str]:
+    normalized_roll = max(1, min(100, int(roll)))
+
+    if normalized_roll <= 10:
+        return "Dire Omen", "Storm clouds gather. Move carefully and trust fewer people."
+    if normalized_roll <= 30:
+        return "Trial Ahead", "A test is coming. Discipline beats luck today."
+    if normalized_roll <= 70:
+        return "Balanced Winds", "No doom, no blessing. Your choices decide the outcome."
+    if normalized_roll <= 90:
+        return "Favorable Tide", "Momentum is with you. Strike while your name carries weight."
+
+    return "Imperial Blessing", "The throne smiles. Ask for more than you think you deserve."
+
+
+def get_member_display_name(member: object) -> str:
+    display_name = getattr(member, "display_name", None)
+    if isinstance(display_name, str) and display_name:
+        return display_name
+
+    name = getattr(member, "name", None)
+    if isinstance(name, str) and name:
+        return name
+
+    return "Courtier"
+
+
+def get_member_mention(member: object) -> str:
+    mention = getattr(member, "mention", None)
+    if isinstance(mention, str) and mention:
+        return mention
+    return get_member_display_name(member)
+
+
 def question_fingerprint(question: str) -> str:
     lowered = question.casefold()
     return " ".join(re.findall(r"[a-z0-9']+", lowered))
@@ -2159,6 +2354,22 @@ async def require_staff(interaction: discord.Interaction) -> bool:
 
     if not is_staff(interaction.user):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return False
+
+    return True
+
+
+async def require_admin(interaction: discord.Interaction) -> bool:
+    if interaction.guild is None:
+        await interaction.response.send_message(MSG_USE_IN_SERVER, ephemeral=True)
+        return False
+
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(MSG_VERIFY_ROLES, ephemeral=True)
+        return False
+
+    if not is_admin(interaction.user):
+        await interaction.response.send_message(MSG_ADMIN_ONLY, ephemeral=True)
         return False
 
     return True
@@ -2645,6 +2856,9 @@ async def send_mute_failed_embed(message: discord.Message, target: discord.Membe
 
 
 async def handle_reply_mute_trigger(message: discord.Message, reason_text: str) -> None:
+    if not is_admin(message.author):
+        return
+
     target = await get_replied_member(message)
     if target is None:
         return
@@ -2828,7 +3042,7 @@ async def admin_say(
     channel: discord.TextChannel,
     mention_everyone: bool = False,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     await interaction.response.send_modal(AdminSayModal(channel, mention_everyone=mention_everyone))
@@ -2852,7 +3066,7 @@ async def admin_rolepanel(
     button_label: str | None = None,
     mention_everyone: bool = False,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     admin_context = await get_admin_context(interaction)
@@ -2951,7 +3165,7 @@ async def admin_rolepanelmulti(
     description: str | None = None,
     mention_everyone: bool = False,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     admin_context = await get_admin_context(interaction)
@@ -3029,7 +3243,7 @@ async def admin_purge(
     interaction: discord.Interaction,
     amount: app_commands.Range[int, 1, 100],
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     channel = get_manage_target_channel(interaction)
@@ -3074,7 +3288,7 @@ async def admin_purgeuser(
     member: discord.Member,
     amount: app_commands.Range[int, 1, 200] = 100,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     channel = get_manage_target_channel(interaction)
@@ -3122,7 +3336,7 @@ async def admin_lock(
     interaction: discord.Interaction,
     reason: str | None = None,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     channel = get_manage_target_channel(interaction)
@@ -3158,7 +3372,7 @@ async def admin_unlock(
     interaction: discord.Interaction,
     reason: str | None = None,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     channel = get_manage_target_channel(interaction)
@@ -3194,7 +3408,7 @@ async def admin_slowmode(
     interaction: discord.Interaction,
     seconds: app_commands.Range[int, 0, 21600],
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     channel = get_manage_target_channel(interaction)
@@ -3231,7 +3445,7 @@ async def admin_timeout(
     minutes: app_commands.Range[int, 1, MAX_TIMEOUT_MINUTES],
     reason: str | None = None,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     context = await get_timeout_context(interaction)
@@ -3275,7 +3489,7 @@ async def admin_untimeout(
     member: discord.Member,
     reason: str | None = None,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     context = await get_timeout_context(interaction)
@@ -3328,7 +3542,7 @@ async def admin_mutemany(
     dry_run: bool = False,
     reason: str | None = None,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     context = await get_timeout_context(interaction)
@@ -3404,7 +3618,7 @@ async def admin_unmutemany(
     dry_run: bool = False,
     reason: str | None = None,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     context = await get_timeout_context(interaction)
@@ -3480,7 +3694,7 @@ async def admin_muteall(
     dry_run: bool = False,
     reason: str | None = None,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     if not is_confirmed(confirm):
@@ -3550,7 +3764,7 @@ async def admin_unmuteall(
     dry_run: bool = False,
     reason: str | None = None,
 ) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     if not is_confirmed(confirm):
@@ -3668,7 +3882,7 @@ async def court_dryrun(interaction: discord.Interaction, enabled: bool) -> None:
 
 @admin_group.command(name="resetroyaltimer", description="Reset the royal announcement timer (testing)")
 async def admin_resetroyaltimer(interaction: discord.Interaction) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     reset_royal_presence_timer()
@@ -3772,7 +3986,7 @@ async def admin_afk(
 
 @admin_group.command(name="afkstatus", description="Show current Emperor and Empress AFK status")
 async def admin_afkstatus(interaction: discord.Interaction) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     record_command_metric("invictus.afkstatus")
@@ -3836,7 +4050,7 @@ async def court_importstate(
 
 @admin_group.command(name="help", description="Show all available commands")
 async def admin_help(interaction: discord.Interaction) -> None:
-    if not await require_staff(interaction):
+    if not await require_admin(interaction):
         return
 
     help_text = """
@@ -3894,6 +4108,11 @@ async def admin_help(interaction: discord.Interaction) -> None:
 
 **Fun Commands**
 `/fun battle <opponent>` — Battle another member (mentions both users)
+`/fun stats [member]` — Show fun activity stats for yourself or a member
+`/fun leaderboard <metric> [limit]` — Show top members for a fun activity metric
+`/fun verdict <question>` — Ask the throne for a yes/no-style decree
+`/fun title [member]` — Grant a random imperial title
+`/fun fate [member]` — Roll fate and receive a court reading
 
 **Greetings Commands**
 `/greetings rio` — Send Rio-chan a friendly ping with an embed
@@ -3907,9 +4126,10 @@ async def admin_help(interaction: discord.Interaction) -> None:
 `chaos` — Funny, dumb, cursed, unhinged prompts
 
 **Notes**
-• Staff role required for `/court` and `/invictus` commands
+• Staff role required for `/court` commands
+• Administrator permission required for `/invictus` moderation commands
 • Only Emperor/Empress can run `/invictus afk`
-• `/fun battle` is available to everyone
+• `/fun` commands are available to everyone
 • Anonymous answers are one per person per inquiry
 • Inquiries auto-close after 24 hours
 • Confirm commands require exact "CONFIRM" text
@@ -4651,6 +4871,8 @@ async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -
         winner = random.choice([player1, player2])
         loser = player2 if winner == player1 else player1
 
+    record_user_battle_metrics(player1.id, player2.id, winner.id)
+
     # Generate fake stats for both players, with max stats for the undefeated user.
     p1_stats = {
         stat_name: (100 if player1.id == UNDEFEATED_USER_ID else random.randint(1, 100))
@@ -4686,6 +4908,113 @@ async def fun_boss(interaction: discord.Interaction, opponent: discord.Member) -
     embed.add_field(name="Opponent", value=f"{player2.mention}", inline=True)
     embed.add_field(name="Champion", value=f"{winner.mention}", inline=False)
     await interaction.response.send_message(content=f"{player1.mention} {player2.mention}", embed=embed)
+
+
+@fun_group.command(name="stats", description="Show fun activity stats for yourself or another member")
+@app_commands.describe(member="Optional member to inspect")
+async def fun_stats(interaction: discord.Interaction, member: discord.Member | None = None) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message(MSG_USE_IN_SERVER, ephemeral=True)
+        return
+
+    target_member = member
+    if target_member is None:
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(MSG_VERIFY_ROLES, ephemeral=True)
+            return
+        target_member = interaction.user
+
+    stats = get_user_fun_metrics(target_member.id)
+    await interaction.response.send_message(embed=build_user_fun_metrics_embed(target_member, stats))
+
+
+@fun_group.command(name="leaderboard", description="Show the top members for a fun activity metric")
+@app_commands.describe(metric="Metric to rank", limit="How many entries to show (1-10)")
+@app_commands.choices(metric=USER_FUN_LEADERBOARD_CHOICES)
+async def fun_leaderboard(
+    interaction: discord.Interaction,
+    metric: app_commands.Choice[str],
+    limit: app_commands.Range[int, 1, 10] = 5,
+) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message(MSG_USE_IN_SERVER, ephemeral=True)
+        return
+
+    top_rows = list_top_users_for_metric(metric.value, limit=int(limit))
+    if not top_rows:
+        await interaction.response.send_message("No data yet for that leaderboard. Go make some chaos first.")
+        return
+
+    lines: list[str] = []
+    for rank, (user_id, value) in enumerate(top_rows, start=1):
+        member = interaction.guild.get_member(user_id)
+        display = member.mention if member is not None else f"<@{user_id}>"
+        lines.append(f"{rank}. {display} - `{value}`")
+
+    metric_label = USER_FUN_METRIC_LABELS.get(metric.value, metric.value.replace("_", " ").title())
+    embed = discord.Embed(
+        title=f"Fun Leaderboard: {metric_label}",
+        description="\n".join(lines),
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@fun_group.command(name="verdict", description="Ask the throne for a yes/no-style decree")
+@app_commands.describe(question="Your petition to the Imperial Court")
+async def fun_verdict(interaction: discord.Interaction, question: str) -> None:
+    clean_question = normalize_question_text(question)
+    if not clean_question:
+        await interaction.response.send_message(MSG_QUESTION_EMPTY, ephemeral=True)
+        return
+
+    decree = random.choice(IMPERIAL_VERDICTS)
+    embed = discord.Embed(
+        title="Imperial Verdict",
+        description=f"**Petition:** {clean_question}\n**Decree:** {decree}",
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@fun_group.command(name="title", description="Grant a random imperial title")
+@app_commands.describe(member="Optional member to honor")
+async def fun_title(interaction: discord.Interaction, member: discord.Member | None = None) -> None:
+    target = member or interaction.user
+    title = random.choice(IMPERIAL_TITLES)
+    omen = random.choice(IMPERIAL_OMENS)
+
+    embed = discord.Embed(
+        title="Imperial Appointment",
+        description=(
+            f"{get_member_mention(target)} has been proclaimed **{title}**.\n"
+            f"May their name be carved into the court ledgers."
+        ),
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    embed.add_field(name="Witnessed By", value=get_member_display_name(interaction.user), inline=True)
+    embed.add_field(name="Omen", value=omen, inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@fun_group.command(name="fate", description="Roll fate and receive a court reading")
+@app_commands.describe(member="Optional member to read")
+async def fun_fate(interaction: discord.Interaction, member: discord.Member | None = None) -> None:
+    target = member or interaction.user
+    roll = random.randint(1, 100)
+    fate_title, fate_reading = get_fate_reading(roll)
+
+    embed = discord.Embed(
+        title="Court Fate Reading",
+        description=f"{get_member_mention(target)} rolled `{roll}` on the imperial die.",
+        color=ROLE_COLOR,
+        timestamp=get_now(),
+    )
+    embed.add_field(name=fate_title, value=fate_reading, inline=False)
+    await interaction.response.send_message(embed=embed)
 
 
 async def send_personal_greeting(
@@ -4994,6 +5323,8 @@ async def on_message(message: discord.Message) -> None:
     if message.guild is None or not isinstance(message.author, discord.Member):
         return
 
+    record_user_message_metric(message.author)
+
     clear_member_royal_afk(message.author)
 
     in_royal_alert_channel = is_royal_alert_channel(getattr(message.channel, "id", None))
@@ -5015,9 +5346,47 @@ async def on_message(message: discord.Message) -> None:
     if reason_text is None:
         return
 
-    if not is_staff(message.author):
+    if not is_admin(message.author):
         return
     await handle_reply_mute_trigger(message, reason_text)
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent) -> None:
+    if payload.guild_id is None:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    member = payload.member
+    if member is None:
+        member = guild.get_member(payload.user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(payload.user_id)
+            except Exception:
+                return
+
+    if member.bot:
+        return
+
+    record_user_reaction_sent_metric(member.id)
+
+    channel = await fetch_channel_by_id(payload.channel_id)
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        return
+
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except Exception:
+        return
+
+    if message.author.bot:
+        return
+
+    record_user_reaction_received_metric(message.author.id)
 
 
 if __name__ == "__main__":

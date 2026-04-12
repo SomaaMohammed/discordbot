@@ -1,45 +1,107 @@
-# Imperial Court Bot
+﻿# Imperial Court Bot
 
-A Discord bot for running structured anonymous discussion prompts inside a server.
+Imperial Court Bot is a Discord bot for running structured, anonymous community prompts with moderation controls, operational reporting, and server automation.
 
-It posts rotating court inquiry questions, creates a thread for discussion, collects anonymous responses through a modal, and gives staff tools for scheduling, moderation, analytics, and thread lifecycle management.
+It is designed for a "court" style workflow:
 
-## Features
+1. Post a prompt as an Imperial Court inquiry.
+2. Open or reuse a dedicated thread for responses.
+3. Collect anonymous answers through a modal.
+4. Track participation, moderation actions, and usage metrics.
+5. Automatically close stale threads and publish digest/reporting data.
 
-- Posts rotating question prompts from JSON question banks
-- Supports **manual**, **auto**, and **off** posting modes
-- Creates a thread for each court inquiry
-- Lets users answer through an **Answer Anonymously** button
-- Tracks one anonymous answer per user per inquiry
-- Can enforce anonymous-answer eligibility rules such as:
+## What This Bot Does
+
+- Posts rotating prompts from categorized question banks.
+- Supports posting modes: `off`, `manual`, and `auto`.
+- Creates one thread per inquiry for focused discussion.
+- Provides anonymous answer collection with anti-abuse controls.
+- Stores records in SQLite for durability and server restarts.
+- Exposes staff/admin moderation and diagnostics commands.
+- Runs background tasks for auto-posting, auto-closing, weekly digest, and data retention.
+- Includes public "fun" commands and user activity metrics.
+
+## Feature Breakdown
+
+### Prompt and Thread System
+
+- Categorized questions from `questions.json`.
+- Rotation avoids immediate repeats using recent history + used pool tracking.
+- Manual post and custom post options.
+- Auto-generated embed with persistent answer button.
+- One inquiry thread per post with close/reopen/extend controls.
+
+### Anonymous Answers
+
+- Modal-based submission through "Answer Anonymously".
+- One answer per user per inquiry.
+- Optional eligibility checks:
   - minimum account age
-  - minimum server membership age
+  - minimum server member age
   - required role
-  - cooldowns
+  - submission cooldown
   - optional link blocking
-- Auto-closes expired inquiry threads
-- Generates staff-facing status, health, analytics, and weekly digest views
-- Includes moderation and admin slash commands
-- Stores bot state and activity in SQLite
-- Includes CI, backup, and VM deployment scripts
+- Answer records stored in SQLite (`answers`, `anon_cooldowns`).
 
-## How It Works
+### Moderation and Administration
 
-1. The bot posts a court inquiry prompt in the configured channel.
-2. It creates a thread for discussion.
-3. Members click **Answer Anonymously** and submit a response through a modal.
-4. The bot posts the response anonymously in the thread.
-5. Responses are stored for analytics, cooldowns, and retention handling.
-6. The inquiry thread is automatically closed after the configured time window.
+- Bulk timeout and untimeout tools with optional dry-run.
+- Channel lock/unlock and slowmode controls.
+- Purge and targeted purge tools.
+- Announcement commands.
+- Role panel tools for self-assign role messages.
 
-## Requirements
+### Health, Analytics, and Operations
+
+- `/court status`, `/court health`, `/court analytics` for diagnostics.
+- Weekly digest summary task.
+- Retention cleaner task for old answer data.
+- Structured metrics storage in SQLite (`metrics`).
+
+### Fun and Community Layer
+
+- Battle command plus imperial-themed fun commands.
+- Public user metrics (`messages_sent`, reactions, battles, answers) exposed through `/fun stats` and `/fun leaderboard`.
+
+## Tech Stack
 
 - Python 3.11+
-- A Discord bot token
-- A Discord server where the bot has the required permissions
-- Required gateway intents enabled in the Discord Developer Portal if your setup depends on them
+- discord.py
+- SQLite
+- python-dotenv
+- Optional tzdata for timezone support
 
-## Quick Start
+## Repository Layout
+
+```text
+.
+├── bot.py
+├── courtbot/
+│   ├── config.py
+│   └── storage_sql.py
+├── tests/
+│   └── test_bot_utils.py
+├── questions.json
+├── answers.json
+├── state.json
+├── requirements.txt
+├── requirements-dev.txt
+├── pyproject.toml
+├── post_pull_server.sh
+├── deploy_vm.sh
+└── backup_db.sh
+```
+
+## Prerequisites
+
+- Python 3.11 or newer
+- A Discord application and bot token
+- Bot installed in your server with proper intents/permissions
+- For server rollout script: Linux host with `bash`, `sudo`, `systemd`, and `sqlite3`
+
+## Install and Run Locally
+
+### Linux/macOS
 
 ```bash
 git clone https://github.com/SomaaMohammed/discordbot.git
@@ -48,259 +110,293 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python bot.py
-````
-
-## Configuration
-
-Create a `.env` file in the project root and set at least:
-
-```env
-DISCORD_TOKEN=your_bot_token
-TEST_GUILD_ID=your_guild_id
-COURT_CHANNEL_ID=your_channel_id
 ```
 
-Common optional settings may include:
+### Windows (PowerShell)
 
-```env
-LOG_CHANNEL_ID=0
-TIMEZONE=Asia/Qatar
-DB_FILE=court.db
-
-STAFF_ROLE_IDS=
-EMPEROR_ROLE_ID=0
-EMPRESS_ROLE_ID=0
-SILENT_LOCK_EXCLUDE_ROLES=
-ROYAL_ALERT_CHANNEL_ID=0
-UNDEFEATED_USER_ID=0
-
-ANON_MIN_ACCOUNT_AGE_MINUTES=0
-ANON_MIN_MEMBER_AGE_MINUTES=0
-ANON_REQUIRED_ROLE_ID=0
-ANON_COOLDOWN_SECONDS=0
-ANON_ALLOW_LINKS=false
-
-MUTEALL_TARGET_CAP=0
-WEEKLY_DIGEST_CHANNEL_ID=0
-WEEKLY_DIGEST_WEEKDAY=0
-WEEKLY_DIGEST_HOUR=19
-ANSWER_RETENTION_DAYS=90
-```
-
-Adjust values based on your server setup.
-
-## Command Groups
-
-### `/court`
-
-Staff controls for scheduling, posting, lifecycle management, and reporting.
-
-Examples:
-
-* `/court status`
-* `/court health`
-* `/court analytics`
-* `/court mode`
-* `/court channel`
-* `/court logchannel`
-* `/court schedule`
-* `/court post`
-* `/court custom`
-* `/court close`
-* `/court reopen`
-* `/court extend`
-* `/court listopen`
-* `/court exportstate`
-* `/court importstate`
-* `/court dryrun`
-* `/court listcategories`
-* `/court addquestion`
-* `/court editquestion`
-* `/court deletequestion`
-* `/court resethistory`
-* `/court removeanswer`
-
-### `/questions`
-
-Question-bank utilities.
-
-* `/questions count`
-* `/questions unused`
-* `/questions audit`
-
-### `/invictus`
-
-Admin and moderation tools.
-
-* `/invictus say`
-* `/invictus purge`
-* `/invictus purgeuser`
-* `/invictus lock`
-* `/invictus unlock`
-* `/invictus slowmode`
-* `/invictus timeout`
-* `/invictus untimeout`
-* `/invictus mutemany`
-* `/invictus unmutemany`
-* `/invictus muteall`
-* `/invictus unmuteall`
-* `/invictus afk`
-* `/invictus afkstatus`
-* `/invictus resetroyaltimer`
-* `/invictus help`
-
-### `/fun`
-
-Public fun commands.
-
-* `/fun battle`
-
-## Question System
-
-Questions live in `questions.json` and are grouped into categories such as:
-
-* `general`
-* `gaming`
-* `music`
-* `hot-take`
-* `chaos`
-
-The bot avoids repeating recent questions and keeps track of used prompts. When the pool is exhausted, it resets the used-question list and starts cycling again.
-
-## Anonymous Answers
-
-Each court post includes a persistent **Answer Anonymously** button.
-
-When a member submits an answer, the bot:
-
-* opens or reuses the inquiry thread
-* posts the answer as an embed inside the thread
-* marks it anonymous
-* prevents duplicate submissions for the same inquiry
-* records the answer in SQLite for analytics and retention handling
-
-Anonymous answer rules are configurable through environment variables.
-
-## Privacy Note
-
-Anonymous answers are anonymous to regular server members in the inquiry thread.
-
-Depending on your logging, database access, and admin tooling, server staff or bot operators may still be able to trace submissions at the storage level. Do not describe the system as fully untraceable unless that is actually true in your deployment.
-
-## Scheduling and Automation
-
-Background tasks handle recurring work:
-
-* **Auto poster** checks on a schedule and posts the next inquiry when the bot is in `auto` mode
-* **Thread closer** checks open inquiries and locks or archives them after the configured window
-* **Weekly digest** posts a summary on the configured weekday and hour
-* **Retention cleaner** removes old answer records based on the configured retention period
-
-## Storage
-
-The bot uses **SQLite** for persistence.
-
-Tables include:
-
-* `kv` — JSON-backed state blobs and miscellaneous storage
-* `posts` — inquiry post records
-* `answers` — anonymous answer records
-* `metrics` — command and activity metrics
-* `anon_cooldowns` — cooldown tracking for anonymous answers
-
-The repo also uses JSON files for content and state snapshots:
-
-* `questions.json`
-* `answers.json`
-* `state.json`
-
-## Required Bot Permissions
-
-Make sure the bot has the permissions it needs in your server, such as:
-
-* View Channels
-* Send Messages
-* Read Message History
-* Create Public Threads
-* Send Messages in Threads
-* Manage Threads
-* Manage Messages
-* Moderate Members
-
-You may also need the appropriate application command scope when inviting the bot so slash commands register correctly.
-
-## Project Structure
-
-```text
-.
-├── .github/workflows/ci.yml
-├── courtbot/
-│   ├── config.py
-│   └── storage_sql.py
-├── tests/
-│   └── test_bot_utils.py
-├── answers.json
-├── backup_db.sh
-├── bot.py
-├── deploy_vm.sh
-├── post_pull_server.sh
-├── pyproject.toml
-├── pytest.ini
-├── questions.json
-├── requirements.txt
-└── state.json
-```
-
-## Running the Bot
-
-```bash
+```powershell
+git clone https://github.com/SomaaMohammed/discordbot.git
+cd discordbot
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 python bot.py
 ```
 
-## Development
+## Dependency Files
 
-Run checks locally with:
+- `requirements.txt`: runtime dependencies used in production.
+- `requirements-dev.txt`: local/CI tooling (`pytest`, `ruff`, `mypy`) plus runtime deps.
+
+## Environment Configuration
+
+Create `.env` in the project root.
+
+### Required Keys
+
+| Key | Purpose |
+|---|---|
+| `DISCORD_TOKEN` | Bot token from Discord Developer Portal |
+| `TEST_GUILD_ID` | Guild ID for command sync and task scope |
+| `COURT_CHANNEL_ID` | Default inquiry post channel |
+
+### Optional Core Keys
+
+| Key | Default | Purpose |
+|---|---:|---|
+| `LOG_CHANNEL_ID` | `0` | Staff log channel (`0` disables) |
+| `TIMEZONE` | `Asia/Qatar` | Timezone used for scheduling/reporting |
+| `DB_FILE` | `court.db` | SQLite database path |
+
+### Role and Royal Keys
+
+| Key | Default | Purpose |
+|---|---:|---|
+| `STAFF_ROLE_IDS` | empty | Comma-separated role IDs allowed for `/court` commands |
+| `EMPEROR_ROLE_ID` | `0` | Emperor role ID |
+| `EMPRESS_ROLE_ID` | `0` | Empress role ID |
+| `SILENT_LOCK_EXCLUDE_ROLES` | empty | Roles excluded from silent lock behavior |
+| `ROYAL_ALERT_CHANNEL_ID` | `0` | Channel that triggers royal response behavior |
+| `UNDEFEATED_USER_ID` | `0` | User ID that always wins `/fun battle` |
+
+### Anonymous Answer Guardrails
+
+| Key | Default | Purpose |
+|---|---:|---|
+| `ANON_MIN_ACCOUNT_AGE_MINUTES` | `0` | Minimum account age to submit anonymous answer |
+| `ANON_MIN_MEMBER_AGE_MINUTES` | `0` | Minimum guild membership age |
+| `ANON_REQUIRED_ROLE_ID` | `0` | Required role for anonymous answer eligibility |
+| `ANON_COOLDOWN_SECONDS` | `0` | Minimum time between anonymous submissions |
+| `ANON_ALLOW_LINKS` | `false` | Whether links are allowed in anonymous answers |
+
+### Operations and Retention
+
+| Key | Default | Purpose |
+|---|---:|---|
+| `MUTEALL_TARGET_CAP` | `0` | Safety cap for mass timeout commands (`0` = unlimited) |
+| `WEEKLY_DIGEST_CHANNEL_ID` | `0` | Override digest channel (`0` falls back to log channel) |
+| `WEEKLY_DIGEST_WEEKDAY` | `0` | Digest weekday (`0` = Monday in Python weekday scale) |
+| `WEEKLY_DIGEST_HOUR` | `19` | Digest posting hour |
+| `ANSWER_RETENTION_DAYS` | `90` | Days before old answer records are purged |
+
+## Access and Permission Model
+
+- `/court` and `/questions`: staff (staff role IDs) or admins.
+- `/invictus` moderation/admin commands: Discord administrators only.
+- `/invictus afk`: Emperor/Empress roles only.
+- `/fun` and `/greetings`: public commands.
+
+## Command Reference
+
+### `/court`
+
+Scheduling, posting, state management, and diagnostics.
+
+- `status`
+- `health`
+- `analytics`
+- `dryrun`
+- `exportstate`
+- `importstate`
+- `mode`
+- `channel`
+- `logchannel`
+- `schedule`
+- `listcategories`
+- `addquestion`
+- `deletequestion`
+- `editquestion`
+- `resethistory`
+- `post`
+- `custom`
+- `close`
+- `listopen`
+- `extend`
+- `reopen`
+- `removeanswer`
+
+### `/questions`
+
+Question bank utilities.
+
+- `count`
+- `unused`
+- `audit`
+
+### `/invictus`
+
+Admin moderation and utility controls.
+
+- `say`
+- `rolepanel`
+- `rolepanelmulti`
+- `purge`
+- `purgeuser`
+- `lock`
+- `unlock`
+- `slowmode`
+- `timeout`
+- `untimeout`
+- `mutemany`
+- `unmutemany`
+- `muteall`
+- `unmuteall`
+- `afk`
+- `afkstatus`
+- `resetroyaltimer`
+- `help`
+
+### `/fun`
+
+Public social commands.
+
+- `battle`
+- `stats`
+- `leaderboard`
+- `verdict`
+- `title`
+- `fate`
+
+### `/greetings`
+
+- `rio`
+- `taylor`
+
+## Data and Storage
+
+### SQLite Tables
+
+| Table | Purpose |
+|---|---|
+| `kv` | JSON blobs and core state persistence |
+| `posts` | Inquiry post records and lifecycle fields |
+| `answers` | Anonymous answer records |
+| `metrics` | Command usage and activity counters |
+| `anon_cooldowns` | Per-user anonymous answer cooldown timestamps |
+
+### SQL Indexes
+
+The storage module defines indexes used to speed up high-frequency queries:
+
+- `idx_posts_closed_posted_at`
+- `idx_answers_question_created`
+- `idx_answers_message_id`
+
+### JSON Files
+
+- `questions.json`: question source bank.
+- `answers.json`: legacy data compatibility pathway.
+- `state.json`: scheduler/history flags (with structured data synthesized from SQLite).
+
+## Scheduled Background Tasks
+
+- `auto_poster` (every minute): posts automatically when mode/schedule conditions match.
+- `thread_closer` (every 10 minutes): closes expired open inquiry threads.
+- `weekly_digest` (every 30 minutes): sends weekly summary once per configured week.
+- `retention_cleaner` (every 24 hours): purges answers older than retention threshold.
+
+## Required Discord Permissions
+
+At minimum, ensure the bot can:
+
+- View Channels
+- Send Messages
+- Read Message History
+- Embed Links
+- Create Public Threads
+- Send Messages in Threads
+- Manage Threads
+- Manage Messages
+- Moderate Members
+- Manage Roles (for role panel features)
+
+Also ensure the invite includes the `applications.commands` scope so slash commands register.
+
+## Development Workflow
+
+Install dev tooling and run checks:
 
 ```bash
+pip install -r requirements-dev.txt
 ruff check .
 mypy bot.py courtbot
 pytest -q
 ```
 
-CI is set up to run validation and quality checks automatically.
+Optional quick compile smoke test:
+
+```bash
+python -m py_compile bot.py
+```
 
 ## Deployment
 
-This repo includes helper scripts for server workflows:
+This repository includes deployment helpers:
 
-* `deploy_vm.sh` — deploy updates to a VM and restart the bot service
-* `post_pull_server.sh` — run post-pull checks and rollout steps
-* `backup_db.sh` — create timestamped SQLite backups
+- `deploy_vm.sh`
+- `post_pull_server.sh`
+- `backup_db.sh`
 
-Review these scripts before using them in production so they match your environment.
+### Recommended Server Rollout (`post_pull_server.sh`)
+
+```bash
+cd /path/to/imperial-court-bot
+git pull --ff-only
+chmod +x post_pull_server.sh
+RUN_TESTS=1 RUN_LINT=1 ./post_pull_server.sh
+```
+
+What the script does:
+
+- Validates required commands and files.
+- Ensures required `.env` keys exist.
+- Applies default values for optional env keys.
+- Backs up the existing SQLite DB (if present).
+- Installs runtime dependencies.
+- Installs dev dependencies when lint/tests are enabled.
+- Runs compile check and storage warm-up.
+- Optionally runs lint/type/test checks.
+- Restarts the systemd service and validates active status.
+- Verifies expected SQLite tables exist after rollout.
+- Prints service status and recent logs.
+
+## Observability and Safety Notes
+
+- Anonymous answers are anonymous to regular users in-thread, but operators with DB/log access can still correlate metadata.
+- Moderation commands are intentionally guarded by role/admin checks in code.
+- Metrics include both operational command counters and user-facing fun activity counters.
 
 ## Troubleshooting
 
-### Slash commands are not showing up
+### Slash commands do not appear
 
-Check the bot invite scopes, confirm the guild ID is correct, and make sure command sync is happening in the expected server.
+- Verify bot invite scopes include `applications.commands`.
+- Confirm `TEST_GUILD_ID` is correct.
+- Confirm bot started and synced commands successfully.
 
-### Bot starts but does nothing
+### Bot starts but does not post
 
-Verify `DISCORD_TOKEN`, channel IDs, role IDs, and required permissions.
+- Verify `DISCORD_TOKEN`, guild/channel IDs, and channel permissions.
+- Check `/court mode` and `/court schedule`.
+- Run `/court health` to inspect task and permission state.
 
-### Anonymous answers are not working
+### Anonymous answers fail
 
-Check cooldown settings, required role settings, account age restrictions, member age restrictions, and whether links are allowed.
+- Check account/member age requirements.
+- Check required role and cooldown settings.
+- Check whether links are blocked by config.
 
-### Threads are not closing automatically
+### Auto-close does not trigger
 
-Check that background tasks are running and that the configured schedule or expiry window is valid.
+- Ensure the thread closer loop is running (`/court health`).
+- Confirm post records exist and are marked open.
 
-### The bot cannot post in the target channel
+### Deployment script fails
 
-Make sure the bot can view the channel, send messages, read history, and create threads.
+- Read `journalctl -u <service> -n 120 --no-pager` output.
+- Confirm service name and app paths in env overrides.
+- Confirm server has `sudo`, `systemd`, and `sqlite3`.
 
 ## License
 
-No license file is currently included in the repository.
+No license file is currently included in this repository.
