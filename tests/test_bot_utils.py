@@ -521,6 +521,52 @@ def test_on_message_records_user_message_metric(monkeypatch) -> None:
     assert tracked == [777]
 
 
+def test_on_message_logs_when_royal_afk_auto_clears(monkeypatch) -> None:
+    class DummyMember:
+        def __init__(self) -> None:
+            self.bot = False
+            self.id = 777
+            self.roles = []
+            self.mention = "@emperor"
+
+    class DummyTextChannel:
+        def __init__(self) -> None:
+            self.send = AsyncMock()
+            self.id = 999
+            self.mention = "#court"
+
+    class DummyGuild:
+        pass
+
+    class DummyMessage:
+        def __init__(self) -> None:
+            self.author = DummyMember()
+            self.guild = DummyGuild()
+            self.channel = DummyTextChannel()
+            self.content = "hello court"
+
+    send_log_mock = AsyncMock()
+
+    monkeypatch.setattr(bot.discord, "Member", DummyMember)
+    monkeypatch.setattr(bot, "record_user_message_metric", lambda _member: None)
+    monkeypatch.setattr(bot, "clear_member_royal_afk", lambda _member: ["Emperor"])
+    monkeypatch.setattr(bot, "send_log", send_log_mock)
+    monkeypatch.setattr(bot, "handle_royal_presence_announcement", AsyncMock())
+    monkeypatch.setattr(bot, "maybe_send_royal_mention_response", AsyncMock(return_value=False))
+    monkeypatch.setattr(bot, "parse_reply_mute_message", lambda _content: None)
+
+    message = DummyMessage()
+    asyncio.run(bot.on_message(message))
+
+    send_log_mock.assert_awaited_once()
+    sent_guild, sent_title, sent_description = send_log_mock.await_args.args
+    assert sent_guild is message.guild
+    assert sent_title == "Royal AFK Auto-Cleared"
+    assert "**By:** @emperor" in sent_description
+    assert "**Titles:** `Emperor`" in sent_description
+    assert "**Trigger:** Message activity in #court" in sent_description
+
+
 def test_on_message_reply_mute_trigger_ignores_non_admin_users(monkeypatch) -> None:
     class DummyPermissions:
         def __init__(self, administrator: bool) -> None:

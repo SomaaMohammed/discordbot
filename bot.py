@@ -5697,7 +5697,18 @@ async def on_message(message: discord.Message) -> None:
 
     record_user_message_metric(message.author)
 
-    clear_member_royal_afk(message.author)
+    cleared_titles = clear_member_royal_afk(message.author)
+    if cleared_titles:
+        actor_mention = getattr(message.author, "mention", str(message.author))
+        channel_mention = getattr(message.channel, "mention", f"<#{getattr(message.channel, 'id', 0)}>")
+        joined_titles = ", ".join(cleared_titles)
+        await send_log(
+            message.guild,
+            "Royal AFK Auto-Cleared",
+            f"**By:** {actor_mention}\n"
+            f"**Titles:** `{joined_titles}`\n"
+            f"**Trigger:** Message activity in {channel_mention}",
+        )
 
     in_royal_alert_channel = is_royal_alert_channel(getattr(message.channel, "id", None))
 
