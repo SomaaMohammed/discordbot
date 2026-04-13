@@ -3595,7 +3595,7 @@ class AdminSayModal(discord.ui.Modal, title="Send Announcement"):
         style=discord.TextStyle.paragraph,
         placeholder="Paste your announcement here...",
         required=True,
-        max_length=2000,
+        max_length=4000,
     )
 
     def __init__(self, channel: discord.TextChannel, mention_everyone: bool = False):
