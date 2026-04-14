@@ -1037,39 +1037,31 @@ def parse_iso(value: str | None) -> datetime | None:
         return None
 
 
-def get_state() -> dict:
-    state = load_json(
-        STATE_FILE,
-        {
-            "mode": "manual",
-            "hour": 20,
-            "minute": 0,
-            "channel_id": COURT_CHANNEL_ID,
-            "log_channel_id": LOG_CHANNEL_ID_ENV,
-            "last_posted_date": None,
-            "dry_run_auto_post": False,
-            "last_dry_run_date": None,
-            "last_weekly_digest_week": None,
-            "history": [],
-            "used_questions": [],
-            "royal_presence": {},
-            "royal_afk": {},
-        },
-    )
+def default_state_payload() -> dict:
+    return {
+        "mode": "manual",
+        "hour": 20,
+        "minute": 0,
+        "channel_id": COURT_CHANNEL_ID,
+        "log_channel_id": LOG_CHANNEL_ID_ENV,
+        "last_posted_date": None,
+        "dry_run_auto_post": False,
+        "last_dry_run_date": None,
+        "last_weekly_digest_week": None,
+        "history": [],
+        "used_questions": [],
+        "royal_presence": {},
+        "royal_afk": {},
+    }
 
-    state.setdefault("mode", "manual")
-    state.setdefault("hour", 20)
-    state.setdefault("minute", 0)
-    state.setdefault("channel_id", COURT_CHANNEL_ID)
-    state.setdefault("log_channel_id", LOG_CHANNEL_ID_ENV)
-    state.setdefault("last_posted_date", None)
-    state.setdefault("dry_run_auto_post", False)
-    state.setdefault("last_dry_run_date", None)
-    state.setdefault("last_weekly_digest_week", None)
-    state.setdefault("history", [])
-    state.setdefault("used_questions", [])
-    state.setdefault("royal_presence", {})
-    state.setdefault("royal_afk", {})
+
+def get_state() -> dict:
+    default_state = default_state_payload()
+    state = load_json(STATE_FILE, default_state)
+
+    for key, default_value in default_state.items():
+        state.setdefault(key, default_value)
+
     state["posts"] = list_post_records(limit=POST_RECORD_LIMIT)
     state["metrics"] = metrics_snapshot()
     state["royal_presence"] = ensure_royal_presence_shape(state.get("royal_presence", {}))
@@ -1086,20 +1078,22 @@ def get_state() -> dict:
 
 
 def save_state(state: dict) -> None:
+    # Public state-write entrypoint: always serialize writes through one lock.
     with STATE_WRITE_LOCK:
         _save_state_unlocked(state)
 
 
 def _save_state_unlocked(state: dict) -> None:
+    # Internal helper: callers must already hold STATE_WRITE_LOCK.
     state["history"] = state.get("history", [])[-HISTORY_LIMIT:]
 
-    used = []
-    seen = set()
+    deduplicated_used_questions: list[str] = []
+    seen_questions: set[str] = set()
     for question in state.get("used_questions", []):
-        if question not in seen:
-            used.append(question)
-            seen.add(question)
-    state["used_questions"] = used
+        if question not in seen_questions:
+            deduplicated_used_questions.append(question)
+            seen_questions.add(question)
+    state["used_questions"] = deduplicated_used_questions
 
     for post in state.get("posts", [])[-POST_RECORD_LIMIT:]:
         if isinstance(post, dict):
@@ -1117,24 +1111,7 @@ def _save_state_unlocked(state: dict) -> None:
 
 def update_state_atomic(mutator: Callable[[dict], None]) -> dict:
     with STATE_WRITE_LOCK:
-        state = load_json(
-            STATE_FILE,
-            {
-                "mode": "manual",
-                "hour": 20,
-                "minute": 0,
-                "channel_id": COURT_CHANNEL_ID,
-                "log_channel_id": LOG_CHANNEL_ID_ENV,
-                "last_posted_date": None,
-                "dry_run_auto_post": False,
-                "last_dry_run_date": None,
-                "last_weekly_digest_week": None,
-                "history": [],
-                "used_questions": [],
-                "royal_presence": {},
-                "royal_afk": {},
-            },
-        )
+        state = load_json(STATE_FILE, default_state_payload())
         mutator(state)
         _save_state_unlocked(state)
         state["posts"] = list_post_records(limit=POST_RECORD_LIMIT)
@@ -1533,26 +1510,31 @@ def get_post_record(message_id: int | str) -> dict | None:
     return parse_post_row(row)
 
 
-def list_post_records(include_closed: bool = True, limit: int | None = None) -> list[dict]:
+def build_post_records_query(include_closed: bool, limit: int | None) -> tuple[str, list[object], bool]:
+    query = "SELECT * FROM posts"
+    params: list[object] = []
+
+    if not include_closed:
+        query += " WHERE closed = 0"
+
     if limit is None:
-        query = "SELECT * FROM posts"
-        params: list[object] = []
-        if not include_closed:
-            query += " WHERE closed = 0"
         query += " ORDER BY posted_at ASC"
-    else:
-        query = "SELECT * FROM posts"
-        params = []
-        if not include_closed:
-            query += " WHERE closed = 0"
-        query += " ORDER BY posted_at DESC LIMIT ?"
-        params.append(limit)
+        return query, params, False
+
+    # Fetch newest N rows first, then reverse later for chronological output.
+    query += " ORDER BY posted_at DESC LIMIT ?"
+    params.append(limit)
+    return query, params, True
+
+
+def list_post_records(include_closed: bool = True, limit: int | None = None) -> list[dict]:
+    query, params, should_reverse_results = build_post_records_query(include_closed, limit)
 
     with get_db_connection() as conn:
         rows = conn.execute(query, tuple(params)).fetchall()
 
     parsed = [parse_post_row(row) for row in rows]
-    if limit is not None:
+    if should_reverse_results:
         parsed.reverse()
     return parsed
 
@@ -1668,42 +1650,38 @@ async def fetch_channel_by_id(channel_id: int | str) -> discord.abc.GuildChannel
         return None
 
 
-async def get_target_channel(guild: discord.Guild) -> discord.TextChannel | None:
-    state = get_state()
-    channel = guild.get_channel(state["channel_id"])
-
+async def get_or_fetch_text_channel(guild: discord.Guild, channel_id: int) -> discord.TextChannel | None:
+    channel = guild.get_channel(channel_id)
     if isinstance(channel, discord.TextChannel):
         return channel
 
     try:
-        fetched = await bot.fetch_channel(state["channel_id"])
-        if isinstance(fetched, discord.TextChannel):
-            return fetched
+        fetched = await bot.fetch_channel(channel_id)
     except Exception:
         return None
 
+    if isinstance(fetched, discord.TextChannel):
+        return fetched
     return None
+
+
+async def get_target_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    state = get_state()
+    target_channel_id = coerce_int(state.get("channel_id"), 0, minimum=1)
+    if target_channel_id <= 0:
+        return None
+
+    return await get_or_fetch_text_channel(guild, target_channel_id)
 
 
 async def get_log_channel(guild: discord.Guild) -> discord.TextChannel | None:
     state = get_state()
-    channel_id = state.get("log_channel_id", 0)
+    log_channel_id = coerce_int(state.get("log_channel_id"), 0, minimum=0)
 
-    if not channel_id:
+    if not log_channel_id:
         return None
 
-    channel = guild.get_channel(int(channel_id))
-    if isinstance(channel, discord.TextChannel):
-        return channel
-
-    try:
-        fetched = await bot.fetch_channel(int(channel_id))
-        if isinstance(fetched, discord.TextChannel):
-            return fetched
-    except Exception:
-        return None
-
-    return None
+    return await get_or_fetch_text_channel(guild, log_channel_id)
 
 
 async def send_log(
@@ -2704,39 +2682,55 @@ def remaining_anonymous_cooldown_seconds(user_id: int) -> int:
     return max(ANON_COOLDOWN_SECONDS - elapsed, 0)
 
 
+def minimum_age_requirement_error(
+    now_utc: datetime,
+    subject_time: datetime | None,
+    minimum_minutes: int,
+    message_prefix: str,
+) -> str | None:
+    if minimum_minutes <= 0 or subject_time is None:
+        return None
+
+    elapsed = now_utc - subject_time
+    required_duration = timedelta(minutes=minimum_minutes)
+    if elapsed >= required_duration:
+        return None
+
+    remaining_duration = required_duration - elapsed
+    return f"{message_prefix}Try again in `{format_duration(remaining_duration)}`."
+
+
 def validate_anonymous_answer_submission(member: discord.Member, answer_text: str) -> str | None:
     now_utc = datetime.now(timezone.utc)
+    required_role_id = ANON_REQUIRED_ROLE_ID
 
-    if ANON_REQUIRED_ROLE_ID and not any(role.id == ANON_REQUIRED_ROLE_ID for role in member.roles):
+    if required_role_id and not any(role.id == required_role_id for role in member.roles):
         return "You are not eligible to submit anonymous court answers yet."
 
-    account_created = as_utc(getattr(member, "created_at", None))
-    if ANON_MIN_ACCOUNT_AGE_MINUTES > 0 and account_created is not None:
-        account_age = now_utc - account_created
-        required = timedelta(minutes=ANON_MIN_ACCOUNT_AGE_MINUTES)
-        if account_age < required:
-            remaining = required - account_age
-            return (
-                "Your account is too new to use anonymous answers. "
-                f"Try again in `{format_duration(remaining)}`."
-            )
+    account_age_error = minimum_age_requirement_error(
+        now_utc,
+        as_utc(getattr(member, "created_at", None)),
+        ANON_MIN_ACCOUNT_AGE_MINUTES,
+        "Your account is too new to use anonymous answers. ",
+    )
+    if account_age_error is not None:
+        return account_age_error
 
-    joined_at = as_utc(getattr(member, "joined_at", None))
-    if ANON_MIN_MEMBER_AGE_MINUTES > 0 and joined_at is not None:
-        member_age = now_utc - joined_at
-        required = timedelta(minutes=ANON_MIN_MEMBER_AGE_MINUTES)
-        if member_age < required:
-            remaining = required - member_age
-            return (
-                "You need more time in this server before using anonymous answers. "
-                f"Try again in `{format_duration(remaining)}`."
-            )
+    member_age_error = minimum_age_requirement_error(
+        now_utc,
+        as_utc(getattr(member, "joined_at", None)),
+        ANON_MIN_MEMBER_AGE_MINUTES,
+        "You need more time in this server before using anonymous answers. ",
+    )
+    if member_age_error is not None:
+        return member_age_error
 
-    cooldown_left = remaining_anonymous_cooldown_seconds(member.id)
-    if cooldown_left > 0:
+    cooldown_remaining_seconds = remaining_anonymous_cooldown_seconds(member.id)
+    if cooldown_remaining_seconds > 0:
+        cooldown_remaining_duration = timedelta(seconds=cooldown_remaining_seconds)
         return (
             "You are on cooldown for anonymous answers. "
-            f"Try again in `{format_duration(timedelta(seconds=cooldown_left))}`."
+            f"Try again in `{format_duration(cooldown_remaining_duration)}`."
         )
 
     if not ANON_ALLOW_LINKS and URL_PATTERN.search(answer_text):
