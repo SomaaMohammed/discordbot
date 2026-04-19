@@ -91,6 +91,7 @@ const COURT_COMMANDS = [
 const QUESTIONS_COMMANDS = ["count", "unused", "audit"] as const;
 const INVICTUS_COMMANDS = [
   "say",
+  "dmpanel",
   "rolepanel",
   "rolepanelmulti",
   "purge",
@@ -134,6 +135,11 @@ const ANON_MODAL_PREFIX = "court:anonymous_answer_modal:";
 const ANON_MODAL_INPUT_ID = "answer";
 const ADMIN_SAY_MODAL_PREFIX = "invictus:admin_say_modal:";
 const ADMIN_SAY_MODAL_INPUT_ID = "message";
+const INVICTUS_DM_PANEL_BUTTON_ID = "invictus:dm_panel";
+const INVICTUS_DM_PANEL_MODAL_PREFIX = "invictus:dm_panel_modal:";
+const INVICTUS_DM_PANEL_MODAL_INPUT_ID = "dm_message";
+const INVICTUS_DM_PANEL_FOOTER_PREFIX = "InvictusDmTarget:";
+const INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL = "Message Invictus";
 
 const BOSS_STATS = ["Strength", "Speed", "Wisdom", "Charisma", "Luck", "Endurance"];
 const USER_FUN_LEADERBOARD_METRICS = new Set(USER_FUN_METRIC_FIELDS.map(([metricName]) => metricName));
@@ -314,6 +320,33 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof COURT_COMMANDS)[n
   },
 };
 
+const INVICTUS_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof INVICTUS_COMMANDS)[number], SubcommandOptionBuilder>> = {
+  dmpanel: (subcommand) => {
+    subcommand
+      .addChannelOption((option) =>
+        option
+          .setName("channel")
+          .setDescription("Target text channel (defaults to current channel)")
+          .setRequired(false)
+          .addChannelTypes(ChannelType.GuildText),
+      )
+      .addStringOption((option) => option.setName("title").setDescription("Optional embed title").setRequired(false))
+      .addStringOption((option) => option.setName("description").setDescription("Optional embed description").setRequired(false))
+      .addStringOption((option) =>
+        option
+          .setName("button_label")
+          .setDescription("Optional button label (max 80 characters)")
+          .setRequired(false),
+      )
+      .addBooleanOption((option) =>
+        option
+          .setName("mention_everyone")
+          .setDescription("Whether to ping @everyone above the panel")
+          .setRequired(false),
+      );
+  },
+};
+
 const COURT_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
   status: handleCourtStatus,
   health: handleCourtHealth,
@@ -346,6 +379,7 @@ const QUESTIONS_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
 };
 
 const INVICTUS_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
+  dmpanel: handleInvictusDmPanel,
   rolepanel: handleInvictusRolePanel,
   purge: handleInvictusPurge,
   purgeuser: handleInvictusPurgeUser,
@@ -369,6 +403,7 @@ const INVICTUS_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
 };
 
 const INVICTUS_ADMIN_SUBCOMMANDS = new Set<string>([
+  "dmpanel",
   "rolepanel",
   "purge",
   "purgeuser",
@@ -461,6 +496,7 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
   for (const name of INVICTUS_COMMANDS) {
     invictus.addSubcommand((subcommand) => {
       subcommand.setName(name).setDescription(`Invictus ${name} command`);
+      INVICTUS_SUBCOMMAND_OPTION_BUILDERS[name]?.(subcommand);
 
       if (name === "rolepanel") {
         subcommand
@@ -790,6 +826,11 @@ export async function handleButtonInteraction(interaction: ButtonInteraction, ru
     return;
   }
 
+  if (interaction.customId === INVICTUS_DM_PANEL_BUTTON_ID) {
+    await handleInvictusDmPanelButtonInteraction(interaction);
+    return;
+  }
+
   if (interaction.customId !== ANON_ANSWER_BUTTON_ID) {
     return;
   }
@@ -815,6 +856,12 @@ export async function handleModalSubmitInteraction(
   const adminSayContext = extractAdminSayContextFromModal(interaction.customId);
   if (adminSayContext) {
     await handleAdminSayModalSubmit(interaction, runtime, adminSayContext.channelId, adminSayContext.mentionEveryone);
+    return;
+  }
+
+  const invictusDmPanelTargetUserId = parseInvictusDmPanelModalTargetUserId(interaction.customId);
+  if (invictusDmPanelTargetUserId) {
+    await handleInvictusDmPanelModalSubmit(interaction, runtime, invictusDmPanelTargetUserId);
     return;
   }
 
@@ -1636,6 +1683,82 @@ async function handleInvictusSay(interaction: ChatInputCommandInteraction): Prom
   await interaction.showModal(buildAdminSayModal(targetChannelOption.id, mentionEveryone));
 }
 
+async function handleInvictusDmPanel(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+  if (!interaction.guild) {
+    await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
+    return;
+  }
+
+  const targetChannel =
+    (interaction.options.getChannel("channel") instanceof TextChannel
+      ? (interaction.options.getChannel("channel") as TextChannel)
+      : null) ?? getManageTargetChannel(interaction);
+  if (!targetChannel) {
+    await interaction.reply({
+      content: "Provide a text channel, or run this command from a text channel.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const buttonLabel = (interaction.options.getString("button_label") ?? "").trim() || INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL;
+  if (buttonLabel.length > ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH) {
+    await interaction.reply({
+      content: `Button label must be ${ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH} characters or fewer.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const me = interaction.guild.members.me ?? (await interaction.guild.members.fetchMe().catch(() => null));
+  if (!me) {
+    await interaction.reply({ content: MSG_BOT_CONTEXT_ERROR, ephemeral: true });
+    return;
+  }
+
+  const channelError = getRolePanelChannelPermissionError(targetChannel, me);
+  if (channelError) {
+    await interaction.reply({ content: channelError, ephemeral: true });
+    return;
+  }
+
+  const panelEmbed = buildInvictusDmPanelEmbed(
+    interaction.user.id,
+    interaction.options.getString("title"),
+    interaction.options.getString("description"),
+    runtime,
+  );
+  const panelComponents = buildInvictusDmPanelComponents(buttonLabel);
+  const mentionEveryone = interaction.options.getBoolean("mention_everyone") ?? false;
+  const mentionPayload = buildAnnouncementMentions(mentionEveryone);
+
+  const sent = await targetChannel
+    .send({
+      ...(mentionPayload.content === null ? {} : { content: mentionPayload.content }),
+      embeds: [panelEmbed],
+      components: panelComponents,
+      allowedMentions: mentionPayload.allowedMentions,
+    })
+    .catch(() => null);
+  if (!sent) {
+    await interaction.reply({ content: "Failed to create the DM panel.", ephemeral: true });
+    return;
+  }
+
+  runtime.storage.recordCommandMetric("invictus.dmpanel");
+  await interaction.reply({
+    content: `DM panel posted in ${targetChannel.toString()}. Messages will be forwarded to you by DM.`,
+    ephemeral: true,
+  });
+
+  await sendLog(
+    interaction,
+    runtime,
+    "Invictus DM Panel Created",
+    `**By:** ${interaction.user.toString()}\n**Channel:** ${targetChannel.toString()}\n**Recipient:** ${interaction.user.toString()} (\`${interaction.user.id}\`)\n**Button:** ${buttonLabel}\n**Mention Everyone:** \`${mentionEveryone ? "Yes" : "No"}\``,
+  );
+}
+
 async function handleAdminSayModalSubmit(
   interaction: ModalSubmitInteraction,
   runtime: BotRuntime,
@@ -1703,6 +1826,60 @@ async function handleAdminSayModalSubmit(
     runtime,
     "Admin Announcement Sent",
     `**By:** ${interaction.user.toString()}\n**Channel:** ${channel.toString()}\n**Message:** ${messageContent}`,
+  );
+}
+
+async function handleInvictusDmPanelModalSubmit(
+  interaction: ModalSubmitInteraction,
+  runtime: BotRuntime,
+  targetUserId: string,
+): Promise<void> {
+  if (!interaction.guild) {
+    await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
+    return;
+  }
+
+  const messageContent = interaction.fields.getTextInputValue(INVICTUS_DM_PANEL_MODAL_INPUT_ID).trim();
+  if (!messageContent) {
+    await interaction.reply({ content: "Message cannot be empty.", ephemeral: true });
+    return;
+  }
+
+  const recipient = await interaction.client.users.fetch(targetUserId).catch(() => null);
+  if (!recipient) {
+    await interaction.reply({ content: "Could not find the configured DM recipient.", ephemeral: true });
+    return;
+  }
+
+  const sourceChannel = interaction.channel?.isTextBased() ? interaction.channel.toString() : "Unknown";
+  const dmEmbed = new EmbedBuilder()
+    .setTitle("Invictus Panel Message")
+    .setDescription(messageContent)
+    .setColor(ROLE_COLOR)
+    .setTimestamp(runtime.now().toJSDate())
+    .addFields(
+      { name: "From", value: `${interaction.user.toString()} (\`${interaction.user.id}\`)`, inline: false },
+      { name: "Server", value: `${interaction.guild.name} (\`${interaction.guild.id}\`)`, inline: false },
+      { name: "Channel", value: sourceChannel, inline: false },
+    );
+
+  const delivered = await recipient.send({ embeds: [dmEmbed] }).then(() => true).catch(() => false);
+  if (!delivered) {
+    await interaction.reply({
+      content: "Failed to deliver your message. The recipient may have DMs disabled.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  runtime.storage.recordCommandMetric("invictus.dmpanel.forward");
+  await interaction.reply({ content: "Your message has been sent privately.", ephemeral: true });
+
+  await sendLog(
+    interaction,
+    runtime,
+    "Invictus DM Panel Message Forwarded",
+    `**From:** ${interaction.user.toString()} (\`${interaction.user.id}\`)\n**To:** ${recipient.toString()} (\`${recipient.id}\`)\n**Channel:** ${sourceChannel}\n**Message:** ${messageContent}`,
   );
 }
 
@@ -2142,7 +2319,7 @@ async function handleInvictusHelp(interaction: ChatInputCommandInteraction): Pro
     "`/court post`, `/court custom`, `/court close`, `/court listopen`, `/court extend`, `/court reopen`, `/court removeanswer`",
     "",
     "**Invictus**",
-    "`/invictus say`, `/invictus rolepanel`, `/invictus rolepanelmulti`, `/invictus purge`, `/invictus purgeuser`, `/invictus lock`, `/invictus unlock`",
+    "`/invictus say`, `/invictus dmpanel`, `/invictus rolepanel`, `/invictus rolepanelmulti`, `/invictus purge`, `/invictus purgeuser`, `/invictus lock`, `/invictus unlock`",
     "`/invictus slowmode`, `/invictus timeout`, `/invictus untimeout`, `/invictus mutemany`, `/invictus unmutemany`, `/invictus muteall`, `/invictus unmuteall`",
     "`/invictus resetroyaltimer`, `/invictus afk`, `/invictus afkstatus`, `/invictus backfillstats`, `/invictus backfillstatus`",
     "",
@@ -3905,6 +4082,57 @@ function buildAdminSayModal(channelId: string, mentionEveryone: boolean): ModalB
     });
 }
 
+function buildInvictusDmPanelEmbed(
+  targetUserId: string,
+  title: string | null,
+  description: string | null,
+  runtime: BotRuntime,
+): EmbedBuilder {
+  const panelTitle = (title ?? "").trim() || "Message Invictus";
+  const defaultDescription =
+    `Press the button below to send a private message to <@${targetUserId}>. `
+    + "Invictus will DM your message and include who sent it.";
+  const panelDescription = (description ?? "").trim() || defaultDescription;
+
+  return new EmbedBuilder()
+    .setTitle(panelTitle)
+    .setDescription(panelDescription)
+    .setColor(ROLE_COLOR)
+    .setTimestamp(runtime.now().toJSDate())
+    .setFooter({ text: `${INVICTUS_DM_PANEL_FOOTER_PREFIX}${targetUserId}` });
+}
+
+function buildInvictusDmPanelComponents(buttonLabel: string): ActionRowBuilder<ButtonBuilder>[] {
+  const trimmedLabel = buttonLabel.trim() || INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL;
+
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(INVICTUS_DM_PANEL_BUTTON_ID)
+        .setLabel(trimmedLabel.slice(0, ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH))
+        .setStyle(ButtonStyle.Primary),
+    ),
+  ];
+}
+
+function buildInvictusDmPanelModal(targetUserId: string): ModalBuilder {
+  const input = new TextInputBuilder()
+    .setCustomId(INVICTUS_DM_PANEL_MODAL_INPUT_ID)
+    .setStyle(TextInputStyle.Paragraph)
+    .setPlaceholder("Write your message here...")
+    .setRequired(true)
+    .setMaxLength(2000);
+
+  return new ModalBuilder()
+    .setCustomId(`${INVICTUS_DM_PANEL_MODAL_PREFIX}${targetUserId}`)
+    .setTitle("Message Invictus")
+    .setLabelComponents({
+      type: ComponentType.Label,
+      label: "Your message",
+      component: input.toJSON(),
+    });
+}
+
 function extractAdminSayContextFromModal(customId: string): { channelId: string; mentionEveryone: boolean } | null {
   if (!customId.startsWith(ADMIN_SAY_MODAL_PREFIX)) {
     return null;
@@ -3920,6 +4148,19 @@ function extractAdminSayContextFromModal(customId: string): { channelId: string;
     channelId,
     mentionEveryone: mentionFlag === "1",
   };
+}
+
+function parseInvictusDmPanelModalTargetUserId(customId: string): string | null {
+  if (!customId.startsWith(INVICTUS_DM_PANEL_MODAL_PREFIX)) {
+    return null;
+  }
+
+  const targetUserId = customId.slice(INVICTUS_DM_PANEL_MODAL_PREFIX.length).trim();
+  if (!/^\d+$/.test(targetUserId)) {
+    return null;
+  }
+
+  return targetUserId;
 }
 
 function parseAnonymousAnswerMessageId(customId: string): string | null {
@@ -4051,6 +4292,37 @@ async function handleRolePanelButtonInteraction(interaction: ButtonInteraction, 
   }
 
   await interaction.reply({ content: successMessage ?? "Role updated.", ephemeral: true });
+}
+
+async function handleInvictusDmPanelButtonInteraction(interaction: ButtonInteraction): Promise<void> {
+  if (!interaction.guild || !interaction.message) {
+    await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
+    return;
+  }
+
+  const footerTexts = interaction.message.embeds.map((embed) => String(embed.footer?.text ?? ""));
+  const targetUserId = extractInvictusDmPanelTargetUserId(footerTexts);
+  if (!targetUserId) {
+    await interaction.reply({ content: "This DM panel is missing recipient metadata.", ephemeral: true });
+    return;
+  }
+
+  await interaction.showModal(buildInvictusDmPanelModal(targetUserId));
+}
+
+function extractInvictusDmPanelTargetUserId(footerTexts: string[]): string | null {
+  for (const footerText of footerTexts) {
+    if (!footerText.startsWith(INVICTUS_DM_PANEL_FOOTER_PREFIX)) {
+      continue;
+    }
+
+    const targetUserId = footerText.slice(INVICTUS_DM_PANEL_FOOTER_PREFIX.length).trim();
+    if (/^\d+$/.test(targetUserId)) {
+      return targetUserId;
+    }
+  }
+
+  return null;
 }
 
 function getRolePanelClaimPermissionError(role: Role, me: GuildMember | null): string | null {

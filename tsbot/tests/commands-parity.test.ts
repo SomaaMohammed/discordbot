@@ -440,6 +440,29 @@ describe("command parity dispatch", () => {
     );
   });
 
+  it("handles /invictus dmpanel with missing channel context", async () => {
+    const now = DateTime.fromISO("2026-04-19T19:10:00Z");
+    const storage = createStorageMock(buildState(), buildMetrics(), []);
+    const runtime = createRuntimeMock(storage, now);
+    const { interaction, reply } = createInteractionMock({
+      commandName: "invictus",
+      subcommand: "dmpanel",
+      isAdmin: true,
+    });
+
+    await handleChatInputCommand(interaction, runtime);
+
+    expect(reply).toHaveBeenCalledTimes(1);
+    const payload = reply.mock.calls[0]?.[0] as {
+      content: string;
+      ephemeral: boolean;
+    };
+    expect(payload.ephemeral).toBe(true);
+    expect(payload.content).toBe(
+      "Provide a text channel, or run this command from a text channel.",
+    );
+  });
+
   it("blocks /invictus timeout when target is self", async () => {
     const now = DateTime.fromISO("2026-04-19T19:30:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
