@@ -6,7 +6,13 @@ import { createRuntime } from "./runtime.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFile);
-const tsbotRoot = path.resolve(currentDir, "..");
+
+// In dev, entrypoint lives at tsbot/src/index.ts; in prod it lives at tsbot/dist/src/index.js.
+let tsbotRoot = path.resolve(currentDir, "..");
+if (path.basename(tsbotRoot) === "dist") {
+  tsbotRoot = path.resolve(tsbotRoot, "..");
+}
+
 const repoRoot = path.resolve(tsbotRoot, "..");
 
 async function main(): Promise<void> {

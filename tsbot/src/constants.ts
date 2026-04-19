@@ -1,6 +1,6 @@
 import type { RoyalTitle } from "./types.js";
 
-export const PACKAGE_VERSION = "0.1.1";
+export const PACKAGE_VERSION = "0.1.2";
 
 export const DEFAULT_STAFF_ROLE_IDS = new Set<string>([
   "1461376227095875707",

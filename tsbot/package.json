@@ -1,6 +1,6 @@
 {
   "name": "imperial-court-bot-ts",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "TypeScript migration target for Imperial Court Bot",
   "main": "dist/index.js",
   "scripts": {
