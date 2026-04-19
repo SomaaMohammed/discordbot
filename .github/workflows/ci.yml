@@ -13,35 +13,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-            pyproject.toml
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: tsbot/package-lock.json
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          cd tsbot
+          npm ci
 
       - name: Validate JSON files
         run: |
-          python -m json.tool questions.json > /dev/null
-          python -m json.tool answers.json > /dev/null
-          python -m json.tool state.json > /dev/null
+          node -e "JSON.parse(require('node:fs').readFileSync('questions.json','utf8'))"
+          node -e "JSON.parse(require('node:fs').readFileSync('answers.json','utf8'))"
+          node -e "JSON.parse(require('node:fs').readFileSync('state.json','utf8'))"
 
-      - name: Compile check
-        run: python -m py_compile bot.py
+      - name: Typecheck
+        run: |
+          cd tsbot
+          npm run typecheck
 
-      - name: Ruff lint
-        run: ruff check .
+      - name: Tests
+        run: |
+          cd tsbot
+          npm test
 
-      - name: Mypy type check
-        run: mypy bot.py courtbot
-
-      - name: Run tests
-        run: python -m pytest -q --cov=bot --cov=courtbot --cov-report=term-missing
+      - name: Build
+        run: |
+          cd tsbot
+          npm run build

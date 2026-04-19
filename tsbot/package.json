@@ -1,0 +1,37 @@
+{
+  "name": "imperial-court-bot-ts",
+  "version": "0.1.1",
+  "description": "TypeScript migration target for Imperial Court Bot",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "discord.js": "^14.26.3",
+    "dotenv": "^17.4.2",
+    "luxon": "^3.7.2",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/luxon": "^3.7.1",
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.4"
+  }
+}

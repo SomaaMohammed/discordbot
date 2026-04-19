@@ -9,19 +9,21 @@ set -Eeuo pipefail
 # Optional env overrides:
 #   SERVICE_NAME=imperial-court-bot
 #   APP_DIR=~/imperial-court-bot
-#   VENV_DIR=~/imperial-court-bot/.venv
+#   TSBOT_DIR=~/imperial-court-bot/tsbot
 #   RUN_TESTS=0
-#   RUN_LINT=0
+#   RUN_TYPECHECK=0
+#   RUN_LINT=0  # legacy alias for RUN_TYPECHECK
+#   SKIP_SERVICE_RESTART=0
 
 SERVICE_NAME="${SERVICE_NAME:-imperial-court-bot}"
 APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-VENV_DIR="${VENV_DIR:-$APP_DIR/.venv}"
-PYTHON_BIN="$VENV_DIR/bin/python"
+TSBOT_DIR="${TSBOT_DIR:-$APP_DIR/tsbot}"
 ENV_FILE="$APP_DIR/.env"
 DB_FILE=""
 BACKUP_DIR="$APP_DIR/backups"
 RUN_TESTS="${RUN_TESTS:-0}"
-RUN_LINT="${RUN_LINT:-0}"
+RUN_TYPECHECK="${RUN_TYPECHECK:-${RUN_LINT:-0}}"
+SKIP_SERVICE_RESTART="${SKIP_SERVICE_RESTART:-0}"
 
 log() {
   echo "[post-pull] $*"
@@ -85,20 +87,45 @@ resolve_db_file() {
   fi
 }
 
-run_migration_warmup() {
-  log "Running storage warm-up import"
-  (
-    cd "$APP_DIR"
-    "$PYTHON_BIN" - <<'PY'
-import bot
-print(f"[post-pull] bot DB_FILE resolved to: {bot.DB_FILE}")
-PY
-  )
+install_node_dependencies() {
+  if [[ -f "$TSBOT_DIR/package-lock.json" ]]; then
+    log "Installing dependencies with npm ci"
+    npm ci
+    return
+  fi
+
+  log "package-lock.json not found; using npm install"
+  npm install
 }
 
 verify_tables() {
+  if [[ ! -f "$DB_FILE" ]]; then
+    log "No DB file found yet; skipping SQLite table check."
+    return
+  fi
+
   local tables
-  tables="$(sqlite3 "$DB_FILE" ".tables" || true)"
+  if ! tables="$(
+    cd "$TSBOT_DIR"
+    DB_FILE="$DB_FILE" node <<'NODE'
+const Database = require("better-sqlite3");
+
+const dbFile = process.env.DB_FILE;
+if (!dbFile) {
+  process.exit(2);
+}
+
+const db = new Database(dbFile, { readonly: true });
+const rows = db
+  .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+  .all();
+
+process.stdout.write(rows.map((row) => row.name).join(" "));
+NODE
+  )"; then
+    fail "Failed to read SQLite tables from $DB_FILE"
+  fi
+
   log "SQLite tables in $DB_FILE: $tables"
 
   for table in kv posts answers metrics anon_cooldowns; do
@@ -111,16 +138,18 @@ verify_tables() {
 }
 
 main() {
-  require_cmd sudo
-  require_cmd sqlite3
+  if [[ "$SKIP_SERVICE_RESTART" != "1" ]]; then
+    require_cmd sudo
+  fi
+  require_cmd node
+  require_cmd npm
   require_cmd grep
-  require_file "$APP_DIR/requirements.txt"
-  require_file "$APP_DIR/bot.py"
-  require_dir "$VENV_DIR"
-  require_file "$PYTHON_BIN"
+  require_dir "$TSBOT_DIR"
+  require_file "$TSBOT_DIR/package.json"
   require_file "$ENV_FILE"
 
   log "App dir: $APP_DIR"
+  log "TSBot dir: $TSBOT_DIR"
   log "Service: $SERVICE_NAME"
 
   require_env_key "DISCORD_TOKEN"
@@ -162,33 +191,30 @@ main() {
     log "No existing DB found; skipping backup copy."
   fi
 
-  log "Installing/updating dependencies"
-  "$PYTHON_BIN" -m pip install --upgrade pip
-  "$PYTHON_BIN" -m pip install -r "$APP_DIR/requirements.txt"
+  (
+    cd "$TSBOT_DIR"
 
-  if [[ "$RUN_LINT" == "1" || "$RUN_TESTS" == "1" ]]; then
-    if [[ -f "$APP_DIR/requirements-dev.txt" ]]; then
-      log "Installing development dependencies for lint/tests"
-      "$PYTHON_BIN" -m pip install -r "$APP_DIR/requirements-dev.txt"
-    else
-      log "requirements-dev.txt not found; continuing without extra dev dependencies"
+    install_node_dependencies
+
+    log "Building TypeScript bot"
+    npm run build
+
+    if [[ "$RUN_TYPECHECK" == "1" ]]; then
+      log "Running typecheck (RUN_TYPECHECK=1)"
+      npm run typecheck
     fi
-  fi
 
-  log "Compile check"
-  "$PYTHON_BIN" -m py_compile "$APP_DIR/bot.py"
+    if [[ "$RUN_TESTS" == "1" ]]; then
+      log "Running tests (RUN_TESTS=1)"
+      npm test
+    fi
+  )
 
-  run_migration_warmup
-
-  if [[ "$RUN_LINT" == "1" ]]; then
-    log "Running lint/type checks (RUN_LINT=1)"
-    "$PYTHON_BIN" -m ruff check "$APP_DIR"
-    "$PYTHON_BIN" -m mypy "$APP_DIR/bot.py" "$APP_DIR/courtbot"
-  fi
-
-  if [[ "$RUN_TESTS" == "1" ]]; then
-    log "Running tests (RUN_TESTS=1)"
-    "$PYTHON_BIN" -m pytest -q "$APP_DIR/tests"
+  if [[ "$SKIP_SERVICE_RESTART" == "1" ]]; then
+    log "SKIP_SERVICE_RESTART=1 set; skipping systemd restart/status checks"
+    verify_tables
+    log "Done. Build/validation completed without service restart."
+    return
   fi
 
   log "Reloading systemd units"

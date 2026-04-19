@@ -12,20 +12,22 @@ set -Eeuo pipefail
 # Optional env overrides:
 #   SERVICE_NAME=imperial-court-bot
 #   APP_DIR=~/imperial-court-bot
-#   VENV_DIR=~/imperial-court-bot/.venv
 #   LOCAL_CHANGES_POLICY=abort|stash|discard
 #   RUN_TESTS=1
-#   RUN_LINT=1
+#   RUN_TYPECHECK=1
+#   RUN_LINT=1  # legacy alias for RUN_TYPECHECK
 #   SKIP_PULL=1
+#   SKIP_SERVICE_RESTART=1
 
 SERVICE_NAME="${SERVICE_NAME:-imperial-court-bot}"
 APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-VENV_DIR="${VENV_DIR:-$APP_DIR/.venv}"
+TSBOT_DIR="${TSBOT_DIR:-$APP_DIR/tsbot}"
 BRANCH="${1:-${BRANCH:-main}}"
 LOCAL_CHANGES_POLICY="${LOCAL_CHANGES_POLICY:-abort}"
 RUN_TESTS="${RUN_TESTS:-0}"
-RUN_LINT="${RUN_LINT:-0}"
+RUN_TYPECHECK="${RUN_TYPECHECK:-${RUN_LINT:-0}}"
 SKIP_PULL="${SKIP_PULL:-0}"
+SKIP_SERVICE_RESTART="${SKIP_SERVICE_RESTART:-0}"
 
 log() {
   echo "[deploy-server] $*"
@@ -77,14 +79,15 @@ ensure_clean_or_handle_changes() {
 
 main() {
   require_cmd git
-  require_cmd sudo
   require_cmd bash
 
   require_file "$APP_DIR/post_pull_server.sh"
+  require_file "$TSBOT_DIR/package.json"
 
   cd "$APP_DIR"
 
   log "App dir: $APP_DIR"
+  log "TSBot dir: $TSBOT_DIR"
   log "Branch: $BRANCH"
   log "Service: $SERVICE_NAME"
   log "Local changes policy: $LOCAL_CHANGES_POLICY"
@@ -107,9 +110,10 @@ main() {
   log "Running post-pull rollout"
   SERVICE_NAME="$SERVICE_NAME" \
   APP_DIR="$APP_DIR" \
-  VENV_DIR="$VENV_DIR" \
+  TSBOT_DIR="$TSBOT_DIR" \
   RUN_TESTS="$RUN_TESTS" \
-  RUN_LINT="$RUN_LINT" \
+  RUN_TYPECHECK="$RUN_TYPECHECK" \
+  SKIP_SERVICE_RESTART="$SKIP_SERVICE_RESTART" \
   "$APP_DIR/post_pull_server.sh"
 
   log "Deployment finished successfully"
