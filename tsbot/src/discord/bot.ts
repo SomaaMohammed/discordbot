@@ -2,7 +2,6 @@ import {
   Client,
   GatewayIntentBits,
   Partials,
-  type APIApplicationCommand,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type Interaction,
@@ -31,24 +30,36 @@ export function createDiscordClient(runtime: BotRuntime): Client {
 
   wireRuntimeParity(client, runtime);
 
-  client.once("ready", async () => {
+  client.once("clientReady", async () => {
     const me = client.user;
-    console.log(`Logged in as ${me?.tag ?? "unknown"} | version=${runtime.config.botVersion}`);
+    console.log(
+      `Logged in as ${me?.tag ?? "unknown"} | version=${runtime.config.botVersion}`,
+    );
 
-    const guild = await client.guilds.fetch(runtime.config.testGuildIdText).catch(() => null);
+    const guild = await client.guilds
+      .fetch(runtime.config.testGuildIdText)
+      .catch(() => null);
     if (!guild) {
-      console.warn(`Failed to fetch guild ${runtime.config.testGuildIdText}. Commands were not synced.`);
+      console.warn(
+        `Failed to fetch guild ${runtime.config.testGuildIdText}. Commands were not synced.`,
+      );
       return;
     }
 
-    const commandDefinitions = buildCommandDefinitions().map((definition) => definition.toJSON());
-    const synced = (await guild.commands.set(commandDefinitions).catch((error) => {
-      console.error("Command sync failed", error);
-      return null;
-    })) as APIApplicationCommand[] | null;
+    const commandDefinitions = buildCommandDefinitions().map((definition) =>
+      definition.toJSON(),
+    );
+    const synced = await guild.commands
+      .set(commandDefinitions)
+      .catch((error) => {
+        console.error("Command sync failed", error);
+        return null;
+      });
 
     if (synced) {
-      console.log(`Synced ${synced.length} command(s) to guild ${runtime.config.testGuildIdText}`);
+      console.log(
+        `Synced ${synced.size} command(s) to guild ${runtime.config.testGuildIdText}`,
+      );
     }
   });
 
@@ -71,7 +82,10 @@ export function createDiscordClient(runtime: BotRuntime): Client {
   return client;
 }
 
-async function handleChatCommandInteraction(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleChatCommandInteraction(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   try {
     await handleChatInputCommand(interaction, runtime);
   } catch (error) {
@@ -96,7 +110,10 @@ async function handleChatCommandInteraction(interaction: ChatInputCommandInterac
   }
 }
 
-async function handleButtonComponentInteraction(interaction: ButtonInteraction, runtime: BotRuntime): Promise<void> {
+async function handleButtonComponentInteraction(
+  interaction: ButtonInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   try {
     await handleButtonInteraction(interaction, runtime);
   } catch (error) {
@@ -120,7 +137,10 @@ async function handleButtonComponentInteraction(interaction: ButtonInteraction, 
   }
 }
 
-async function handleModalInteraction(interaction: ModalSubmitInteraction, runtime: BotRuntime): Promise<void> {
+async function handleModalInteraction(
+  interaction: ModalSubmitInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   try {
     await handleModalSubmitInteraction(interaction, runtime);
   } catch (error) {
