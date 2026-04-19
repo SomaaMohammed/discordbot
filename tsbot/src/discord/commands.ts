@@ -7,6 +7,7 @@ import {
   ComponentType,
   EmbedBuilder,
   ModalBuilder,
+  NewsChannel,
   PermissionFlagsBits,
   SlashCommandBuilder,
   TextChannel,
@@ -152,6 +153,7 @@ const STAFF_REQUIRED_COMMANDS = new Set<string>(["court", "questions"]);
 
 type RuntimeCommandHandler = (interaction: ChatInputCommandInteraction, runtime: BotRuntime) => Promise<void>;
 type SubcommandOptionBuilder = (subcommand: SlashCommandSubcommandBuilder) => void;
+type DmPanelTargetChannel = TextChannel | NewsChannel | AnyThreadChannel;
 
 const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof COURT_COMMANDS)[number], SubcommandOptionBuilder>> = {
   mode: (subcommand) => {
@@ -326,9 +328,15 @@ const INVICTUS_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof INVICTUS_COMMA
       .addChannelOption((option) =>
         option
           .setName("channel")
-          .setDescription("Target text channel (defaults to current channel)")
+          .setDescription("Target channel (defaults to current channel)")
           .setRequired(false)
-          .addChannelTypes(ChannelType.GuildText),
+          .addChannelTypes(
+            ChannelType.GuildText,
+            ChannelType.GuildAnnouncement,
+            ChannelType.PublicThread,
+            ChannelType.PrivateThread,
+            ChannelType.AnnouncementThread,
+          ),
       )
       .addStringOption((option) => option.setName("title").setDescription("Optional embed title").setRequired(false))
       .addStringOption((option) => option.setName("description").setDescription("Optional embed description").setRequired(false))
@@ -1689,13 +1697,11 @@ async function handleInvictusDmPanel(interaction: ChatInputCommandInteraction, r
     return;
   }
 
-  const targetChannel =
-    (interaction.options.getChannel("channel") instanceof TextChannel
-      ? (interaction.options.getChannel("channel") as TextChannel)
-      : null) ?? getManageTargetChannel(interaction);
+  const requestedChannel = interaction.options.getChannel("channel");
+  const targetChannel = (isDmPanelTargetChannel(requestedChannel) ? requestedChannel : null) ?? getDmPanelTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
-      content: "Provide a text channel, or run this command from a text channel.",
+      content: "Provide a text-based channel, or run this command from a text-based channel.",
       ephemeral: true,
     });
     return;
@@ -3355,6 +3361,27 @@ function getManageTargetChannel(interaction: ChatInputCommandInteraction): TextC
   return null;
 }
 
+function getDmPanelTargetChannel(interaction: ChatInputCommandInteraction): DmPanelTargetChannel | null {
+  if (isDmPanelTargetChannel(interaction.channel)) {
+    return interaction.channel;
+  }
+
+  return null;
+}
+
+function isDmPanelTargetChannel(channel: unknown): channel is DmPanelTargetChannel {
+  if (channel instanceof TextChannel || channel instanceof NewsChannel) {
+    return true;
+  }
+
+  if (!channel || typeof channel !== "object") {
+    return false;
+  }
+
+  const maybeThreadChannel = channel as { isThread?: () => boolean };
+  return typeof maybeThreadChannel.isThread === "function" && maybeThreadChannel.isThread();
+}
+
 function canMemberManageRole(member: GuildMember, role: Role): boolean {
   if (member.id === member.guild.ownerId) {
     return true;
@@ -3387,15 +3414,16 @@ function getRolePanelRoleError(actor: GuildMember, me: GuildMember, role: Role):
   return null;
 }
 
-function getRolePanelChannelPermissionError(channel: TextChannel, me: GuildMember): string | null {
+function getRolePanelChannelPermissionError(channel: DmPanelTargetChannel, me: GuildMember): string | null {
   const channelPermissions = channel.permissionsFor(me);
   const missingPermissions: string[] = [];
+  const sendPermission = channel.isThread() ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages;
 
   if (!channelPermissions.has(PermissionFlagsBits.ViewChannel)) {
     missingPermissions.push("View Channel");
   }
-  if (!channelPermissions.has(PermissionFlagsBits.SendMessages)) {
-    missingPermissions.push("Send Messages");
+  if (!channelPermissions.has(sendPermission)) {
+    missingPermissions.push(channel.isThread() ? "Send Messages in Threads" : "Send Messages");
   }
   if (!channelPermissions.has(PermissionFlagsBits.EmbedLinks)) {
     missingPermissions.push("Embed Links");

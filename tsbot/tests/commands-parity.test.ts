@@ -459,7 +459,7 @@ describe("command parity dispatch", () => {
     };
     expect(payload.ephemeral).toBe(true);
     expect(payload.content).toBe(
-      "Provide a text channel, or run this command from a text channel.",
+      "Provide a text-based channel, or run this command from a text-based channel.",
     );
   });
 
