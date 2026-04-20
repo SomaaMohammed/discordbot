@@ -1254,7 +1254,7 @@ async function handleCourtStatus(
     `**Mode:** \`${state.mode}\``,
     `**Channel:** ${channelMention}`,
     `**Log Channel:** ${logChannelMention}`,
-    "**Auto Time:** `hidden (regional privacy mode)`",
+    `**Auto Time:** \`${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}\``,
     `**Last Posted:** \`${state.last_posted_date ?? "Never"}\``,
     `**Recent Memory Size:** \`${state.history.length}\``,
     `**Used Pool Size:** \`${state.used_questions.length}\``,
@@ -1352,7 +1352,7 @@ async function handleCourtHealth(
   const embed = new EmbedBuilder()
     .setTitle("Court Health Check")
     .setDescription(
-      `**Overall:** \`${overall}\`\n**Time Visibility:** \`hidden (regional privacy mode)\``,
+      `**Overall:** \`${overall}\`\n**Now:** \`${now.toFormat("yyyy-LL-dd HH:mm:ss")}\``,
     )
     .setColor(ROLE_COLOR)
     .addFields(
@@ -1361,7 +1361,7 @@ async function handleCourtHealth(
         value:
           `**Mode:** \`${state.mode}\`\n` +
           `**Dry Run:** \`${state.dry_run_auto_post ? "enabled" : "disabled"}\`\n` +
-          "**Auto Time:** `hidden (regional privacy mode)`\n" +
+          `**Auto Time:** \`${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}\`\n` +
           `**Next Auto-Post:** ${nextRunText}\n` +
           `**Last Posted Date:** \`${state.last_posted_date ?? "Never"}\`\n` +
           `**Last Successful Auto-Post:** \`${metrics.last_successful_auto_post ? "Recorded" : "Never"}\``,
@@ -1894,7 +1894,7 @@ function buildNextRunText(
 
   const nextRun = now.set({ hour, minute, second: 0, millisecond: 0 });
   const effectiveNextRun = nextRun <= now ? nextRun.plus({ days: 1 }) : nextRun;
-  return `in ${formatDuration(effectiveNextRun.diff(now))} (regional privacy mode)`;
+  return `${effectiveNextRun.toFormat("yyyy-LL-dd HH:mm")} (in ${formatDuration(effectiveNextRun.diff(now))})`;
 }
 
 function findMissingChannelPermissions(
@@ -1969,9 +1969,9 @@ async function handleCourtSchedule(
   const minute = interaction.options.getInteger("minute");
 
   if (hour === null && minute === null) {
+    const state = runtime.storage.getState();
     await interaction.reply({
-      content:
-        "Current schedule is configured. Time details are hidden (regional privacy mode).",
+      content: `Current schedule is ${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}.`,
       ephemeral: true,
     });
     return;
@@ -2002,9 +2002,9 @@ async function handleCourtSchedule(
     }
   });
 
+  const state = runtime.storage.getState();
   await interaction.reply({
-    content:
-      "Schedule updated. Time details are hidden (regional privacy mode).",
+    content: `Schedule updated to ${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}.`,
     ephemeral: true,
   });
 }

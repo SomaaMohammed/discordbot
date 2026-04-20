@@ -862,6 +862,14 @@ function buildPrivilegedInvictusChatResponse(
   state: CourtState,
 ): string {
   const memberMention = member.toString();
+  const currentTimeText = runtime.now().toFormat("yyyy-LL-dd HH:mm");
+  const scheduledHour = String(Math.max(0, Math.min(23, state.hour))).padStart(
+    2,
+    "0",
+  );
+  const scheduledMinute = String(
+    Math.max(0, Math.min(59, state.minute)),
+  ).padStart(2, "0");
   const courtChannelText = runtime.config.courtChannelIdText
     ? `<#${runtime.config.courtChannelIdText}>`
     : "not configured";
@@ -896,12 +904,12 @@ function buildPrivilegedInvictusChatResponse(
         ? "The coin lands on **heads**."
         : "The coin lands on **tails**.";
     case "time":
-      return "Time is interpreted using your regional settings and hidden for privacy.";
+      return `Court time is \`${currentTimeText}\`.`;
     case "status":
       return [
         `Status report for ${memberMention}:`,
         `Mode: \`${state.mode}\``,
-        "Auto-post schedule: hidden (regional privacy mode)",
+        `Auto-post schedule: \`${scheduledHour}:${scheduledMinute}\``,
         `Court channel: ${courtChannelText}`,
       ].join("\n");
     case "counsel":
