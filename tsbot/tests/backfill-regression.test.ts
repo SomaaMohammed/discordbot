@@ -185,3 +185,23 @@ describe("backfill merge regression", () => {
     ]);
   });
 });
+
+describe("storage state regression", () => {
+  it("getState preserves auto-post metrics", () => {
+    const storage = createStorageForBackfillTests();
+    const lastSuccessfulAutoPost = "2026-04-20T20:05:00.000Z";
+
+    storage.metricsSet("last_successful_auto_post", lastSuccessfulAutoPost);
+    storage.metricsSet("posts_total", "42");
+
+    const loaded = storage.getState();
+
+    expect(loaded.metrics.last_successful_auto_post).toBe(
+      lastSuccessfulAutoPost,
+    );
+    expect(storage.metricsGet("last_successful_auto_post", "")).toBe(
+      lastSuccessfulAutoPost,
+    );
+    expect(storage.metricsGet("posts_total", "0")).toBe("42");
+  });
+});

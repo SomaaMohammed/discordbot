@@ -140,12 +140,17 @@ export class CourtStorage {
       posts: [],
       metrics: ensureMetricsShape({}),
     };
-    this.saveState(stateToPersist);
+    this.saveState(stateToPersist, { persistMetrics: false });
 
     return mergedState;
   }
 
-  public saveState(state: CourtState): void {
+  public saveState(
+    state: CourtState,
+    options: { persistMetrics?: boolean } = {},
+  ): void {
+    const persistMetrics = options.persistMetrics ?? true;
+
     const nextState: CourtState = {
       ...state,
       history: state.history.slice(-HISTORY_LIMIT),
@@ -160,10 +165,12 @@ export class CourtStorage {
       this.upsertPostRow(post);
     }
 
-    for (const [metricKey, metricValue] of Object.entries(
-      flattenMetricsForStorage(nextState.metrics),
-    )) {
-      this.metricsSet(metricKey, metricValue);
+    if (persistMetrics) {
+      for (const [metricKey, metricValue] of Object.entries(
+        flattenMetricsForStorage(nextState.metrics),
+      )) {
+        this.metricsSet(metricKey, metricValue);
+      }
     }
 
     const persisted: CourtState = {
