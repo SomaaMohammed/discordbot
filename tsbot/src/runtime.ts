@@ -12,7 +12,10 @@ export interface BotRuntime {
   randomInt: (maxExclusive: number) => number;
 }
 
-export function createRuntime(config: RuntimeConfig, repoRoot: string): BotRuntime {
+export function createRuntime(
+  config: RuntimeConfig,
+  repoRoot: string,
+): BotRuntime {
   const storage = new CourtStorage(config, repoRoot);
   storage.initStorage();
 
@@ -21,6 +24,7 @@ export function createRuntime(config: RuntimeConfig, repoRoot: string): BotRunti
     storage,
     backfillStatus: { ...DEFAULT_BACKFILL_STATUS },
     now: () => getNow(config.timezoneName),
-    randomInt: (maxExclusive) => Math.floor(Math.random() * Math.max(maxExclusive, 1)),
+    randomInt: (maxExclusive) =>
+      Math.floor(Math.random() * Math.max(maxExclusive, 1)),
   };
 }

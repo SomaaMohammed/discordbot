@@ -1,6 +1,6 @@
 import type { RoyalTitle } from "./types.js";
 
-export const PACKAGE_VERSION = "0.2.2";
+export const PACKAGE_VERSION = "0.2.3";
 
 export const DEFAULT_STAFF_ROLE_IDS = new Set<string>([
   "1461376227095875707",
@@ -44,17 +44,25 @@ export const ROYAL_TITLES: RoyalTitle[] = ["Emperor", "Empress"];
 export const MSG_EVERYONE_MENTION = "@everyone";
 
 export const REPLY_MUTE_ACTION_PATTERN = "(?:mute|silence|timeout|quiet|hush)";
-export const REPLY_MUTE_INTENT_PATTERN =
-  String.raw`(?:you\s+know\s+what\s+to\s+do|u\s+know\s+what\s+to\s+do|do\s+your\s+thing|handle\s+this)`;
+export const REPLY_MUTE_INTENT_PATTERN = String.raw`(?:you\s+know\s+what\s+to\s+do|u\s+know\s+what\s+to\s+do|do\s+your\s+thing|handle\s+this)`;
 
 export const REPLY_MUTE_PATTERNS: RegExp[] = [
-  new RegExp(String.raw`^\s*(?:hey|yo|oi)[\s,]+invictus[\s,:-]+${REPLY_MUTE_ACTION_PATTERN}\b(.*)$`, "i"),
-  new RegExp(String.raw`^\s*invictus[\s,:-]+${REPLY_MUTE_ACTION_PATTERN}\b(.*)$`, "i"),
+  new RegExp(
+    String.raw`^\s*(?:hey|yo|oi)[\s,]+invictus[\s,:-]+${REPLY_MUTE_ACTION_PATTERN}\b(.*)$`,
+    "i",
+  ),
+  new RegExp(
+    String.raw`^\s*invictus[\s,:-]+${REPLY_MUTE_ACTION_PATTERN}\b(.*)$`,
+    "i",
+  ),
   new RegExp(
     String.raw`^\s*(?:hey|yo|oi)[\s,]+invictus[\s,:-]+${REPLY_MUTE_INTENT_PATTERN}\b(?:[\s,:-]*(.*))$`,
     "i",
   ),
-  new RegExp(String.raw`^\s*invictus[\s,:-]+${REPLY_MUTE_INTENT_PATTERN}\b(?:[\s,:-]*(.*))$`, "i"),
+  new RegExp(
+    String.raw`^\s*invictus[\s,:-]+${REPLY_MUTE_INTENT_PATTERN}\b(?:[\s,:-]*(.*))$`,
+    "i",
+  ),
 ];
 
 export const SILENCE_LOCK_PHRASES = new Set<string>([
@@ -74,8 +82,10 @@ export const EMPEROR_LOCK_PHRASES = new Set<string>([
   "all rise for the emperor",
 ]);
 
-export const EMPEROR_MENTION_PATTERN = /\b(sammy|emperor|his majesty|your majesty)\b/i;
-export const EMPRESS_MENTION_PATTERN = /\b(empress|her majesty|tay|taytay|taylor|tayla)\b/i;
+export const EMPEROR_MENTION_PATTERN =
+  /\b(sammy|emperor|his majesty|your majesty)\b/i;
+export const EMPRESS_MENTION_PATTERN =
+  /\b(empress|her majesty|tay|taytay|taylor|tayla)\b/i;
 export const URL_PATTERN = /https?:\/\/|discord\.gg\//i;
 
 export const USER_METRIC_PREFIX = "user_stats.";

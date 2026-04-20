@@ -70,11 +70,13 @@ function createScanTarget(batches: FakeMessage[][]): {
   fetchMock: ReturnType<typeof vi.fn>;
 } {
   let index = 0;
-  const fetchMock = vi.fn(async (_options: { limit: number; before?: string }) => {
-    const batch = batches[index] ?? [];
-    index += 1;
-    return createBatch(batch);
-  });
+  const fetchMock = vi.fn(
+    async (_options: { limit: number; before?: string }) => {
+      const batch = batches[index] ?? [];
+      index += 1;
+      return createBatch(batch);
+    },
+  );
 
   return {
     target: {
@@ -87,7 +89,9 @@ function createScanTarget(batches: FakeMessage[][]): {
 }
 
 function createStorageForBackfillTests(): CourtStorage {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "courtbot-ts-backfill-"));
+  const repoRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "courtbot-ts-backfill-"),
+  );
   const config = {
     dbFile: ":memory:",
     courtChannelId: 1,
@@ -102,24 +106,15 @@ function createStorageForBackfillTests(): CourtStorage {
 
 describe("backfill scanning regression", () => {
   it("respects lookback cutoff and tallies non-bot users", async () => {
-    const m1 = createMessage(
-      "m1",
-      1300,
-      { id: "10" },
-      [createReaction([{ id: "20" }, { id: "21", bot: true }])],
-    );
-    const m2 = createMessage(
-      "m2",
-      1100,
-      { id: "11", bot: true },
-      [createReaction([{ id: "22" }])],
-    );
-    const m3 = createMessage(
-      "m3",
-      900,
-      { id: "12" },
-      [createReaction([{ id: "23" }])],
-    );
+    const m1 = createMessage("m1", 1300, { id: "10" }, [
+      createReaction([{ id: "20" }, { id: "21", bot: true }]),
+    ]);
+    const m2 = createMessage("m2", 1100, { id: "11", bot: true }, [
+      createReaction([{ id: "22" }]),
+    ]);
+    const m3 = createMessage("m3", 900, { id: "12" }, [
+      createReaction([{ id: "23" }]),
+    ]);
 
     const { target, fetchMock } = createScanTarget([[m1, m2, m3]]);
 
@@ -127,13 +122,14 @@ describe("backfill scanning regression", () => {
     const reactionsSentCounts: Record<number, number> = {};
     const reactionsReceivedCounts: Record<number, number> = {};
 
-    const [scannedMessages, scannedReactions] = await __scanBackfillHistoryTargetForTests(
-      target,
-      1000,
-      messageCounts,
-      reactionsSentCounts,
-      reactionsReceivedCounts,
-    );
+    const [scannedMessages, scannedReactions] =
+      await __scanBackfillHistoryTargetForTests(
+        target,
+        1000,
+        messageCounts,
+        reactionsSentCounts,
+        reactionsReceivedCounts,
+      );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(scannedMessages).toBe(2);
@@ -161,7 +157,10 @@ describe("backfill merge regression", () => {
       bad: 11,
     } as unknown as Record<number, number>;
 
-    const [usersSeen, updated] = storage.mergeUserMetricBackfill(scannedCounts, "messages_sent");
+    const [usersSeen, updated] = storage.mergeUserMetricBackfill(
+      scannedCounts,
+      "messages_sent",
+    );
 
     expect(usersSeen).toBe(2);
     expect(updated).toBe(1);

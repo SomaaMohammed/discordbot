@@ -69,9 +69,15 @@ describe("parity helpers", () => {
   });
 
   it("extracts role panel ids from single and multi footer", () => {
-    expect(extractRolePanelRoleId(["RolePanelTarget:123456789"])).toBe(123456789);
-    expect(extractRolePanelRoleIdForSlot(["RolePanelTargets:1=111,2=222,3=333"], 2)).toBe(222);
-    expect(extractRolePanelRoleIdForSlot(["RolePanelTargets:1=111,2=222,3=333"], 4)).toBeNull();
+    expect(extractRolePanelRoleId(["RolePanelTarget:123456789"])).toBe(
+      123456789,
+    );
+    expect(
+      extractRolePanelRoleIdForSlot(["RolePanelTargets:1=111,2=222,3=333"], 2),
+    ).toBe(222);
+    expect(
+      extractRolePanelRoleIdForSlot(["RolePanelTargets:1=111,2=222,3=333"], 4),
+    ).toBeNull();
   });
 
   it("parses role panel button slot", () => {
@@ -86,9 +92,13 @@ describe("parity helpers", () => {
     const customId = buildRolePanelButtonCustomId("123456789");
 
     expect(customId).toBe("court:role_panel_claim:role:123456789");
-    expect(buildRolePanelButtonCustomId("bad-role-id")).toBe("court:role_panel_claim");
+    expect(buildRolePanelButtonCustomId("bad-role-id")).toBe(
+      "court:role_panel_claim",
+    );
     expect(extractRolePanelRoleIdFromCustomId(customId)).toBe("123456789");
-    expect(extractRolePanelRoleIdFromCustomId("court:role_panel_claim:2")).toBeNull();
+    expect(
+      extractRolePanelRoleIdFromCustomId("court:role_panel_claim:2"),
+    ).toBeNull();
   });
 
   it("formats fate reading bands", () => {
@@ -217,11 +227,16 @@ describe("parity helpers", () => {
     expect(isSilenceLockTrigger("order in the court.")).toBe(true);
     expect(hasEmperorMention("where is sammy")).toBe(true);
     expect(hasEmpressMention("Her Majesty will arrive shortly")).toBe(true);
-    expect(parseRoyalMentions("The Emperor and Empress have entered")).toEqual(["Emperor", "Empress"]);
+    expect(parseRoyalMentions("The Emperor and Empress have entered")).toEqual([
+      "Emperor",
+      "Empress",
+    ]);
   });
 
   it("parses reply mute trigger", () => {
-    expect(parseReplyMuteMessage("invictus mute @user being loud")).toBe("@user being loud");
+    expect(parseReplyMuteMessage("invictus mute @user being loud")).toBe(
+      "@user being loud",
+    );
     expect(parseReplyMuteMessage("hello there")).toBeNull();
   });
 
@@ -238,7 +253,11 @@ describe("parity helpers", () => {
       },
     });
 
-    const response = getRoyalAfkResponse("Where is the emperor?", afkShape, now);
+    const response = getRoyalAfkResponse(
+      "Where is the emperor?",
+      afkShape,
+      now,
+    );
     expect(response).toContain("The Emperor is currently AFK");
     expect(response).toContain("At war council");
 

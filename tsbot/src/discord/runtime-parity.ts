@@ -37,7 +37,7 @@ import {
 import { logError } from "../logging.js";
 import { getWeekKey, isoNow } from "../time.js";
 import type { BotRuntime } from "../runtime.js";
-import type { PostRecord, RoyalTitle } from "../types.js";
+import type { CourtState, PostRecord, RoyalTitle } from "../types.js";
 
 const ANON_ANSWER_BUTTON_ID = "court:anonymous_answer";
 const SILENT_LOCK_SECONDS = 10;
@@ -61,7 +61,10 @@ export function wireRuntimeParity(client: Client, runtime: BotRuntime): void {
   });
 }
 
-async function handleMessageCreate(message: Message, runtime: BotRuntime): Promise<void> {
+async function handleMessageCreate(
+  message: Message,
+  runtime: BotRuntime,
+): Promise<void> {
   if (message.author.bot || !message.guild) {
     return;
   }
@@ -71,7 +74,9 @@ async function handleMessageCreate(message: Message, runtime: BotRuntime): Promi
     return;
   }
 
-  runtime.storage.metricsIncrement(runtime.storage.buildUserMetricKey(member.id, "messages_sent"));
+  runtime.storage.metricsIncrement(
+    runtime.storage.buildUserMetricKey(member.id, "messages_sent"),
+  );
 
   const clearedTitles = clearMemberRoyalAfk(member, runtime);
   if (clearedTitles.length > 0) {
@@ -84,23 +89,36 @@ async function handleMessageCreate(message: Message, runtime: BotRuntime): Promi
     );
   }
 
-  const inRoyalAlertChannel = isRoyalAlertChannel(String(message.channel.id), runtime);
+  const inRoyalAlertChannel = isRoyalAlertChannel(
+    String(message.channel.id),
+    runtime,
+  );
   if (inRoyalAlertChannel) {
     await handleRoyalPresenceAnnouncement(message, member, runtime);
   }
 
-  if (isSilenceLockTrigger(message.content) || isEmperorLockTrigger(message.content)) {
+  if (
+    isSilenceLockTrigger(message.content) ||
+    isEmperorLockTrigger(message.content)
+  ) {
     if (!getMemberRoyalTitles(member, runtime).includes("Emperor")) {
       return;
     }
 
     if (message.channel instanceof TextChannel) {
-      await lockChannelSilently(message.channel, member, runtime, SILENT_LOCK_SECONDS);
+      await lockChannelSilently(
+        message.channel,
+        member,
+        runtime,
+        SILENT_LOCK_SECONDS,
+      );
     }
     return;
   }
 
-  if (await maybeSendRoyalMentionResponse(message, runtime, inRoyalAlertChannel)) {
+  if (
+    await maybeSendRoyalMentionResponse(message, runtime, inRoyalAlertChannel)
+  ) {
     return;
   }
 
@@ -125,19 +143,25 @@ async function handleReactionAdd(
     return;
   }
 
-  const message = reaction.message.partial ? await reaction.message.fetch().catch(() => null) : reaction.message;
+  const message = reaction.message.partial
+    ? await reaction.message.fetch().catch(() => null)
+    : reaction.message;
   if (!message?.guild) {
     return;
   }
 
-  runtime.storage.metricsIncrement(runtime.storage.buildUserMetricKey(user.id, "reactions_sent"));
+  runtime.storage.metricsIncrement(
+    runtime.storage.buildUserMetricKey(user.id, "reactions_sent"),
+  );
 
   const author = message.author;
   if (!author || author.bot) {
     return;
   }
 
-  runtime.storage.metricsIncrement(runtime.storage.buildUserMetricKey(author.id, "reactions_received"));
+  runtime.storage.metricsIncrement(
+    runtime.storage.buildUserMetricKey(author.id, "reactions_received"),
+  );
 }
 
 function startBackgroundLoops(client: Client, runtime: BotRuntime): void {
@@ -155,32 +179,37 @@ function startBackgroundLoops(client: Client, runtime: BotRuntime): void {
   run("weekly_digest", () => runWeeklyDigest(client, runtime));
   run("retention_cleaner", () => runRetentionCleaner(client, runtime));
 
-  setInterval(() => run("auto_poster", () => runAutoPoster(client, runtime)), 60_000);
-  setInterval(() => run("thread_closer", () => runThreadCloser(client, runtime)), 10 * 60_000);
-  setInterval(() => run("weekly_digest", () => runWeeklyDigest(client, runtime)), 30 * 60_000);
-  setInterval(() => run("retention_cleaner", () => runRetentionCleaner(client, runtime)), 24 * 60 * 60_000);
+  setInterval(
+    () => run("auto_poster", () => runAutoPoster(client, runtime)),
+    60_000,
+  );
+  setInterval(
+    () => run("thread_closer", () => runThreadCloser(client, runtime)),
+    10 * 60_000,
+  );
+  setInterval(
+    () => run("weekly_digest", () => runWeeklyDigest(client, runtime)),
+    30 * 60_000,
+  );
+  setInterval(
+    () => run("retention_cleaner", () => runRetentionCleaner(client, runtime)),
+    24 * 60 * 60_000,
+  );
 }
 
-async function runAutoPoster(client: Client, runtime: BotRuntime): Promise<void> {
+async function runAutoPoster(
+  client: Client,
+  runtime: BotRuntime,
+): Promise<void> {
   const state = runtime.storage.getState();
-  if (state.mode !== "auto") {
-    return;
-  }
-
   const now = runtime.now();
+  const metrics = runtime.storage.metricsSnapshot();
+
+  if (!shouldRunAutoPosterNow(state, now, metrics.last_successful_auto_post)) {
+    return;
+  }
+
   const today = now.toFormat("yyyy-LL-dd");
-
-  if (state.last_posted_date === today) {
-    return;
-  }
-
-  if (state.dry_run_auto_post && state.last_dry_run_date === today) {
-    return;
-  }
-
-  if (now.hour !== state.hour || now.minute !== state.minute) {
-    return;
-  }
 
   const guild = await resolveConfiguredGuild(client, runtime);
   if (!guild) {
@@ -194,7 +223,11 @@ async function runAutoPoster(client: Client, runtime: BotRuntime): Promise<void>
 
   try {
     if (state.dry_run_auto_post) {
-      const [chosenCategory, question] = runtime.storage.pickQuestion(null, true, runtime.randomInt);
+      const [chosenCategory, question] = runtime.storage.pickQuestion(
+        null,
+        true,
+        runtime.randomInt,
+      );
       runtime.storage.updateStateAtomic((mutable) => {
         mutable.last_dry_run_date = today;
       });
@@ -209,12 +242,16 @@ async function runAutoPoster(client: Client, runtime: BotRuntime): Promise<void>
       return;
     }
 
-    const [chosenCategory, question] = await postQuestionFromLoop(channel, runtime, {
-      category: null,
-      randomize: true,
-      source: "auto",
-      mentionEveryone: true,
-    });
+    const [chosenCategory, question] = await postQuestionFromLoop(
+      channel,
+      runtime,
+      {
+        category: null,
+        randomize: true,
+        source: "auto",
+        mentionEveryone: true,
+      },
+    );
 
     await sendRuntimeLog(
       guild,
@@ -224,11 +261,73 @@ async function runAutoPoster(client: Client, runtime: BotRuntime): Promise<void>
       channel.id,
     );
   } catch (error) {
-    await sendFailureAlert(guild, runtime, "Court Auto-Post Failed", asError(error), "auto_poster loop", channel.id);
+    await sendFailureAlert(
+      guild,
+      runtime,
+      "Court Auto-Post Failed",
+      asError(error),
+      "auto_poster loop",
+      channel.id,
+    );
   }
 }
 
-async function runThreadCloser(client: Client, runtime: BotRuntime): Promise<void> {
+type AutoPosterState = Pick<
+  CourtState,
+  "mode" | "hour" | "minute" | "dry_run_auto_post" | "last_dry_run_date"
+>;
+
+export function shouldRunAutoPosterNow(
+  state: AutoPosterState,
+  now: DateTime,
+  lastSuccessfulAutoPostIso: string | null,
+): boolean {
+  if (state.mode !== "auto") {
+    return false;
+  }
+
+  const today = now.toFormat("yyyy-LL-dd");
+  if (state.dry_run_auto_post && state.last_dry_run_date === today) {
+    return false;
+  }
+
+  const scheduledAt = now.set({
+    hour: state.hour,
+    minute: state.minute,
+    second: 0,
+    millisecond: 0,
+  });
+  if (now < scheduledAt) {
+    return false;
+  }
+
+  const runtimeZone = now.zoneName ?? "local";
+  const lastAutoPostDate = getIsoDateInZone(
+    lastSuccessfulAutoPostIso,
+    runtimeZone,
+  );
+  return lastAutoPostDate !== today;
+}
+
+function getIsoDateInZone(value: string | null, zone: string): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = DateTime.fromISO(value, { setZone: true });
+  if (!parsed.isValid) {
+    return null;
+  }
+
+  const zoned = parsed.setZone(zone);
+  const effective = zoned.isValid ? zoned : parsed;
+  return effective.toFormat("yyyy-LL-dd");
+}
+
+async function runThreadCloser(
+  client: Client,
+  runtime: BotRuntime,
+): Promise<void> {
   const guild = await resolveConfiguredGuild(client, runtime);
   if (!guild) {
     return;
@@ -246,7 +345,12 @@ async function runThreadCloser(client: Client, runtime: BotRuntime): Promise<voi
     }
 
     try {
-      const closed = await closeCourtPostFromLoop(record, runtime, client, "expired");
+      const closed = await closeCourtPostFromLoop(
+        record,
+        runtime,
+        client,
+        "expired",
+      );
       if (closed) {
         await sendRuntimeLog(
           guild,
@@ -257,12 +361,22 @@ async function runThreadCloser(client: Client, runtime: BotRuntime): Promise<voi
         );
       }
     } catch (error) {
-      await sendFailureAlert(guild, runtime, "Court Thread Auto-Close Failed", asError(error), "thread_closer loop", record.channel_id);
+      await sendFailureAlert(
+        guild,
+        runtime,
+        "Court Thread Auto-Close Failed",
+        asError(error),
+        "thread_closer loop",
+        record.channel_id,
+      );
     }
   }
 }
 
-async function runWeeklyDigest(client: Client, runtime: BotRuntime): Promise<void> {
+async function runWeeklyDigest(
+  client: Client,
+  runtime: BotRuntime,
+): Promise<void> {
   const guild = await resolveConfiguredGuild(client, runtime);
   if (!guild) {
     return;
@@ -270,7 +384,10 @@ async function runWeeklyDigest(client: Client, runtime: BotRuntime): Promise<voi
 
   const now = runtime.now();
   const weekday = now.weekday - 1;
-  if (weekday !== runtime.config.weeklyDigestWeekday || now.hour !== runtime.config.weeklyDigestHour) {
+  if (
+    weekday !== runtime.config.weeklyDigestWeekday ||
+    now.hour !== runtime.config.weeklyDigestHour
+  ) {
     return;
   }
 
@@ -291,13 +408,25 @@ async function runWeeklyDigest(client: Client, runtime: BotRuntime): Promise<voi
       mutable.last_weekly_digest_week = weekKey;
     });
   } catch (error) {
-    await sendFailureAlert(guild, runtime, "Weekly Digest Failed", asError(error), "weekly_digest loop", channel.id);
+    await sendFailureAlert(
+      guild,
+      runtime,
+      "Weekly Digest Failed",
+      asError(error),
+      "weekly_digest loop",
+      channel.id,
+    );
   }
 }
 
-async function runRetentionCleaner(client: Client, runtime: BotRuntime): Promise<void> {
+async function runRetentionCleaner(
+  client: Client,
+  runtime: BotRuntime,
+): Promise<void> {
   const guild = await resolveConfiguredGuild(client, runtime);
-  const removed = runtime.storage.purgeExpiredAnswers(runtime.config.answerRetentionDays);
+  const removed = runtime.storage.purgeExpiredAnswers(
+    runtime.config.answerRetentionDays,
+  );
 
   if (!guild || removed <= 0) {
     return;
@@ -317,16 +446,27 @@ function buildWeeklyDigestEmbed(runtime: BotRuntime): EmbedBuilder {
   const posts = runtime.storage.listPostRecords(true, POST_RECORD_LIMIT);
   const answersTotal = runtime.storage.countAllAnswerRecords();
   const openPosts = posts.filter((post) => !post.closed);
-  const unansweredOpen = openPosts.filter((post) => runtime.storage.countAnswersForQuestion(post.message_id) === 0);
+  const unansweredOpen = openPosts.filter(
+    (post) => runtime.storage.countAnswersForQuestion(post.message_id) === 0,
+  );
   const postCount = Math.max(posts.length, 1);
 
   const topCategories = Object.entries(metrics.posts_by_category)
     .sort((left, right) => right[1] - left[1])
     .slice(0, 3);
-  const topCategoryText = topCategories.map(([category, count]) => `- \`${category}\`: \`${count}\``).join("\n") || "No data yet.";
+  const topCategoryText =
+    topCategories
+      .map(([category, count]) => `- \`${category}\`: \`${count}\``)
+      .join("\n") || "No data yet.";
 
-  const usageTotal = Object.values(metrics.command_usage).reduce((sum, value) => sum + value, 0);
-  const failureTotal = Object.values(metrics.command_failures).reduce((sum, value) => sum + value, 0);
+  const usageTotal = Object.values(metrics.command_usage).reduce(
+    (sum, value) => sum + value,
+    0,
+  );
+  const failureTotal = Object.values(metrics.command_failures).reduce(
+    (sum, value) => sum + value,
+    0,
+  );
   const failureRate = usageTotal > 0 ? (failureTotal / usageTotal) * 100 : 0;
 
   return new EmbedBuilder()
@@ -338,11 +478,11 @@ function buildWeeklyDigestEmbed(runtime: BotRuntime): EmbedBuilder {
       {
         name: "Posts & Answers",
         value:
-          `**Posts (recent window):** \`${posts.length}\`\n`
-          + `**Open Inquiries:** \`${openPosts.length}\`\n`
-          + `**Unanswered Open:** \`${unansweredOpen.length}\`\n`
-          + `**Answer Records:** \`${answersTotal}\`\n`
-          + `**Avg Answers/Post:** \`${(answersTotal / postCount).toFixed(2)}\``,
+          `**Posts (recent window):** \`${posts.length}\`\n` +
+          `**Open Inquiries:** \`${openPosts.length}\`\n` +
+          `**Unanswered Open:** \`${unansweredOpen.length}\`\n` +
+          `**Answer Records:** \`${answersTotal}\`\n` +
+          `**Avg Answers/Post:** \`${(answersTotal / postCount).toFixed(2)}\``,
         inline: false,
       },
       {
@@ -353,9 +493,9 @@ function buildWeeklyDigestEmbed(runtime: BotRuntime): EmbedBuilder {
       {
         name: "Command Reliability",
         value:
-          `**Command Invocations:** \`${usageTotal}\`\n`
-          + `**Command Failures:** \`${failureTotal}\`\n`
-          + `**Failure Rate:** \`${failureRate.toFixed(2)}%\``,
+          `**Command Invocations:** \`${usageTotal}\`\n` +
+          `**Command Failures:** \`${failureTotal}\`\n` +
+          `**Failure Rate:** \`${failureRate.toFixed(2)}%\``,
         inline: false,
       },
     );
@@ -371,12 +511,18 @@ async function postQuestionFromLoop(
     mentionEveryone: boolean;
   },
 ): Promise<[string, string]> {
-  const [chosenCategory, question] = runtime.storage.pickQuestion(options.category, options.randomize, runtime.randomInt);
+  const [chosenCategory, question] = runtime.storage.pickQuestion(
+    options.category,
+    options.randomize,
+    runtime.randomInt,
+  );
   const embed = buildCourtEmbed(chosenCategory, question, runtime);
   const mentionPayload = buildAnnouncementMentions(options.mentionEveryone);
 
   const sent = await channel.send({
-    ...(mentionPayload.content === null ? {} : { content: mentionPayload.content }),
+    ...(mentionPayload.content === null
+      ? {}
+      : { content: mentionPayload.content }),
     embeds: [embed],
     components: buildAnonymousAnswerComponents(),
     allowedMentions: mentionPayload.allowedMentions,
@@ -422,17 +568,25 @@ async function closeCourtPostFromLoop(
 
   const message = await getPostMessage(client, record);
   if (message) {
-    await message.edit({ components: buildClosedAnswerComponents() }).catch(() => null);
+    await message
+      .edit({ components: buildClosedAnswerComponents() })
+      .catch(() => null);
   }
 
   runtime.storage.markPostClosed(record.message_id, reason);
   return true;
 }
 
-function buildCourtEmbed(category: string, question: string, runtime: BotRuntime): EmbedBuilder {
+function buildCourtEmbed(
+  category: string,
+  question: string,
+  runtime: BotRuntime,
+): EmbedBuilder {
   return new EmbedBuilder()
     .setTitle("Imperial Court Inquiry")
-    .setDescription(`*The throne demands an answer.*\n\n**Question:** ${question}`)
+    .setDescription(
+      `*The throne demands an answer.*\n\n**Question:** ${question}`,
+    )
     .setColor(ROLE_COLOR)
     .setTimestamp(runtime.now().toJSDate())
     .setFooter({ text: `Category: ${category}` });
@@ -441,7 +595,10 @@ function buildCourtEmbed(category: string, question: string, runtime: BotRuntime
 function buildAnonymousAnswerComponents(): ActionRowBuilder<ButtonBuilder>[] {
   return [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(ANON_ANSWER_BUTTON_ID).setLabel("Answer Anonymously").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(ANON_ANSWER_BUTTON_ID)
+        .setLabel("Answer Anonymously")
+        .setStyle(ButtonStyle.Secondary),
     ),
   ];
 }
@@ -469,7 +626,11 @@ function makeThreadName(question: string): string {
   return name.slice(0, 100);
 }
 
-async function getOrCreateAnswerThread(message: Message, question: string, runtime: BotRuntime): Promise<AnyThreadChannel | null> {
+async function getOrCreateAnswerThread(
+  message: Message,
+  question: string,
+  runtime: BotRuntime,
+): Promise<AnyThreadChannel | null> {
   if (!message.guild) {
     return null;
   }
@@ -482,7 +643,10 @@ async function getOrCreateAnswerThread(message: Message, question: string, runti
 
   const existingRecord = runtime.storage.getPostRecord(message.id);
   if (existingRecord?.thread_id) {
-    const fetched = await fetchChannelById(message.client, existingRecord.thread_id);
+    const fetched = await fetchChannelById(
+      message.client,
+      existingRecord.thread_id,
+    );
     if (fetched?.isThread()) {
       runtime.storage.updatePostThreadId(message.id, fetched.id);
       return fetched;
@@ -500,7 +664,9 @@ async function getOrCreateAnswerThread(message: Message, question: string, runti
       name: makeThreadName(question),
       autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
     })
-    .catch(async () => message.startThread({ name: makeThreadName(question) }).catch(() => null));
+    .catch(async () =>
+      message.startThread({ name: makeThreadName(question) }).catch(() => null),
+    );
 
   if (!thread) {
     return null;
@@ -509,11 +675,11 @@ async function getOrCreateAnswerThread(message: Message, question: string, runti
   runtime.storage.updatePostThreadId(message.id, thread.id);
   await thread
     .send(
-      "**Anonymous Court Replies**\n"
-        + "- One anonymous answer per person\n"
-        + "- Stay on topic\n"
-        + "- Anonymous does not mean consequence-free\n"
-        + `- This thread will close automatically after ${THREAD_CLOSE_HOURS} hours`,
+      "**Anonymous Court Replies**\n" +
+        "- One anonymous answer per person\n" +
+        "- Stay on topic\n" +
+        "- Anonymous does not mean consequence-free\n" +
+        `- This thread will close automatically after ${THREAD_CLOSE_HOURS} hours`,
     )
     .catch(() => null);
 
@@ -521,23 +687,38 @@ async function getOrCreateAnswerThread(message: Message, question: string, runti
 }
 
 function isAdmin(member: GuildMember): boolean {
-  return member.permissions.has(PermissionFlagsBits.Administrator) || member.guild.ownerId === member.id;
+  return (
+    member.permissions.has(PermissionFlagsBits.Administrator) ||
+    member.guild.ownerId === member.id
+  );
 }
 
-function getMemberRoyalTitles(member: GuildMember, runtime: BotRuntime): RoyalTitle[] {
+function getMemberRoyalTitles(
+  member: GuildMember,
+  runtime: BotRuntime,
+): RoyalTitle[] {
   const titles: RoyalTitle[] = [];
 
-  if (runtime.config.emperorRoleIdText && member.roles.cache.has(runtime.config.emperorRoleIdText)) {
+  if (
+    runtime.config.emperorRoleIdText &&
+    member.roles.cache.has(runtime.config.emperorRoleIdText)
+  ) {
     titles.push("Emperor");
   }
-  if (runtime.config.empressRoleIdText && member.roles.cache.has(runtime.config.empressRoleIdText)) {
+  if (
+    runtime.config.empressRoleIdText &&
+    member.roles.cache.has(runtime.config.empressRoleIdText)
+  ) {
     titles.push("Empress");
   }
 
   return titles;
 }
 
-function clearMemberRoyalAfk(member: GuildMember, runtime: BotRuntime): RoyalTitle[] {
+function clearMemberRoyalAfk(
+  member: GuildMember,
+  runtime: BotRuntime,
+): RoyalTitle[] {
   const titles = getMemberRoyalTitles(member, runtime);
   if (titles.length === 0) {
     return [];
@@ -571,7 +752,11 @@ function isRoyalAlertChannel(channelId: string, runtime: BotRuntime): boolean {
   return channelId === runtime.config.royalAlertChannelIdText;
 }
 
-async function handleRoyalPresenceAnnouncement(message: Message, member: GuildMember, runtime: BotRuntime): Promise<void> {
+async function handleRoyalPresenceAnnouncement(
+  message: Message,
+  member: GuildMember,
+  runtime: BotRuntime,
+): Promise<void> {
   const title = getMemberRoyalTitles(member, runtime)[0] ?? null;
   if (!title) {
     return;
@@ -582,7 +767,10 @@ async function handleRoyalPresenceAnnouncement(message: Message, member: GuildMe
   runtime.storage.updateStateAtomic((state) => {
     const previousIso = state.royal_presence.last_message_at_by_title[title];
     const previous = previousIso ? DateTime.fromISO(previousIso) : null;
-    shouldAnnounce = shouldAnnounceRoyalPresence(previous?.isValid ? previous : null, createdAt);
+    shouldAnnounce = shouldAnnounceRoyalPresence(
+      previous?.isValid ? previous : null,
+      createdAt,
+    );
 
     const nowIso = createdAt.toISO();
     state.royal_presence.last_message_at_by_title[title] = nowIso;
@@ -619,13 +807,20 @@ async function maybeSendRoyalMentionResponse(
   }
 
   const state = runtime.storage.getState();
-  const response = getRoyalAfkResponse(message.content, state.royal_afk, runtime.now(), mentionedTitles);
+  const response = getRoyalAfkResponse(
+    message.content,
+    state.royal_afk,
+    runtime.now(),
+    mentionedTitles,
+  );
   if (!response) {
     return false;
   }
 
   if (isSendableChannel(message.channel)) {
-    await message.channel.send({ content: response, allowedMentions: { parse: [] } }).catch(() => null);
+    await message.channel
+      .send({ content: response, allowedMentions: { parse: [] } })
+      .catch(() => null);
   }
 
   return true;
@@ -637,7 +832,9 @@ async function lockChannelSilently(
   runtime: BotRuntime,
   seconds: number,
 ): Promise<void> {
-  const excludedRoleIds = new Set<string>(Array.from(runtime.config.silentLockExcludeRoles).map(String));
+  const excludedRoleIds = new Set<string>(
+    Array.from(runtime.config.silentLockExcludeRoles).map(String),
+  );
   const originalSendFlags = new Map<string, boolean | null>();
   const appliedRoles: Role[] = [];
 
@@ -663,7 +860,11 @@ async function lockChannelSilently(
     originalSendFlags.set(role.id, originalSend);
 
     const applied = await channel.permissionOverwrites
-      .edit(role, { SendMessages: false }, { reason: `Silence by ${actor.user.tag}` })
+      .edit(
+        role,
+        { SendMessages: false },
+        { reason: `Silence by ${actor.user.tag}` },
+      )
       .then(() => true)
       .catch(() => false);
 
@@ -685,7 +886,11 @@ async function lockChannelSilently(
     const sendValue = original ?? null;
 
     await channel.permissionOverwrites
-      .edit(role, { SendMessages: sendValue }, { reason: `Silence expired by ${actor.user.tag}` })
+      .edit(
+        role,
+        { SendMessages: sendValue },
+        { reason: `Silence expired by ${actor.user.tag}` },
+      )
       .catch(() => null);
   }
 }
@@ -701,7 +906,9 @@ async function handleReplyMuteTrigger(
     return;
   }
 
-  const me = message.guild.members.me ?? (await message.guild.members.fetchMe().catch(() => null));
+  const me =
+    message.guild.members.me ??
+    (await message.guild.members.fetchMe().catch(() => null));
   if (!me) {
     return;
   }
@@ -713,9 +920,16 @@ async function handleReplyMuteTrigger(
   }
 
   const timeoutDurationMs = REPLY_MUTE_MINUTES * 60_000;
-  const modReason = buildTimeoutReason("Muted", actor, reasonText || "reply command");
+  const modReason = buildTimeoutReason(
+    "Muted",
+    actor,
+    reasonText || "reply command",
+  );
 
-  const timeoutSuccess = await target.timeout(timeoutDurationMs, modReason).then(() => true).catch(() => false);
+  const timeoutSuccess = await target
+    .timeout(timeoutDurationMs, modReason)
+    .then(() => true)
+    .catch(() => false);
   if (!timeoutSuccess) {
     await sendMuteFailedEmbed(message, target, "discord API error");
     return;
@@ -723,12 +937,18 @@ async function handleReplyMuteTrigger(
 
   const embed = new EmbedBuilder()
     .setTitle("Invictus Mute")
-    .setDescription(`${target.toString()} has been muted for \`${REPLY_MUTE_MINUTES}\` minute(s).`)
+    .setDescription(
+      `${target.toString()} has been muted for \`${REPLY_MUTE_MINUTES}\` minute(s).`,
+    )
     .setColor(ROLE_COLOR)
     .setTimestamp(runtime.now().toJSDate())
     .addFields(
       { name: "By", value: actor.toString(), inline: true },
-      { name: "Reason", value: reasonText || "No reason provided.", inline: true },
+      {
+        name: "Reason",
+        value: reasonText || "No reason provided.",
+        inline: true,
+      },
     );
 
   if (isSendableChannel(message.channel)) {
@@ -744,14 +964,20 @@ async function handleReplyMuteTrigger(
   );
 }
 
-async function sendMuteFailedEmbed(message: Message, target: GuildMember, reason: string): Promise<void> {
+async function sendMuteFailedEmbed(
+  message: Message,
+  target: GuildMember,
+  reason: string,
+): Promise<void> {
   const embed = new EmbedBuilder()
     .setTitle("Mute Failed")
     .setDescription(`Could not mute ${target.toString()}: ${reason}.`)
     .setColor(ROLE_COLOR)
     .setTimestamp(new Date());
 
-  await message.reply({ embeds: [embed], allowedMentions: { repliedUser: false } }).catch(() => null);
+  await message
+    .reply({ embeds: [embed], allowedMentions: { repliedUser: false } })
+    .catch(() => null);
 }
 
 async function getRepliedMember(message: Message): Promise<GuildMember | null> {
@@ -760,11 +986,13 @@ async function getRepliedMember(message: Message): Promise<GuildMember | null> {
     return null;
   }
 
-  const targetMessage = await message.fetchReference().catch(async () =>
-    message.channel.isTextBased()
-      ? message.channel.messages.fetch(referenceId).catch(() => null)
-      : null,
-  );
+  const targetMessage = await message
+    .fetchReference()
+    .catch(async () =>
+      message.channel.isTextBased()
+        ? message.channel.messages.fetch(referenceId).catch(() => null)
+        : null,
+    );
 
   if (!targetMessage?.author) {
     return null;
@@ -773,7 +1001,11 @@ async function getRepliedMember(message: Message): Promise<GuildMember | null> {
   return message.guild.members.fetch(targetMessage.author.id).catch(() => null);
 }
 
-function canTimeoutTarget(actor: GuildMember, me: GuildMember, target: GuildMember): [boolean, string] {
+function canTimeoutTarget(
+  actor: GuildMember,
+  me: GuildMember,
+  target: GuildMember,
+): [boolean, string] {
   if (target.user.bot) {
     return [false, "target is a bot"];
   }
@@ -791,14 +1023,21 @@ function canTimeoutTarget(actor: GuildMember, me: GuildMember, target: GuildMemb
   }
 
   const actorIsOwner = actor.id === actor.guild.ownerId;
-  if (!actorIsOwner && actor.roles.highest.comparePositionTo(target.roles.highest) <= 0) {
+  if (
+    !actorIsOwner &&
+    actor.roles.highest.comparePositionTo(target.roles.highest) <= 0
+  ) {
     return [false, "your role is not high enough"];
   }
 
   return [true, ""];
 }
 
-function buildTimeoutReason(action: string, user: GuildMember, reason: string | null): string {
+function buildTimeoutReason(
+  action: string,
+  user: GuildMember,
+  reason: string | null,
+): string {
   const base = `${action} by ${user.user.tag} via /admin`;
   if (!reason) {
     return base;
@@ -807,7 +1046,9 @@ function buildTimeoutReason(action: string, user: GuildMember, reason: string | 
   return `${base} | ${reason}`;
 }
 
-async function resolveMessageMember(message: Message): Promise<GuildMember | null> {
+async function resolveMessageMember(
+  message: Message,
+): Promise<GuildMember | null> {
   if (!message.guild) {
     return null;
   }
@@ -819,11 +1060,17 @@ async function resolveMessageMember(message: Message): Promise<GuildMember | nul
   return message.guild.members.fetch(message.author.id).catch(() => null);
 }
 
-async function resolveConfiguredGuild(client: Client, runtime: BotRuntime): Promise<Guild | null> {
+async function resolveConfiguredGuild(
+  client: Client,
+  runtime: BotRuntime,
+): Promise<Guild | null> {
   return client.guilds.fetch(runtime.config.testGuildIdText).catch(() => null);
 }
 
-async function resolveTargetChannel(guild: Guild, runtime: BotRuntime): Promise<TextChannel | null> {
+async function resolveTargetChannel(
+  guild: Guild,
+  runtime: BotRuntime,
+): Promise<TextChannel | null> {
   const state = runtime.storage.getState();
   const candidates = [
     runtime.config.courtChannelIdText,
@@ -845,9 +1092,15 @@ async function resolveTargetChannel(guild: Guild, runtime: BotRuntime): Promise<
   return null;
 }
 
-async function resolveWeeklyDigestChannel(guild: Guild, runtime: BotRuntime): Promise<TextChannel | null> {
+async function resolveWeeklyDigestChannel(
+  guild: Guild,
+  runtime: BotRuntime,
+): Promise<TextChannel | null> {
   if (runtime.config.weeklyDigestChannelIdText) {
-    const channel = await getOrFetchTextChannel(guild, runtime.config.weeklyDigestChannelIdText);
+    const channel = await getOrFetchTextChannel(
+      guild,
+      runtime.config.weeklyDigestChannelIdText,
+    );
     if (channel) {
       return channel;
     }
@@ -864,7 +1117,11 @@ async function sendRuntimeLog(
   description: string,
   fallbackChannelId?: string,
 ): Promise<boolean> {
-  const destination = await resolveLogDestination(guild, runtime, fallbackChannelId);
+  const destination = await resolveLogDestination(
+    guild,
+    runtime,
+    fallbackChannelId,
+  );
   if (!destination) {
     return false;
   }
@@ -875,7 +1132,10 @@ async function sendRuntimeLog(
     .setColor(ROLE_COLOR)
     .setTimestamp(runtime.now().toJSDate());
 
-  const sent = await destination.send({ embeds: [embed] }).then(() => true).catch(() => false);
+  const sent = await destination
+    .send({ embeds: [embed] })
+    .then(() => true)
+    .catch(() => false);
   return sent;
 }
 
@@ -926,7 +1186,10 @@ async function resolveLogDestination(
   return null;
 }
 
-async function getOrFetchTextChannel(guild: Guild, channelId: string): Promise<TextChannel | null> {
+async function getOrFetchTextChannel(
+  guild: Guild,
+  channelId: string,
+): Promise<TextChannel | null> {
   const cached = guild.channels.cache.get(channelId);
   if (cached instanceof TextChannel) {
     return cached;
@@ -936,7 +1199,10 @@ async function getOrFetchTextChannel(guild: Guild, channelId: string): Promise<T
   return fetched instanceof TextChannel ? fetched : null;
 }
 
-async function fetchChannelById(client: Client, channelId: string): Promise<Channel | null> {
+async function fetchChannelById(
+  client: Client,
+  channelId: string,
+): Promise<Channel | null> {
   if (!/^\d+$/.test(channelId)) {
     return null;
   }
@@ -949,7 +1215,10 @@ async function fetchChannelById(client: Client, channelId: string): Promise<Chan
   return client.channels.fetch(channelId).catch(() => null);
 }
 
-async function fetchThreadById(client: Client, threadId: string | null | undefined): Promise<AnyThreadChannel | null> {
+async function fetchThreadById(
+  client: Client,
+  threadId: string | null | undefined,
+): Promise<AnyThreadChannel | null> {
   if (!threadId) {
     return null;
   }
@@ -958,7 +1227,10 @@ async function fetchThreadById(client: Client, threadId: string | null | undefin
   return fetched?.isThread() ? fetched : null;
 }
 
-async function getPostMessage(client: Client, record: PostRecord): Promise<Message | null> {
+async function getPostMessage(
+  client: Client,
+  record: PostRecord,
+): Promise<Message | null> {
   const channel = await fetchChannelById(client, record.channel_id);
   if (!channel?.isTextBased()) {
     return null;
@@ -976,7 +1248,11 @@ function asError(error: unknown): Error {
     return new Error(error);
   }
 
-  if (typeof error === "number" || typeof error === "boolean" || typeof error === "bigint") {
+  if (
+    typeof error === "number" ||
+    typeof error === "boolean" ||
+    typeof error === "bigint"
+  ) {
     return new Error(`${error}`);
   }
 
@@ -991,6 +1267,8 @@ function asError(error: unknown): Error {
   }
 }
 
-function isSendableChannel(channel: unknown): channel is { send: (payload: unknown) => Promise<unknown> } {
+function isSendableChannel(
+  channel: unknown,
+): channel is { send: (payload: unknown) => Promise<unknown> } {
   return typeof (channel as { send?: unknown } | null)?.send === "function";
 }

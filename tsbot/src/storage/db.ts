@@ -17,7 +17,12 @@ import {
   flattenMetricsForStorage,
 } from "../parity.js";
 import { isoNow } from "../time.js";
-import type { CourtState, MetricsShape, PostRecord, RuntimeConfig } from "../types.js";
+import type {
+  CourtState,
+  MetricsShape,
+  PostRecord,
+  RuntimeConfig,
+} from "../types.js";
 import {
   ANON_COOLDOWNS_TABLE_SQL,
   ANSWERS_MESSAGE_ID_INDEX_SQL,
@@ -101,14 +106,24 @@ export class CourtStorage {
       hour: coerceInt(state.hour, defaultState.hour, 0, 23),
       minute: coerceInt(state.minute, defaultState.minute, 0, 59),
       channel_id: coerceInt(state.channel_id, defaultState.channel_id, 1),
-      log_channel_id: coerceInt(state.log_channel_id, defaultState.log_channel_id, 0),
+      log_channel_id: coerceInt(
+        state.log_channel_id,
+        defaultState.log_channel_id,
+        0,
+      ),
       last_posted_date: state.last_posted_date ?? null,
       dry_run_auto_post: Boolean(state.dry_run_auto_post ?? false),
       last_dry_run_date: state.last_dry_run_date ?? null,
       last_weekly_digest_week: state.last_weekly_digest_week ?? null,
-      history: Array.isArray(state.history) ? state.history.filter((item): item is string => typeof item === "string") : [],
+      history: Array.isArray(state.history)
+        ? state.history.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : [],
       used_questions: Array.isArray(state.used_questions)
-        ? state.used_questions.filter((item): item is string => typeof item === "string")
+        ? state.used_questions.filter(
+            (item): item is string => typeof item === "string",
+          )
         : [],
       royal_presence: ensureRoyalPresenceShape(state.royal_presence),
       royal_afk: ensureRoyalAfkShape(state.royal_afk),
@@ -145,7 +160,9 @@ export class CourtStorage {
       this.upsertPostRow(post);
     }
 
-    for (const [metricKey, metricValue] of Object.entries(flattenMetricsForStorage(nextState.metrics))) {
+    for (const [metricKey, metricValue] of Object.entries(
+      flattenMetricsForStorage(nextState.metrics),
+    )) {
       this.metricsSet(metricKey, metricValue);
     }
 
@@ -185,11 +202,15 @@ export class CourtStorage {
     }
 
     const parsed: Record<string, string[]> = {};
-    for (const [category, items] of Object.entries(data as Record<string, unknown>)) {
+    for (const [category, items] of Object.entries(
+      data as Record<string, unknown>,
+    )) {
       if (!Array.isArray(items)) {
         continue;
       }
-      parsed[category] = items.filter((item): item is string => typeof item === "string");
+      parsed[category] = items.filter(
+        (item): item is string => typeof item === "string",
+      );
     }
 
     return { ...fallback, ...parsed };
@@ -221,7 +242,8 @@ export class CourtStorage {
       posts_manual: this.metricsGet("posts_manual", "0"),
       custom_posts: this.metricsGet("custom_posts", "0"),
       answers_total: this.metricsGet("answers_total", "0"),
-      last_successful_auto_post: this.metricsGet("last_successful_auto_post", "") || null,
+      last_successful_auto_post:
+        this.metricsGet("last_successful_auto_post", "") || null,
     });
   }
 
@@ -240,9 +262,9 @@ export class CourtStorage {
   }
 
   public metricsGet(key: string, defaultValue: string): string {
-    const row = this.db.prepare("SELECT metric_value FROM metrics WHERE metric_key = ?").get(key) as
-      | { metric_value: string }
-      | undefined;
+    const row = this.db
+      .prepare("SELECT metric_value FROM metrics WHERE metric_key = ?")
+      .get(key) as { metric_value: string } | undefined;
 
     if (!row) {
       return defaultValue;
@@ -257,7 +279,10 @@ export class CourtStorage {
     return current;
   }
 
-  public buildUserMetricKey(userId: number | string, metricName: string): string {
+  public buildUserMetricKey(
+    userId: number | string,
+    metricName: string,
+  ): string {
     return `${USER_METRIC_PREFIX}${Number.parseInt(String(userId), 10)}.${metricName}`;
   }
 
@@ -273,13 +298,19 @@ export class CourtStorage {
 
     const result: Record<string, number> = {};
     for (const key of keys) {
-      result[key] = coerceInt(this.metricsGet(this.buildUserMetricKey(userId, key), "0"), 0);
+      result[key] = coerceInt(
+        this.metricsGet(this.buildUserMetricKey(userId, key), "0"),
+        0,
+      );
     }
 
     return result;
   }
 
-  public listTopUsersForMetric(metricName: string, limit = 5): Array<[number, number]> {
+  public listTopUsersForMetric(
+    metricName: string,
+    limit = 5,
+  ): Array<[number, number]> {
     const metricSuffix = metricName.trim();
     if (!metricSuffix) {
       return [];
@@ -288,11 +319,15 @@ export class CourtStorage {
     const safeLimit = coerceInt(limit, 5, 1, 25);
     const pattern = `${USER_METRIC_PREFIX}%.${metricSuffix}`;
     const rows = this.db
-      .prepare("SELECT metric_key, metric_value FROM metrics WHERE metric_key LIKE ?")
+      .prepare(
+        "SELECT metric_key, metric_value FROM metrics WHERE metric_key LIKE ?",
+      )
       .all(pattern) as MetricRow[];
 
     const parsed: Array<[number, number]> = [];
-    const metricPattern = new RegExp(String.raw`^${escapeRegex(USER_METRIC_PREFIX)}(\d+)\.${escapeRegex(metricSuffix)}$`);
+    const metricPattern = new RegExp(
+      String.raw`^${escapeRegex(USER_METRIC_PREFIX)}(\d+)\.${escapeRegex(metricSuffix)}$`,
+    );
 
     for (const row of rows) {
       const match = metricPattern.exec(String(row.metric_key));
@@ -319,7 +354,10 @@ export class CourtStorage {
     return parsed.slice(0, safeLimit);
   }
 
-  public mergeUserMetricBackfill(scannedCounts: Record<number, number>, metricName: string): [number, number] {
+  public mergeUserMetricBackfill(
+    scannedCounts: Record<number, number>,
+    metricName: string,
+  ): [number, number] {
     let usersSeen = 0;
     let updated = 0;
 
@@ -343,7 +381,10 @@ export class CourtStorage {
     return [usersSeen, updated];
   }
 
-  public listPostRecords(includeClosed = true, limit: number | null = null): PostRecord[] {
+  public listPostRecords(
+    includeClosed = true,
+    limit: number | null = null,
+  ): PostRecord[] {
     let query = "SELECT * FROM posts";
     const params: unknown[] = [];
 
@@ -371,7 +412,9 @@ export class CourtStorage {
   }
 
   public getPostRecord(messageId: number | string): PostRecord | null {
-    const row = this.db.prepare("SELECT * FROM posts WHERE message_id = ?").get(String(messageId)) as PostRow | undefined;
+    const row = this.db
+      .prepare("SELECT * FROM posts WHERE message_id = ?")
+      .get(String(messageId)) as PostRow | undefined;
     if (!row) {
       return null;
     }
@@ -380,7 +423,9 @@ export class CourtStorage {
 
   public getLatestOpenPost(): PostRecord | null {
     const row = this.db
-      .prepare("SELECT * FROM posts WHERE closed = 0 ORDER BY posted_at DESC LIMIT 1")
+      .prepare(
+        "SELECT * FROM posts WHERE closed = 0 ORDER BY posted_at DESC LIMIT 1",
+      )
       .get() as PostRow | undefined;
     if (!row) {
       return null;
@@ -388,7 +433,10 @@ export class CourtStorage {
     return parsePostRow(row);
   }
 
-  public updatePostThreadId(messageId: number | string, threadId: number | string): void {
+  public updatePostThreadId(
+    messageId: number | string,
+    threadId: number | string,
+  ): void {
     const record = this.getPostRecord(messageId);
     if (!record) {
       return;
@@ -410,7 +458,10 @@ export class CourtStorage {
     this.upsertPostRow(record);
   }
 
-  public markPostOpen(messageId: number | string, closeAfterHours: number | null = null): PostRecord | null {
+  public markPostOpen(
+    messageId: number | string,
+    closeAfterHours: number | null = null,
+  ): PostRecord | null {
     const record = this.getPostRecord(messageId);
     if (!record) {
       return null;
@@ -420,40 +471,60 @@ export class CourtStorage {
     record.closed_at = null;
     record.close_reason = null;
     if (closeAfterHours !== null) {
-      record.close_after_hours = coerceInt(closeAfterHours, THREAD_CLOSE_HOURS, 1);
+      record.close_after_hours = coerceInt(
+        closeAfterHours,
+        THREAD_CLOSE_HOURS,
+        1,
+      );
     }
 
     this.upsertPostRow(record);
     return record;
   }
 
-  public setPostCloseAfterHours(messageId: number | string, closeAfterHours: number): PostRecord | null {
+  public setPostCloseAfterHours(
+    messageId: number | string,
+    closeAfterHours: number,
+  ): PostRecord | null {
     const record = this.getPostRecord(messageId);
     if (!record) {
       return null;
     }
 
-    record.close_after_hours = coerceInt(closeAfterHours, THREAD_CLOSE_HOURS, 1);
+    record.close_after_hours = coerceInt(
+      closeAfterHours,
+      THREAD_CLOSE_HOURS,
+      1,
+    );
     this.upsertPostRow(record);
     return record;
   }
 
   public countAnswersForQuestion(questionMessageId: number | string): number {
     const row = this.db
-      .prepare("SELECT COUNT(*) AS c FROM answers WHERE question_message_id = ?")
+      .prepare(
+        "SELECT COUNT(*) AS c FROM answers WHERE question_message_id = ?",
+      )
       .get(String(questionMessageId)) as CountRow | undefined;
 
     return row?.c ?? 0;
   }
 
   public countAllAnswerRecords(): number {
-    const row = this.db.prepare("SELECT COUNT(*) AS c FROM answers").get() as CountRow | undefined;
+    const row = this.db.prepare("SELECT COUNT(*) AS c FROM answers").get() as
+      | CountRow
+      | undefined;
     return row?.c ?? 0;
   }
 
-  public hasUserAnswered(questionMessageId: number | string, userId: number | string): boolean {
+  public hasUserAnswered(
+    questionMessageId: number | string,
+    userId: number | string,
+  ): boolean {
     const row = this.db
-      .prepare("SELECT COUNT(*) AS c FROM answers WHERE question_message_id = ? AND user_id = ?")
+      .prepare(
+        "SELECT COUNT(*) AS c FROM answers WHERE question_message_id = ? AND user_id = ?",
+      )
       .get(String(questionMessageId), String(userId)) as CountRow | undefined;
 
     return (row?.c ?? 0) > 0;
@@ -480,7 +551,12 @@ export class CourtStorage {
           created_at = excluded.created_at
       `,
       )
-      .run(String(questionMessageId), String(userId), String(answerMessageId), nowIso);
+      .run(
+        String(questionMessageId),
+        String(userId),
+        String(answerMessageId),
+        nowIso,
+      );
 
     this.db
       .prepare(
@@ -493,7 +569,9 @@ export class CourtStorage {
       )
       .run(String(userId), nowIso);
 
-    this.metricsIncrement(this.buildUserMetricKey(userId, "anonymous_answers_sent"));
+    this.metricsIncrement(
+      this.buildUserMetricKey(userId, "anonymous_answers_sent"),
+    );
   }
 
   public getLastAnswerTimeForUser(userId: number | string): string | null {
@@ -534,7 +612,9 @@ export class CourtStorage {
 
   public findAnswerRecord(answerMessageId: string): AnswerRecordRow | null {
     const row = this.db
-      .prepare("SELECT question_message_id, user_id FROM answers WHERE answer_message_id = ?")
+      .prepare(
+        "SELECT question_message_id, user_id FROM answers WHERE answer_message_id = ?",
+      )
       .get(String(answerMessageId)) as AnswerRecordRow | undefined;
 
     if (!row) {
@@ -553,7 +633,9 @@ export class CourtStorage {
       return null;
     }
 
-    this.db.prepare("DELETE FROM answers WHERE answer_message_id = ?").run(String(answerMessageId));
+    this.db
+      .prepare("DELETE FROM answers WHERE answer_message_id = ?")
+      .run(String(answerMessageId));
     return match;
   }
 
@@ -564,13 +646,19 @@ export class CourtStorage {
     }
   }
 
-  public recordPostMetric(category: string, source: "auto" | "manual" | "custom"): void {
+  public recordPostMetric(
+    category: string,
+    source: "auto" | "manual" | "custom",
+  ): void {
     this.metricsIncrement(`posts_by_category.${category}`);
     this.metricsIncrement("posts_total");
 
     if (source === "auto") {
       this.metricsIncrement("posts_auto");
-      this.metricsSet("last_successful_auto_post", isoNow(this.config.timezoneName));
+      this.metricsSet(
+        "last_successful_auto_post",
+        isoNow(this.config.timezoneName),
+      );
       return;
     }
 
@@ -653,9 +741,17 @@ export class CourtStorage {
       thread_id: threadId,
       channel_id: channelId,
       category: String(record.category ?? "unknown").trim() || "unknown",
-      question: String(record.question ?? "Unknown question").trim() || "Unknown question",
-      posted_at: String(record.posted_at ?? isoNow(this.config.timezoneName)).trim() || isoNow(this.config.timezoneName),
-      close_after_hours: coerceInt(record.close_after_hours, THREAD_CLOSE_HOURS, 1),
+      question:
+        String(record.question ?? "Unknown question").trim() ||
+        "Unknown question",
+      posted_at:
+        String(record.posted_at ?? isoNow(this.config.timezoneName)).trim() ||
+        isoNow(this.config.timezoneName),
+      close_after_hours: coerceInt(
+        record.close_after_hours,
+        THREAD_CLOSE_HOURS,
+        1,
+      ),
       closed: record.closed ? 1 : 0,
       closed_at: record.closed_at ? String(record.closed_at) : null,
       close_reason: record.close_reason ? String(record.close_reason) : null,
@@ -686,7 +782,9 @@ export class CourtStorage {
 
   private metricsGetPrefixed(prefix: string): Record<string, number> {
     const rows = this.db
-      .prepare("SELECT metric_key, metric_value FROM metrics WHERE metric_key LIKE ?")
+      .prepare(
+        "SELECT metric_key, metric_value FROM metrics WHERE metric_key LIKE ?",
+      )
       .all(`${prefix}%`) as MetricRow[];
 
     const result: Record<string, number> = {};
@@ -701,12 +799,16 @@ export class CourtStorage {
   }
 
   private dbHasKey(key: string): boolean {
-    const row = this.db.prepare("SELECT 1 AS one FROM kv WHERE key = ?").get(key) as { one: number } | undefined;
+    const row = this.db
+      .prepare("SELECT 1 AS one FROM kv WHERE key = ?")
+      .get(key) as { one: number } | undefined;
     return Boolean(row);
   }
 
   private dbGetJson(key: string, defaultValue: unknown): unknown {
-    const row = this.db.prepare("SELECT value FROM kv WHERE key = ?").get(key) as JsonRow | undefined;
+    const row = this.db
+      .prepare("SELECT value FROM kv WHERE key = ?")
+      .get(key) as JsonRow | undefined;
     if (!row) {
       this.dbSetJson(key, defaultValue);
       return defaultValue;
@@ -776,8 +878,14 @@ export class CourtStorage {
     }
 
     const legacyAnswers = this.dbGetJson("answers", {});
-    if (answersCount === 0 && typeof legacyAnswers === "object" && legacyAnswers !== null) {
-      this.migrateAnswersFromLegacyBlob(legacyAnswers as Record<string, unknown>);
+    if (
+      answersCount === 0 &&
+      typeof legacyAnswers === "object" &&
+      legacyAnswers !== null
+    ) {
+      this.migrateAnswersFromLegacyBlob(
+        legacyAnswers as Record<string, unknown>,
+      );
     }
 
     if (metricsCount === 0) {
@@ -788,7 +896,9 @@ export class CourtStorage {
     }
   }
 
-  private migrateAnswersFromLegacyBlob(legacyAnswers: Record<string, unknown>): void {
+  private migrateAnswersFromLegacyBlob(
+    legacyAnswers: Record<string, unknown>,
+  ): void {
     const upsert = this.db.prepare(
       `
       INSERT INTO answers (question_message_id, user_id, answer_message_id, created_at)
@@ -799,7 +909,9 @@ export class CourtStorage {
     `,
     );
 
-    for (const [questionMessageId, bucketRaw] of Object.entries(legacyAnswers)) {
+    for (const [questionMessageId, bucketRaw] of Object.entries(
+      legacyAnswers,
+    )) {
       if (typeof bucketRaw !== "object" || bucketRaw === null) {
         continue;
       }
@@ -808,14 +920,19 @@ export class CourtStorage {
         continue;
       }
 
-      for (const [userId, answerRaw] of Object.entries(usersRaw as Record<string, unknown>)) {
+      for (const [userId, answerRaw] of Object.entries(
+        usersRaw as Record<string, unknown>,
+      )) {
         if (typeof answerRaw !== "object" || answerRaw === null) {
           continue;
         }
 
         const answer = answerRaw as Record<string, unknown>;
-        const answerMessageId = toOptionalScalarString(answer.answer_message_id) ?? "";
-        const createdAt = toOptionalScalarString(answer.created_at) ?? isoNow(this.config.timezoneName);
+        const answerMessageId =
+          toOptionalScalarString(answer.answer_message_id) ?? "";
+        const createdAt =
+          toOptionalScalarString(answer.created_at) ??
+          isoNow(this.config.timezoneName);
         upsert.run(
           String(questionMessageId),
           String(userId),
@@ -890,7 +1007,11 @@ function toOptionalScalarString(value: unknown): string | null {
   if (typeof value === "string") {
     return value;
   }
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "bigint"
+  ) {
     return String(value);
   }
   return null;

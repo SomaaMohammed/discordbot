@@ -43,9 +43,13 @@ export function createDiscordClient(runtime: BotRuntime): Client {
       .fetch(runtime.config.testGuildIdText)
       .catch(() => null);
     if (!guild) {
-      logWarn("discord", "Failed to fetch test guild; commands were not synced", {
-        guildId: runtime.config.testGuildIdText,
-      });
+      logWarn(
+        "discord",
+        "Failed to fetch test guild; commands were not synced",
+        {
+          guildId: runtime.config.testGuildIdText,
+        },
+      );
       return;
     }
 
