@@ -3,6 +3,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  NewsChannel,
   PermissionFlagsBits,
   TextChannel,
   ThreadAutoArchiveDuration,
@@ -41,6 +42,7 @@ import type { CourtState, PostRecord, RoyalTitle } from "../types.js";
 
 const ANON_ANSWER_BUTTON_ID = "court:anonymous_answer";
 const SILENT_LOCK_SECONDS = 10;
+type RuntimeTargetChannel = TextChannel | NewsChannel | AnyThreadChannel;
 
 let backgroundLoopsStarted = false;
 
@@ -502,7 +504,7 @@ function buildWeeklyDigestEmbed(runtime: BotRuntime): EmbedBuilder {
 }
 
 async function postQuestionFromLoop(
-  channel: TextChannel,
+  channel: RuntimeTargetChannel,
   runtime: BotRuntime,
   options: {
     category: string | null;
@@ -1070,7 +1072,7 @@ async function resolveConfiguredGuild(
 async function resolveTargetChannel(
   guild: Guild,
   runtime: BotRuntime,
-): Promise<TextChannel | null> {
+): Promise<RuntimeTargetChannel | null> {
   const state = runtime.storage.getState();
   const candidates = [
     runtime.config.courtChannelIdText,
@@ -1083,7 +1085,7 @@ async function resolveTargetChannel(
       continue;
     }
 
-    const resolved = await getOrFetchTextChannel(guild, candidate);
+    const resolved = await getOrFetchRuntimeTargetChannel(guild, candidate);
     if (resolved) {
       return resolved;
     }
@@ -1095,9 +1097,9 @@ async function resolveTargetChannel(
 async function resolveWeeklyDigestChannel(
   guild: Guild,
   runtime: BotRuntime,
-): Promise<TextChannel | null> {
+): Promise<RuntimeTargetChannel | null> {
   if (runtime.config.weeklyDigestChannelIdText) {
-    const channel = await getOrFetchTextChannel(
+    const channel = await getOrFetchRuntimeTargetChannel(
       guild,
       runtime.config.weeklyDigestChannelIdText,
     );
@@ -1107,7 +1109,7 @@ async function resolveWeeklyDigestChannel(
   }
 
   const logDestination = await resolveLogDestination(guild, runtime);
-  return logDestination instanceof TextChannel ? logDestination : null;
+  return logDestination;
 }
 
 async function sendRuntimeLog(
@@ -1163,7 +1165,7 @@ async function resolveLogDestination(
   guild: Guild,
   runtime: BotRuntime,
   fallbackChannelId?: string,
-): Promise<TextChannel | AnyThreadChannel | null> {
+): Promise<RuntimeTargetChannel | null> {
   const state = runtime.storage.getState();
   const candidates = [
     runtime.config.logChannelIdText,
@@ -1178,7 +1180,7 @@ async function resolveLogDestination(
     }
 
     const fetched = await fetchChannelById(guild.client, candidate);
-    if (fetched instanceof TextChannel || fetched?.isThread()) {
+    if (isRuntimeTargetChannel(fetched)) {
       return fetched;
     }
   }
@@ -1186,17 +1188,17 @@ async function resolveLogDestination(
   return null;
 }
 
-async function getOrFetchTextChannel(
+async function getOrFetchRuntimeTargetChannel(
   guild: Guild,
   channelId: string,
-): Promise<TextChannel | null> {
+): Promise<RuntimeTargetChannel | null> {
   const cached = guild.channels.cache.get(channelId);
-  if (cached instanceof TextChannel) {
+  if (isRuntimeTargetChannel(cached)) {
     return cached;
   }
 
   const fetched = await guild.channels.fetch(channelId).catch(() => null);
-  return fetched instanceof TextChannel ? fetched : null;
+  return isRuntimeTargetChannel(fetched) ? fetched : null;
 }
 
 async function fetchChannelById(
@@ -1271,4 +1273,22 @@ function isSendableChannel(
   channel: unknown,
 ): channel is { send: (payload: unknown) => Promise<unknown> } {
   return typeof (channel as { send?: unknown } | null)?.send === "function";
+}
+
+function isRuntimeTargetChannel(
+  channel: unknown,
+): channel is RuntimeTargetChannel {
+  if (channel instanceof TextChannel || channel instanceof NewsChannel) {
+    return true;
+  }
+
+  if (!channel || typeof channel !== "object") {
+    return false;
+  }
+
+  const maybeThreadChannel = channel as { isThread?: () => boolean };
+  return (
+    typeof maybeThreadChannel.isThread === "function" &&
+    maybeThreadChannel.isThread()
+  );
 }

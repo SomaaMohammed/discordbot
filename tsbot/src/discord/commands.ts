@@ -3,7 +3,6 @@ import {
   AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
   ComponentType,
   EmbedBuilder,
   ModalBuilder,
@@ -207,9 +206,8 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<
     subcommand.addChannelOption((option) =>
       option
         .setName("channel")
-        .setDescription("The text channel to post in")
-        .setRequired(true)
-        .addChannelTypes(ChannelType.GuildText),
+        .setDescription("The channel to post in")
+        .setRequired(true),
     );
   },
   logchannel: (subcommand) => {
@@ -217,8 +215,7 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<
       option
         .setName("channel")
         .setDescription("Leave empty to disable logging")
-        .setRequired(false)
-        .addChannelTypes(ChannelType.GuildText),
+        .setRequired(false),
     );
   },
   schedule: (subcommand) => {
@@ -387,14 +384,7 @@ const INVICTUS_SUBCOMMAND_OPTION_BUILDERS: Partial<
         option
           .setName("channel")
           .setDescription("Target channel (defaults to current channel)")
-          .setRequired(false)
-          .addChannelTypes(
-            ChannelType.GuildText,
-            ChannelType.GuildAnnouncement,
-            ChannelType.PublicThread,
-            ChannelType.PrivateThread,
-            ChannelType.AnnouncementThread,
-          ),
+          .setRequired(false),
       )
       .addStringOption((option) =>
         option
@@ -604,11 +594,8 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
           .addChannelOption((option) =>
             option
               .setName("channel")
-              .setDescription(
-                "Target text channel (defaults to current channel)",
-              )
-              .setRequired(false)
-              .addChannelTypes(ChannelType.GuildText),
+              .setDescription("Target channel (defaults to current channel)")
+              .setRequired(false),
           )
           .addStringOption((option) =>
             option
@@ -642,8 +629,7 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
             option
               .setName("channel")
               .setDescription("Target channel")
-              .setRequired(true)
-              .addChannelTypes(ChannelType.GuildText),
+              .setRequired(true),
           )
           .addBooleanOption((option) =>
             option
@@ -688,11 +674,8 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
           .addChannelOption((option) =>
             option
               .setName("channel")
-              .setDescription(
-                "Target text channel (defaults to current channel)",
-              )
-              .setRequired(false)
-              .addChannelTypes(ChannelType.GuildText),
+              .setDescription("Target channel (defaults to current channel)")
+              .setRequired(false),
           )
           .addStringOption((option) =>
             option
@@ -1598,9 +1581,9 @@ async function handleCourtChannel(
   runtime: BotRuntime,
 ): Promise<void> {
   const channel = interaction.options.getChannel("channel", true);
-  if (!(channel instanceof TextChannel)) {
+  if (!isDmPanelTargetChannel(channel)) {
     await interaction.reply({
-      content: "Channel must be a text channel.",
+      content: "Channel must support messages.",
       ephemeral: true,
     });
     return;
@@ -1629,9 +1612,9 @@ async function handleCourtLogChannel(
   runtime: BotRuntime,
 ): Promise<void> {
   const channel = interaction.options.getChannel("channel");
-  if (channel && !(channel instanceof TextChannel)) {
+  if (channel && !isDmPanelTargetChannel(channel)) {
     await interaction.reply({
-      content: "Log channel must be a text channel.",
+      content: "Log channel must support messages.",
       ephemeral: true,
     });
     return;
@@ -1916,7 +1899,7 @@ function buildNextRunText(
 }
 
 function findMissingChannelPermissions(
-  channel: TextChannel | null,
+  channel: DmPanelTargetChannel | null,
   me: GuildMember | null,
 ): string[] {
   if (!channel || !me) {
@@ -1934,7 +1917,10 @@ function findMissingChannelPermissions(
   if (!permissions.has(PermissionFlagsBits.EmbedLinks)) {
     missing.push("Embed Links");
   }
-  if (!permissions.has(PermissionFlagsBits.CreatePublicThreads)) {
+  if (
+    !channel.isThread() &&
+    !permissions.has(PermissionFlagsBits.CreatePublicThreads)
+  ) {
     missing.push("Create Public Threads");
   }
   if (!permissions.has(PermissionFlagsBits.SendMessagesInThreads)) {
@@ -2214,9 +2200,9 @@ async function handleInvictusSay(
   }
 
   const targetChannelOption = interaction.options.getChannel("channel", true);
-  if (!(targetChannelOption instanceof TextChannel)) {
+  if (!isDmPanelTargetChannel(targetChannelOption)) {
     await interaction.reply({
-      content: "Target channel must be a text channel.",
+      content: "Target channel must support messages.",
       ephemeral: true,
     });
     return;
@@ -2347,9 +2333,9 @@ async function handleAdminSayModalSubmit(
   const channel =
     interaction.guild.channels.cache.get(channelId) ??
     (await interaction.guild.channels.fetch(channelId).catch(() => null));
-  if (!(channel instanceof TextChannel)) {
+  if (!isDmPanelTargetChannel(channel)) {
     await interaction.reply({
-      content: "Target channel no longer exists or is not a text channel.",
+      content: "Target channel no longer exists or cannot receive messages.",
       ephemeral: true,
     });
     return;
@@ -4158,10 +4144,10 @@ async function handleInvictusRolePanel(
     return;
   }
 
+  const requestedChannel = interaction.options.getChannel("channel");
   const targetChannel =
-    (interaction.options.getChannel("channel") instanceof TextChannel
-      ? (interaction.options.getChannel("channel") as TextChannel)
-      : null) ?? getManageTargetChannel(interaction);
+    (isDmPanelTargetChannel(requestedChannel) ? requestedChannel : null) ??
+    getDmPanelTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
       content:
@@ -4276,10 +4262,10 @@ async function handleInvictusRolePanelMulti(
     return;
   }
 
+  const requestedChannel = interaction.options.getChannel("channel");
   const targetChannel =
-    (interaction.options.getChannel("channel") instanceof TextChannel
-      ? (interaction.options.getChannel("channel") as TextChannel)
-      : null) ?? getManageTargetChannel(interaction);
+    (isDmPanelTargetChannel(requestedChannel) ? requestedChannel : null) ??
+    getDmPanelTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
       content:
@@ -5193,7 +5179,7 @@ async function reopenCourtPost(
 }
 
 async function postQuestion(
-  channel: TextChannel,
+  channel: DmPanelTargetChannel,
   runtime: BotRuntime,
   options: {
     category: string | null;
@@ -5836,7 +5822,7 @@ async function getOrCreateAnswerThread(
 async function getTargetChannel(
   interaction: ChatInputCommandInteraction,
   runtime: BotRuntime,
-): Promise<TextChannel | null> {
+): Promise<DmPanelTargetChannel | null> {
   if (!interaction.guild) {
     return null;
   }
@@ -5853,16 +5839,12 @@ async function getTargetChannel(
       continue;
     }
 
-    const cached = interaction.guild.channels.cache.get(candidate);
-    if (cached instanceof TextChannel) {
-      return cached;
-    }
-
-    const fetched = await interaction.guild.channels
-      .fetch(candidate)
-      .catch(() => null);
-    if (fetched instanceof TextChannel) {
-      return fetched;
+    const resolved = await getOrFetchSendableGuildChannel(
+      interaction.guild,
+      candidate,
+    );
+    if (resolved) {
+      return resolved;
     }
   }
 
@@ -5872,7 +5854,7 @@ async function getTargetChannel(
 async function getLogChannel(
   interaction: ChatInputCommandInteraction,
   runtime: BotRuntime,
-): Promise<TextChannel | null> {
+): Promise<DmPanelTargetChannel | null> {
   if (!interaction.guild) {
     return null;
   }
@@ -5889,16 +5871,12 @@ async function getLogChannel(
       continue;
     }
 
-    const cached = interaction.guild.channels.cache.get(candidate);
-    if (cached instanceof TextChannel) {
-      return cached;
-    }
-
-    const fetched = await interaction.guild.channels
-      .fetch(candidate)
-      .catch(() => null);
-    if (fetched instanceof TextChannel) {
-      return fetched;
+    const resolved = await getOrFetchSendableGuildChannel(
+      interaction.guild,
+      candidate,
+    );
+    if (resolved) {
+      return resolved;
     }
   }
 
@@ -5922,14 +5900,14 @@ async function sendLog(
     String(runtime.config.logChannelId ?? "").trim(),
   ];
 
-  let destination: TextChannel | AnyThreadChannel | null = null;
+  let destination: DmPanelTargetChannel | null = null;
   for (const candidate of logChannelCandidates) {
     if (!/^\d+$/.test(candidate) || candidate === "0") {
       continue;
     }
 
     const fetched = await fetchChannelById(interaction.client, candidate);
-    if (fetched instanceof TextChannel || fetched?.isThread()) {
+    if (isDmPanelTargetChannel(fetched)) {
       destination = fetched;
       break;
     }
@@ -5989,8 +5967,21 @@ async function getPostMessage(
     return null;
   }
 
-  const textTarget = channel as TextChannel | AnyThreadChannel;
+  const textTarget = channel as DmPanelTargetChannel;
   return textTarget.messages.fetch(record.message_id).catch(() => null);
+}
+
+async function getOrFetchSendableGuildChannel(
+  guild: NonNullable<ChatInputCommandInteraction["guild"]>,
+  channelId: string,
+): Promise<DmPanelTargetChannel | null> {
+  const cached = guild.channels.cache.get(channelId);
+  if (isDmPanelTargetChannel(cached)) {
+    return cached;
+  }
+
+  const fetched = await guild.channels.fetch(channelId).catch(() => null);
+  return isDmPanelTargetChannel(fetched) ? fetched : null;
 }
 
 export async function __scanBackfillHistoryTargetForTests(
