@@ -85,6 +85,15 @@ function envSnowflakeSet(name: string, defaultValue: Set<string>): Set<string> {
   return values;
 }
 
+function resolveDefaultTimezone(): string {
+  const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (typeof detected === "string" && detected.trim() !== "") {
+    return detected;
+  }
+
+  return "UTC";
+}
+
 export function loadRuntimeConfig(repoRoot: string): RuntimeConfig {
   loadDotEnv({ path: path.join(repoRoot, ".env") });
 
@@ -137,6 +146,8 @@ export function loadRuntimeConfig(repoRoot: string): RuntimeConfig {
   );
   const botVersion =
     String(process.env.BOT_VERSION ?? packageVersion).trim() || packageVersion;
+  const timezoneName =
+    String(process.env.TIMEZONE ?? "").trim() || resolveDefaultTimezone();
 
   const dbFileEnv =
     String(process.env.DB_FILE ?? "court.db").trim() || "court.db";
@@ -153,7 +164,7 @@ export function loadRuntimeConfig(repoRoot: string): RuntimeConfig {
     courtChannelIdText,
     logChannelId: envInt("LOG_CHANNEL_ID", 0),
     logChannelIdText,
-    timezoneName: String(process.env.TIMEZONE ?? "Asia/Qatar"),
+    timezoneName,
     staffRoleIds: new Set<string>(staffRoleIdsText),
     staffRoleIdsText,
     emperorRoleId: Number.parseInt(emperorRoleIdText, 10),

@@ -262,6 +262,10 @@ describe("command parity dispatch", () => {
     expect(payload.ephemeral).toBe(true);
     expect(payload.content).toContain("**Version:** `0.2.0-test`");
     expect(payload.content).toContain("**Mode:** `auto`");
+    expect(payload.content).toContain(
+      "**Auto Time:** `hidden (regional privacy mode)`",
+    );
+    expect(payload.content).not.toContain("UTC");
     expect(payload.content).toContain("**Recent Memory Size:** `3`");
     expect(payload.content).toContain("**Used Pool Size:** `2`");
     expect(payload.content).toContain("**Open Court Threads:** `2`");
@@ -288,13 +292,28 @@ describe("command parity dispatch", () => {
 
     const payload = reply.mock.calls[0]?.[0] as {
       embeds: Array<{
-        toJSON: () => { fields?: Array<{ name: string; value: string }> };
+        toJSON: () => {
+          description?: string;
+          fields?: Array<{ name: string; value: string }>;
+        };
       }>;
       ephemeral: boolean;
     };
     expect(payload.ephemeral).toBe(true);
 
     const embedJson = payload.embeds[0]?.toJSON();
+    expect(embedJson?.description).toContain("**Time Visibility:**");
+    expect(embedJson?.description).not.toContain("Timezone");
+    expect(embedJson?.description).not.toContain("Now:");
+
+    const schedulingField = embedJson?.fields?.find(
+      (field) => field.name === "Scheduling",
+    );
+    expect(schedulingField?.value).toContain(
+      "**Auto Time:** `hidden (regional privacy mode)`",
+    );
+    expect(schedulingField?.value).not.toContain("UTC");
+
     const dataField = embedJson?.fields?.find((field) => field.name === "Data");
     expect(dataField?.value).toContain("**DB:** `missing`");
   });

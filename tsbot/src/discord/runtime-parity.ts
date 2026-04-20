@@ -837,6 +837,87 @@ async function maybeSendRoyalMentionResponse(
   return true;
 }
 
+type PrivilegedInvictusChatIntent = NonNullable<
+  ReturnType<typeof parsePrivilegedInvictusChatIntent>
+>;
+
+function canUsePrivilegedInvictusChat(
+  member: GuildMember,
+  runtime: BotRuntime,
+): boolean {
+  const isEmpress =
+    runtime.config.empressRoleIdText.length > 0 &&
+    member.roles.cache.has(runtime.config.empressRoleIdText);
+  const isConfiguredUser =
+    runtime.config.undefeatedUserIdText.length > 0 &&
+    member.id === runtime.config.undefeatedUserIdText;
+
+  return isEmpress || isConfiguredUser;
+}
+
+function buildPrivilegedInvictusChatResponse(
+  intent: PrivilegedInvictusChatIntent,
+  member: GuildMember,
+  runtime: BotRuntime,
+  state: CourtState,
+): string {
+  const memberMention = member.toString();
+  const courtChannelText = runtime.config.courtChannelIdText
+    ? `<#${runtime.config.courtChannelIdText}>`
+    : "not configured";
+
+  switch (intent) {
+    case "greeting": {
+      const greetings = [
+        `At your command, ${memberMention}.`,
+        `${memberMention}, the throne is listening.`,
+        `Invictus stands ready for your orders, ${memberMention}.`,
+        `Your will, my mandate. Speak, ${memberMention}.`,
+      ];
+      return (
+        greetings[runtime.randomInt(greetings.length)] ??
+        `At your command, ${memberMention}.`
+      );
+    }
+    case "help":
+      return [
+        `Invictus command phrases for ${memberMention}:`,
+        "- `hi invictus`",
+        "- `invictus status report`",
+        "- `invictus what should i do`",
+        "- `invictus title me`",
+        "- `invictus flip a coin`",
+        "- `invictus what time is it`",
+      ].join("\n");
+    case "title":
+      return `${memberMention}, by decree you are now: **${randomImperialTitle(runtime.randomInt)}**.`;
+    case "coinflip":
+      return runtime.randomInt(2) === 0
+        ? "The coin lands on **heads**."
+        : "The coin lands on **tails**.";
+    case "time":
+      return "Time is interpreted using your regional settings and hidden for privacy.";
+    case "status":
+      return [
+        `Status report for ${memberMention}:`,
+        `Mode: \`${state.mode}\``,
+        "Auto-post schedule: hidden (regional privacy mode)",
+        `Court channel: ${courtChannelText}`,
+      ].join("\n");
+    case "counsel":
+      return [
+        `Decree: ${randomImperialVerdict(runtime.randomInt)}`,
+        `Omen: ${randomImperialOmen(runtime.randomInt)}`,
+      ].join("\n");
+    case "thanks":
+      return "Always. The court stands with you.";
+    case "farewell":
+      return "Rest well. Invictus will keep watch.";
+    default:
+      return "Invictus stands ready.";
+  }
+}
+
 async function maybeSendPrivilegedInvictusChatResponse(
   message: Message,
   member: GuildMember,
@@ -847,13 +928,7 @@ async function maybeSendPrivilegedInvictusChatResponse(
     return false;
   }
 
-  const isEmpress =
-    runtime.config.empressRoleIdText.length > 0 &&
-    member.roles.cache.has(runtime.config.empressRoleIdText);
-  const isConfiguredUser =
-    runtime.config.undefeatedUserIdText.length > 0 &&
-    member.id === runtime.config.undefeatedUserIdText;
-  if (!isEmpress && !isConfiguredUser) {
+  if (!canUsePrivilegedInvictusChat(member, runtime)) {
     return false;
   }
 
@@ -862,64 +937,12 @@ async function maybeSendPrivilegedInvictusChatResponse(
   }
 
   const state = runtime.storage.getState();
-  const scheduledHour = String(Math.max(0, Math.min(23, state.hour))).padStart(
-    2,
-    "0",
+  const response = buildPrivilegedInvictusChatResponse(
+    intent,
+    member,
+    runtime,
+    state,
   );
-  const scheduledMinute = String(
-    Math.max(0, Math.min(59, state.minute)),
-  ).padStart(2, "0");
-  const courtChannelText = runtime.config.courtChannelIdText
-    ? `<#${runtime.config.courtChannelIdText}>`
-    : "not configured";
-
-  let response = "Invictus stands ready.";
-  if (intent === "greeting") {
-    const greetings = [
-      `At your command, ${member.toString()}.`,
-      `${member.toString()}, the throne is listening.`,
-      `Invictus stands ready for your orders, ${member.toString()}.`,
-      `Your will, my mandate. Speak, ${member.toString()}.`,
-    ];
-    response =
-      greetings[runtime.randomInt(greetings.length)] ??
-      `At your command, ${member.toString()}.`;
-  } else if (intent === "help") {
-    response = [
-      `Invictus command phrases for ${member.toString()}:`,
-      "- `hi invictus`",
-      "- `invictus status report`",
-      "- `invictus what should i do`",
-      "- `invictus title me`",
-      "- `invictus flip a coin`",
-      "- `invictus what time is it`",
-    ].join("\n");
-  } else if (intent === "title") {
-    response = `${member.toString()}, by decree you are now: **${randomImperialTitle(runtime.randomInt)}**.`;
-  } else if (intent === "coinflip") {
-    response =
-      runtime.randomInt(2) === 0
-        ? "The coin lands on **heads**."
-        : "The coin lands on **tails**.";
-  } else if (intent === "time") {
-    response = `Court time is \`${runtime.now().toFormat("yyyy-LL-dd HH:mm")}\` (${runtime.config.timezoneName}).`;
-  } else if (intent === "status") {
-    response = [
-      `Status report for ${member.toString()}:`,
-      `Mode: \`${state.mode}\``,
-      `Auto-post schedule: \`${scheduledHour}:${scheduledMinute}\` (${runtime.config.timezoneName})`,
-      `Court channel: ${courtChannelText}`,
-    ].join("\n");
-  } else if (intent === "counsel") {
-    response = [
-      `Decree: ${randomImperialVerdict(runtime.randomInt)}`,
-      `Omen: ${randomImperialOmen(runtime.randomInt)}`,
-    ].join("\n");
-  } else if (intent === "thanks") {
-    response = "Always. The court stands with you.";
-  } else if (intent === "farewell") {
-    response = "Rest well. Invictus will keep watch.";
-  }
 
   await message.channel
     .send({ content: response, allowedMentions: { parse: [] } })
@@ -945,7 +968,6 @@ async function lockChannelSilently(
   const appliedRoles: Role[] = [];
 
   for (const role of targetRoles) {
-
     const overwrite = channel.permissionOverwrites.cache.get(role.id);
     let originalSend: boolean | null = null;
     if (overwrite?.allow.has(PermissionFlagsBits.SendMessages)) {
