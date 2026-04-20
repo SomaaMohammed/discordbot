@@ -35,9 +35,7 @@ import {
   ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH,
   ROLE_PANEL_DEFAULT_BUTTON_LABEL,
   ROLE_COLOR,
-  ROLE_PANEL_FOOTER_PREFIX,
   ROLE_PANEL_MAX_BUTTONS,
-  ROLE_PANEL_TARGETS_FOOTER_PREFIX,
   TAYLOR_USER_ID,
   THREAD_CLOSE_HOURS,
   USER_FUN_METRIC_FIELDS,
@@ -45,10 +43,12 @@ import {
 } from "../constants.js";
 import {
   backfillLookbackText,
+  buildRolePanelButtonCustomId,
   buildRoyalAfkStatusReport,
   buildAnnouncementMentions,
   countOpenAndOverduePosts,
   extractRolePanelButtonSlot,
+  extractRolePanelRoleIdFromCustomId,
   extractRolePanelRoleIdForSlot,
   getBackfillStatusSnapshot,
   getFateReading,
@@ -113,7 +113,14 @@ const INVICTUS_COMMANDS = [
   "resetroyaltimer",
   "help",
 ] as const;
-const FUN_COMMANDS = ["battle", "stats", "leaderboard", "verdict", "title", "fate"] as const;
+const FUN_COMMANDS = [
+  "battle",
+  "stats",
+  "leaderboard",
+  "verdict",
+  "title",
+  "fate",
+] as const;
 const GREETINGS_COMMANDS = ["rio", "taylor"] as const;
 
 const CATEGORY_CHOICES = Object.keys(CATEGORY_DESCRIPTIONS).map((category) => ({
@@ -124,7 +131,8 @@ const CATEGORY_CHOICES = Object.keys(CATEGORY_DESCRIPTIONS).map((category) => ({
 const MSG_USE_IN_SERVER = "Use this inside the server.";
 const MSG_USE_TEXT_CHANNEL = "Use this command inside a text channel.";
 const MSG_VERIFY_ROLES = "Could not verify your roles.";
-const MSG_BOT_CONTEXT_ERROR = "Could not verify bot permissions in this server.";
+const MSG_BOT_CONTEXT_ERROR =
+  "Could not verify bot permissions in this server.";
 const MSG_CONFIRM_REQUIRED = "Confirmation failed. Type `CONFIRM` exactly.";
 const PREVIEW_ISSUES_PREFIX = "\n\nPreview issues:\n";
 const MSG_QUESTION_EMPTY = "Question cannot be empty.";
@@ -142,8 +150,17 @@ const INVICTUS_DM_PANEL_MODAL_INPUT_ID = "dm_message";
 const INVICTUS_DM_PANEL_FOOTER_PREFIX = "InvictusDmTarget:";
 const INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL = "Message Invictus";
 
-const BOSS_STATS = ["Strength", "Speed", "Wisdom", "Charisma", "Luck", "Endurance"];
-const USER_FUN_LEADERBOARD_METRICS = new Set(USER_FUN_METRIC_FIELDS.map(([metricName]) => metricName));
+const BOSS_STATS = [
+  "Strength",
+  "Speed",
+  "Wisdom",
+  "Charisma",
+  "Luck",
+  "Endurance",
+];
+const USER_FUN_LEADERBOARD_METRICS = new Set(
+  USER_FUN_METRIC_FIELDS.map(([metricName]) => metricName),
+);
 const USER_FUN_METRIC_LABELS = new Map(USER_FUN_METRIC_FIELDS);
 
 const NOT_MIGRATED_MESSAGE =
@@ -151,11 +168,18 @@ const NOT_MIGRATED_MESSAGE =
 
 const STAFF_REQUIRED_COMMANDS = new Set<string>(["court", "questions"]);
 
-type RuntimeCommandHandler = (interaction: ChatInputCommandInteraction, runtime: BotRuntime) => Promise<void>;
-type SubcommandOptionBuilder = (subcommand: SlashCommandSubcommandBuilder) => void;
+type RuntimeCommandHandler = (
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+) => Promise<void>;
+type SubcommandOptionBuilder = (
+  subcommand: SlashCommandSubcommandBuilder,
+) => void;
 type DmPanelTargetChannel = TextChannel | NewsChannel | AnyThreadChannel;
 
-const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof COURT_COMMANDS)[number], SubcommandOptionBuilder>> = {
+const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<
+  Record<(typeof COURT_COMMANDS)[number], SubcommandOptionBuilder>
+> = {
   mode: (subcommand) => {
     subcommand.addStringOption((option) =>
       option
@@ -173,7 +197,9 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof COURT_COMMANDS)[n
     subcommand.addBooleanOption((option) =>
       option
         .setName("enabled")
-        .setDescription("When enabled, scheduled auto-post logs what it would post without posting")
+        .setDescription(
+          "When enabled, scheduled auto-post logs what it would post without posting",
+        )
         .setRequired(true),
     );
   },
@@ -197,8 +223,15 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof COURT_COMMANDS)[n
   },
   schedule: (subcommand) => {
     subcommand
-      .addIntegerOption((option) => option.setName("hour").setDescription("Hour (0-23)").setRequired(false))
-      .addIntegerOption((option) => option.setName("minute").setDescription("Minute (0-59)").setRequired(false));
+      .addIntegerOption((option) =>
+        option.setName("hour").setDescription("Hour (0-23)").setRequired(false),
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName("minute")
+          .setDescription("Minute (0-59)")
+          .setRequired(false),
+      );
   },
   post: (subcommand) => {
     subcommand
@@ -217,7 +250,12 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof COURT_COMMANDS)[n
       );
   },
   custom: (subcommand) => {
-    subcommand.addStringOption((option) => option.setName("question").setDescription("Your custom court question").setRequired(true));
+    subcommand.addStringOption((option) =>
+      option
+        .setName("question")
+        .setDescription("Your custom court question")
+        .setRequired(true),
+    );
   },
   importstate: (subcommand) => {
     subcommand
@@ -290,12 +328,20 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof COURT_COMMANDS)[n
   },
   close: (subcommand) => {
     subcommand.addStringOption((option) =>
-      option.setName("message_id").setDescription("Optional inquiry message ID to close").setRequired(false),
+      option
+        .setName("message_id")
+        .setDescription("Optional inquiry message ID to close")
+        .setRequired(false),
     );
   },
   extend: (subcommand) => {
     subcommand
-      .addStringOption((option) => option.setName("message_id").setDescription("Inquiry message ID").setRequired(true))
+      .addStringOption((option) =>
+        option
+          .setName("message_id")
+          .setDescription("Inquiry message ID")
+          .setRequired(true),
+      )
       .addIntegerOption((option) =>
         option
           .setName("additional_hours")
@@ -307,7 +353,12 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof COURT_COMMANDS)[n
   },
   reopen: (subcommand) => {
     subcommand
-      .addStringOption((option) => option.setName("message_id").setDescription("Inquiry message ID").setRequired(true))
+      .addStringOption((option) =>
+        option
+          .setName("message_id")
+          .setDescription("Inquiry message ID")
+          .setRequired(true),
+      )
       .addIntegerOption((option) =>
         option
           .setName("close_after_hours")
@@ -318,11 +369,18 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof COURT_COMMANDS)[n
       );
   },
   removeanswer: (subcommand) => {
-    subcommand.addStringOption((option) => option.setName("message_id").setDescription("Anonymous answer message ID").setRequired(true));
+    subcommand.addStringOption((option) =>
+      option
+        .setName("message_id")
+        .setDescription("Anonymous answer message ID")
+        .setRequired(true),
+    );
   },
 };
 
-const INVICTUS_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof INVICTUS_COMMANDS)[number], SubcommandOptionBuilder>> = {
+const INVICTUS_SUBCOMMAND_OPTION_BUILDERS: Partial<
+  Record<(typeof INVICTUS_COMMANDS)[number], SubcommandOptionBuilder>
+> = {
   dmpanel: (subcommand) => {
     subcommand
       .addChannelOption((option) =>
@@ -338,8 +396,18 @@ const INVICTUS_SUBCOMMAND_OPTION_BUILDERS: Partial<Record<(typeof INVICTUS_COMMA
             ChannelType.AnnouncementThread,
           ),
       )
-      .addStringOption((option) => option.setName("title").setDescription("Optional embed title").setRequired(false))
-      .addStringOption((option) => option.setName("description").setDescription("Optional embed description").setRequired(false))
+      .addStringOption((option) =>
+        option
+          .setName("title")
+          .setDescription("Optional embed title")
+          .setRequired(false),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("description")
+          .setDescription("Optional embed description")
+          .setRequired(false),
+      )
       .addStringOption((option) =>
         option
           .setName("button_label")
@@ -444,23 +512,38 @@ const FUN_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
 
 const GREETINGS_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
   rio: async (interaction) => {
-    await interaction.reply({ content: `Hello <@${RIO_USER_ID}>. The court sends respect.` });
+    await interaction.reply({
+      content: `Hello <@${RIO_USER_ID}>. The court sends respect.`,
+    });
   },
   taylor: async (interaction) => {
-    await interaction.reply({ content: `Hello <@${TAYLOR_USER_ID}>. The court sends respect.` });
+    await interaction.reply({
+      content: `Hello <@${TAYLOR_USER_ID}>. The court sends respect.`,
+    });
   },
 };
 
-const COMMAND_DISPATCHERS: Record<string, { handlers: Record<string, RuntimeCommandHandler>; requiresAdmin?: Set<string> }> = {
+const COMMAND_DISPATCHERS: Record<
+  string,
+  {
+    handlers: Record<string, RuntimeCommandHandler>;
+    requiresAdmin?: Set<string>;
+  }
+> = {
   court: { handlers: COURT_SUBCOMMAND_HANDLERS },
   questions: { handlers: QUESTIONS_SUBCOMMAND_HANDLERS },
-  invictus: { handlers: INVICTUS_SUBCOMMAND_HANDLERS, requiresAdmin: INVICTUS_ADMIN_SUBCOMMANDS },
+  invictus: {
+    handlers: INVICTUS_SUBCOMMAND_HANDLERS,
+    requiresAdmin: INVICTUS_ADMIN_SUBCOMMANDS,
+  },
   fun: { handlers: FUN_SUBCOMMAND_HANDLERS },
   greetings: { handlers: GREETINGS_SUBCOMMAND_HANDLERS },
 };
 
 export function buildCommandDefinitions(): SlashCommandBuilder[] {
-  const court = new SlashCommandBuilder().setName("court").setDescription("Imperial Court controls");
+  const court = new SlashCommandBuilder()
+    .setName("court")
+    .setDescription("Imperial Court controls");
   for (const name of COURT_COMMANDS) {
     court.addSubcommand((subcommand) => {
       subcommand.setName(name).setDescription(`Court ${name} command`);
@@ -473,7 +556,9 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
     });
   }
 
-  const questions = new SlashCommandBuilder().setName("questions").setDescription("Question utilities");
+  const questions = new SlashCommandBuilder()
+    .setName("questions")
+    .setDescription("Question utilities");
   for (const name of QUESTIONS_COMMANDS) {
     questions.addSubcommand((subcommand) => {
       subcommand.setName(name).setDescription(`Question ${name} command`);
@@ -500,7 +585,9 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
     });
   }
 
-  const invictus = new SlashCommandBuilder().setName("invictus").setDescription("Server admin and moderation tools");
+  const invictus = new SlashCommandBuilder()
+    .setName("invictus")
+    .setDescription("Server admin and moderation tools");
   for (const name of INVICTUS_COMMANDS) {
     invictus.addSubcommand((subcommand) => {
       subcommand.setName(name).setDescription(`Invictus ${name} command`);
@@ -508,16 +595,33 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
 
       if (name === "rolepanel") {
         subcommand
-          .addRoleOption((option) => option.setName("role").setDescription("Role to toggle when the button is clicked").setRequired(true))
+          .addRoleOption((option) =>
+            option
+              .setName("role")
+              .setDescription("Role to toggle when the button is clicked")
+              .setRequired(true),
+          )
           .addChannelOption((option) =>
             option
               .setName("channel")
-              .setDescription("Target text channel (defaults to current channel)")
+              .setDescription(
+                "Target text channel (defaults to current channel)",
+              )
               .setRequired(false)
               .addChannelTypes(ChannelType.GuildText),
           )
-          .addStringOption((option) => option.setName("title").setDescription("Optional embed title").setRequired(false))
-          .addStringOption((option) => option.setName("description").setDescription("Optional embed description").setRequired(false))
+          .addStringOption((option) =>
+            option
+              .setName("title")
+              .setDescription("Optional embed title")
+              .setRequired(false),
+          )
+          .addStringOption((option) =>
+            option
+              .setName("description")
+              .setDescription("Optional embed description")
+              .setRequired(false),
+          )
           .addStringOption((option) =>
             option
               .setName("button_label")
@@ -551,20 +655,57 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
 
       if (name === "rolepanelmulti") {
         subcommand
-          .addRoleOption((option) => option.setName("role_1").setDescription("First role button").setRequired(true))
-          .addRoleOption((option) => option.setName("role_2").setDescription("Second role button").setRequired(true))
-          .addRoleOption((option) => option.setName("role_3").setDescription("Optional third role button").setRequired(false))
-          .addRoleOption((option) => option.setName("role_4").setDescription("Optional fourth role button").setRequired(false))
-          .addRoleOption((option) => option.setName("role_5").setDescription("Optional fifth role button").setRequired(false))
+          .addRoleOption((option) =>
+            option
+              .setName("role_1")
+              .setDescription("First role button")
+              .setRequired(true),
+          )
+          .addRoleOption((option) =>
+            option
+              .setName("role_2")
+              .setDescription("Second role button")
+              .setRequired(true),
+          )
+          .addRoleOption((option) =>
+            option
+              .setName("role_3")
+              .setDescription("Optional third role button")
+              .setRequired(false),
+          )
+          .addRoleOption((option) =>
+            option
+              .setName("role_4")
+              .setDescription("Optional fourth role button")
+              .setRequired(false),
+          )
+          .addRoleOption((option) =>
+            option
+              .setName("role_5")
+              .setDescription("Optional fifth role button")
+              .setRequired(false),
+          )
           .addChannelOption((option) =>
             option
               .setName("channel")
-              .setDescription("Target text channel (defaults to current channel)")
+              .setDescription(
+                "Target text channel (defaults to current channel)",
+              )
               .setRequired(false)
               .addChannelTypes(ChannelType.GuildText),
           )
-          .addStringOption((option) => option.setName("title").setDescription("Optional embed title").setRequired(false))
-          .addStringOption((option) => option.setName("description").setDescription("Optional embed description").setRequired(false))
+          .addStringOption((option) =>
+            option
+              .setName("title")
+              .setDescription("Optional embed title")
+              .setRequired(false),
+          )
+          .addStringOption((option) =>
+            option
+              .setName("description")
+              .setDescription("Optional embed description")
+              .setRequired(false),
+          )
           .addBooleanOption((option) =>
             option
               .setName("mention_everyone")
@@ -577,7 +718,9 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
         subcommand.addStringOption((option) =>
           option
             .setName("reason")
-            .setDescription("Reason for being AFK. Leave empty to clear your AFK status")
+            .setDescription(
+              "Reason for being AFK. Leave empty to clear your AFK status",
+            )
             .setRequired(false),
         );
       }
@@ -595,7 +738,12 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
 
       if (name === "purgeuser") {
         subcommand
-          .addUserOption((option) => option.setName("member").setDescription("Member whose messages to remove").setRequired(true))
+          .addUserOption((option) =>
+            option
+              .setName("member")
+              .setDescription("Member whose messages to remove")
+              .setRequired(true),
+          )
           .addIntegerOption((option) =>
             option
               .setName("amount")
@@ -607,7 +755,12 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
       }
 
       if (name === "lock" || name === "unlock") {
-        subcommand.addStringOption((option) => option.setName("reason").setDescription("Optional reason").setRequired(false));
+        subcommand.addStringOption((option) =>
+          option
+            .setName("reason")
+            .setDescription("Optional reason")
+            .setRequired(false),
+        );
       }
 
       if (name === "slowmode") {
@@ -623,7 +776,12 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
 
       if (name === "timeout") {
         subcommand
-          .addUserOption((option) => option.setName("member").setDescription("Member to timeout").setRequired(true))
+          .addUserOption((option) =>
+            option
+              .setName("member")
+              .setDescription("Member to timeout")
+              .setRequired(true),
+          )
           .addIntegerOption((option) =>
             option
               .setName("minutes")
@@ -632,13 +790,28 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
               .setMinValue(1)
               .setMaxValue(40320),
           )
-          .addStringOption((option) => option.setName("reason").setDescription("Optional reason").setRequired(false));
+          .addStringOption((option) =>
+            option
+              .setName("reason")
+              .setDescription("Optional reason")
+              .setRequired(false),
+          );
       }
 
       if (name === "untimeout") {
         subcommand
-          .addUserOption((option) => option.setName("member").setDescription("Member to untimeout").setRequired(true))
-          .addStringOption((option) => option.setName("reason").setDescription("Optional reason").setRequired(false));
+          .addUserOption((option) =>
+            option
+              .setName("member")
+              .setDescription("Member to untimeout")
+              .setRequired(true),
+          )
+          .addStringOption((option) =>
+            option
+              .setName("reason")
+              .setDescription("Optional reason")
+              .setRequired(false),
+          );
       }
 
       if (name === "mutemany") {
@@ -663,7 +836,12 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
               .setDescription("Preview impacts without applying timeouts")
               .setRequired(false),
           )
-          .addStringOption((option) => option.setName("reason").setDescription("Optional reason").setRequired(false));
+          .addStringOption((option) =>
+            option
+              .setName("reason")
+              .setDescription("Optional reason")
+              .setRequired(false),
+          );
       }
 
       if (name === "unmutemany") {
@@ -680,7 +858,12 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
               .setDescription("Preview impacts without removing timeouts")
               .setRequired(false),
           )
-          .addStringOption((option) => option.setName("reason").setDescription("Optional reason").setRequired(false));
+          .addStringOption((option) =>
+            option
+              .setName("reason")
+              .setDescription("Optional reason")
+              .setRequired(false),
+          );
       }
 
       if (name === "muteall") {
@@ -693,33 +876,55 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
               .setMinValue(1)
               .setMaxValue(40320),
           )
-          .addStringOption((option) => option.setName("confirm").setDescription("Type CONFIRM to run").setRequired(true))
+          .addStringOption((option) =>
+            option
+              .setName("confirm")
+              .setDescription("Type CONFIRM to run")
+              .setRequired(true),
+          )
           .addBooleanOption((option) =>
             option
               .setName("dry_run")
               .setDescription("Preview impacts without applying timeouts")
               .setRequired(false),
           )
-          .addStringOption((option) => option.setName("reason").setDescription("Optional reason").setRequired(false));
+          .addStringOption((option) =>
+            option
+              .setName("reason")
+              .setDescription("Optional reason")
+              .setRequired(false),
+          );
       }
 
       if (name === "unmuteall") {
         subcommand
-          .addStringOption((option) => option.setName("confirm").setDescription("Type CONFIRM to run").setRequired(true))
+          .addStringOption((option) =>
+            option
+              .setName("confirm")
+              .setDescription("Type CONFIRM to run")
+              .setRequired(true),
+          )
           .addBooleanOption((option) =>
             option
               .setName("dry_run")
               .setDescription("Preview impacts without removing timeouts")
               .setRequired(false),
           )
-          .addStringOption((option) => option.setName("reason").setDescription("Optional reason").setRequired(false));
+          .addStringOption((option) =>
+            option
+              .setName("reason")
+              .setDescription("Optional reason")
+              .setRequired(false),
+          );
       }
 
       if (name === "backfillstats") {
         subcommand.addIntegerOption((option) =>
           option
             .setName("days")
-            .setDescription("How many days to scan (0 scans all available history)")
+            .setDescription(
+              "How many days to scan (0 scans all available history)",
+            )
             .setRequired(false)
             .setMinValue(0)
             .setMaxValue(3650),
@@ -730,16 +935,28 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
     });
   }
 
-  const fun = new SlashCommandBuilder().setName("fun").setDescription("Fun commands for everyone");
+  const fun = new SlashCommandBuilder()
+    .setName("fun")
+    .setDescription("Fun commands for everyone");
   for (const name of FUN_COMMANDS) {
     fun.addSubcommand((subcommand) => {
       subcommand.setName(name).setDescription(`Fun ${name} command`);
       if (name === "battle") {
-        subcommand.addUserOption((option) => option.setName("opponent").setDescription("Who do you want to fight?").setRequired(true));
+        subcommand.addUserOption((option) =>
+          option
+            .setName("opponent")
+            .setDescription("Who do you want to fight?")
+            .setRequired(true),
+        );
       }
 
       if (name === "stats") {
-        subcommand.addUserOption((option) => option.setName("member").setDescription("Optional member to inspect").setRequired(false));
+        subcommand.addUserOption((option) =>
+          option
+            .setName("member")
+            .setDescription("Optional member to inspect")
+            .setRequired(false),
+        );
       }
 
       if (name === "leaderboard") {
@@ -750,7 +967,10 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
               .setDescription("Metric to rank")
               .setRequired(true)
               .addChoices(
-                ...USER_FUN_METRIC_FIELDS.map(([metricName, label]) => ({ name: label, value: metricName })),
+                ...USER_FUN_METRIC_FIELDS.map(([metricName, label]) => ({
+                  name: label,
+                  value: metricName,
+                })),
               ),
           )
           .addIntegerOption((option) =>
@@ -764,15 +984,24 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
       }
 
       if (name === "fate") {
-        subcommand.addIntegerOption((option) => option.setName("roll").setDescription("Optional roll between 1 and 100").setRequired(false));
+        subcommand.addIntegerOption((option) =>
+          option
+            .setName("roll")
+            .setDescription("Optional roll between 1 and 100")
+            .setRequired(false),
+        );
       }
       return subcommand;
     });
   }
 
-  const greetings = new SlashCommandBuilder().setName("greetings").setDescription("Friendly greeting commands");
+  const greetings = new SlashCommandBuilder()
+    .setName("greetings")
+    .setDescription("Friendly greeting commands");
   for (const name of GREETINGS_COMMANDS) {
-    greetings.addSubcommand((subcommand) => subcommand.setName(name).setDescription(`Greeting ${name} command`));
+    greetings.addSubcommand((subcommand) =>
+      subcommand.setName(name).setDescription(`Greeting ${name} command`),
+    );
   }
 
   return [court, questions, invictus, fun, greetings];
@@ -805,7 +1034,10 @@ async function dispatchMappedCommand(
   return true;
 }
 
-export async function handleChatInputCommand(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+export async function handleChatInputCommand(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const command = interaction.commandName;
   const subcommand = interaction.options.getSubcommand();
 
@@ -816,7 +1048,12 @@ export async function handleChatInputCommand(interaction: ChatInputCommandIntera
     }
   }
 
-  const handled = await dispatchMappedCommand(command, subcommand, interaction, runtime);
+  const handled = await dispatchMappedCommand(
+    command,
+    subcommand,
+    interaction,
+    runtime,
+  );
   if (handled) {
     return;
   }
@@ -827,15 +1064,35 @@ export async function handleChatInputCommand(interaction: ChatInputCommandIntera
   });
 }
 
-export async function handleButtonInteraction(interaction: ButtonInteraction, runtime: BotRuntime): Promise<void> {
+export async function handleButtonInteraction(
+  interaction: ButtonInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
+  const rolePanelRoleId = extractRolePanelRoleIdFromCustomId(
+    interaction.customId,
+  );
+  if (rolePanelRoleId !== null) {
+    await handleRolePanelButtonInteraction(interaction, 1, rolePanelRoleId);
+    return;
+  }
+
   const rolePanelSlot = extractRolePanelButtonSlot(interaction.customId);
   if (rolePanelSlot !== null) {
     await handleRolePanelButtonInteraction(interaction, rolePanelSlot);
     return;
   }
 
-  if (interaction.customId === INVICTUS_DM_PANEL_BUTTON_ID) {
-    await handleInvictusDmPanelButtonInteraction(interaction);
+  const invictusDmPanelTargetUserId = parseInvictusDmPanelButtonTargetUserId(
+    interaction.customId,
+  );
+  if (
+    invictusDmPanelTargetUserId ||
+    interaction.customId === INVICTUS_DM_PANEL_BUTTON_ID
+  ) {
+    await handleInvictusDmPanelButtonInteraction(
+      interaction,
+      invictusDmPanelTargetUserId,
+    );
     return;
   }
 
@@ -854,7 +1111,9 @@ export async function handleButtonInteraction(interaction: ButtonInteraction, ru
     return;
   }
 
-  await interaction.showModal(buildAnonymousAnswerModal(interaction.message.id));
+  await interaction.showModal(
+    buildAnonymousAnswerModal(interaction.message.id),
+  );
 }
 
 export async function handleModalSubmitInteraction(
@@ -863,13 +1122,24 @@ export async function handleModalSubmitInteraction(
 ): Promise<void> {
   const adminSayContext = extractAdminSayContextFromModal(interaction.customId);
   if (adminSayContext) {
-    await handleAdminSayModalSubmit(interaction, runtime, adminSayContext.channelId, adminSayContext.mentionEveryone);
+    await handleAdminSayModalSubmit(
+      interaction,
+      runtime,
+      adminSayContext.channelId,
+      adminSayContext.mentionEveryone,
+    );
     return;
   }
 
-  const invictusDmPanelTargetUserId = parseInvictusDmPanelModalTargetUserId(interaction.customId);
+  const invictusDmPanelTargetUserId = parseInvictusDmPanelModalTargetUserId(
+    interaction.customId,
+  );
   if (invictusDmPanelTargetUserId) {
-    await handleInvictusDmPanelModalSubmit(interaction, runtime, invictusDmPanelTargetUserId);
+    await handleInvictusDmPanelModalSubmit(
+      interaction,
+      runtime,
+      invictusDmPanelTargetUserId,
+    );
     return;
   }
 
@@ -883,7 +1153,9 @@ export async function handleModalSubmitInteraction(
     return;
   }
 
-  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const member = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
   if (!member) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return;
@@ -895,34 +1167,58 @@ export async function handleModalSubmitInteraction(
     return;
   }
 
-  const sourceMessage = await resolveCourtPostMessageForModal(interaction, postRecord, questionMessageId);
+  const sourceMessage = await resolveCourtPostMessageForModal(
+    interaction,
+    postRecord,
+    questionMessageId,
+  );
   if (!sourceMessage) {
-    await interaction.reply({ content: "Could not find the original court post.", ephemeral: true });
+    await interaction.reply({
+      content: "Could not find the original court post.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const answerText = interaction.fields.getTextInputValue(ANON_MODAL_INPUT_ID).trim();
+  const answerText = interaction.fields
+    .getTextInputValue(ANON_MODAL_INPUT_ID)
+    .trim();
   if (!answerText) {
-    await interaction.reply({ content: "Answer cannot be empty.", ephemeral: true });
+    await interaction.reply({
+      content: "Answer cannot be empty.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const validationError = validateAnonymousAnswerSubmission(member, answerText, runtime);
+  const validationError = validateAnonymousAnswerSubmission(
+    member,
+    answerText,
+    runtime,
+  );
   if (validationError) {
     await interaction.reply({ content: validationError, ephemeral: true });
     return;
   }
 
   if (runtime.storage.hasUserAnswered(questionMessageId, member.id)) {
-    await interaction.reply({ content: "You already answered this court inquiry.", ephemeral: true });
+    await interaction.reply({
+      content: "You already answered this court inquiry.",
+      ephemeral: true,
+    });
     return;
   }
 
   const question = extractQuestionFromMessage(sourceMessage);
-  const thread = await getOrCreateAnswerThread(sourceMessage, question, runtime);
+  const thread = await getOrCreateAnswerThread(
+    sourceMessage,
+    question,
+    runtime,
+  );
   if (!thread) {
     await interaction.reply({
-      content: "Could not create or find the reply thread. Check the bot's thread permissions.",
+      content:
+        "Could not create or find the reply thread. Check the bot's thread permissions.",
       ephemeral: true,
     });
     return;
@@ -943,7 +1239,10 @@ export async function handleModalSubmitInteraction(
 
   const sent = await thread.send({ embeds: [embed] }).catch(() => null);
   if (!sent) {
-    await interaction.reply({ content: "Failed to post your anonymous answer.", ephemeral: true });
+    await interaction.reply({
+      content: "Failed to post your anonymous answer.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -956,11 +1255,16 @@ export async function handleModalSubmitInteraction(
   });
 }
 
-async function handleCourtStatus(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtStatus(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const state = runtime.storage.getState();
   const openPosts = runtime.storage.listPostRecords(false).length;
-  const channelMention = state.channel_id > 0 ? `<#${state.channel_id}>` : "Not set";
-  const logChannelMention = state.log_channel_id > 0 ? `<#${state.log_channel_id}>` : "Disabled";
+  const channelMention =
+    state.channel_id > 0 ? `<#${state.channel_id}>` : "Not set";
+  const logChannelMention =
+    state.log_channel_id > 0 ? `<#${state.log_channel_id}>` : "Disabled";
 
   const statusText = [
     `**Version:** \`${runtime.config.botVersion}\``,
@@ -978,7 +1282,10 @@ async function handleCourtStatus(interaction: ChatInputCommandInteraction, runti
   await interaction.reply({ content: statusText, ephemeral: true });
 }
 
-function getDbHealthSummary(dbFile: string): { status: "present" | "missing"; sizeKb: string } {
+function getDbHealthSummary(dbFile: string): {
+  status: "present" | "missing";
+  sizeKb: string;
+} {
   const dbExists = existsSync(dbFile);
   const dbSizeBytes = dbExists ? statSync(dbFile).size : 0;
   return {
@@ -987,7 +1294,10 @@ function getDbHealthSummary(dbFile: string): { status: "present" | "missing"; si
   };
 }
 
-function getLogChannelHealthText(logChannelId: number, logChannel: Channel | null): string {
+function getLogChannelHealthText(
+  logChannelId: number,
+  logChannel: Channel | null,
+): string {
   if (logChannelId === 0) {
     return "Disabled";
   }
@@ -997,7 +1307,10 @@ function getLogChannelHealthText(logChannelId: number, logChannel: Channel | nul
   return "Configured but not found";
 }
 
-async function handleCourtHealth(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtHealth(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -1013,14 +1326,27 @@ async function handleCourtHealth(interaction: ChatInputCommandInteraction, runti
   const targetChannel = await getTargetChannel(interaction, runtime);
   const logChannel = await getLogChannel(interaction, runtime);
 
-  const me = interaction.guild.members.me ?? (await interaction.guild.members.fetchMe().catch(() => null));
+  const me =
+    interaction.guild.members.me ??
+    (await interaction.guild.members.fetchMe().catch(() => null));
   const missingPermissions = findMissingChannelPermissions(targetChannel, me);
 
-  const nextRunText = buildNextRunText(state.mode, state.hour, state.minute, now);
-  const totalQuestions = Object.values(questions).reduce((sum, values) => sum + values.length, 0);
+  const nextRunText = buildNextRunText(
+    state.mode,
+    state.hour,
+    state.minute,
+    now,
+  );
+  const totalQuestions = Object.values(questions).reduce(
+    (sum, values) => sum + values.length,
+    0,
+  );
   const dbSummary = getDbHealthSummary(runtime.config.dbFile);
   const channelText = targetChannel ? targetChannel.toString() : "Not found";
-  const logChannelText = getLogChannelHealthText(state.log_channel_id, logChannel);
+  const logChannelText = getLogChannelHealthText(
+    state.log_channel_id,
+    logChannel,
+  );
 
   const warnings: string[] = [];
   if (!targetChannel) {
@@ -1033,56 +1359,63 @@ async function handleCourtHealth(interaction: ChatInputCommandInteraction, runti
     warnings.push("Bot is missing permissions in court channel");
   }
   if (overduePosts > 0) {
-    warnings.push(`${overduePosts} open thread(s) appear overdue for auto-close`);
+    warnings.push(
+      `${overduePosts} open thread(s) appear overdue for auto-close`,
+    );
   }
 
   const overall = warnings.length === 0 ? "Healthy" : "Attention Needed";
 
   const embed = new EmbedBuilder()
     .setTitle("Court Health Check")
-    .setDescription(`**Overall:** \`${overall}\`\n**Timezone:** \`${runtime.config.timezoneName}\`\n**Now:** \`${now.toFormat("yyyy-LL-dd HH:mm:ss")}\``)
+    .setDescription(
+      `**Overall:** \`${overall}\`\n**Timezone:** \`${runtime.config.timezoneName}\`\n**Now:** \`${now.toFormat("yyyy-LL-dd HH:mm:ss")}\``,
+    )
     .setColor(ROLE_COLOR)
     .setTimestamp(now.toJSDate())
     .addFields(
       {
         name: "Scheduling",
         value:
-          `**Mode:** \`${state.mode}\`\n`
-          + `**Dry Run:** \`${state.dry_run_auto_post ? "enabled" : "disabled"}\`\n`
-          + `**Auto Time:** \`${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}\`\n`
-          + `**Next Auto-Post:** ${nextRunText}\n`
-          + `**Last Posted Date:** \`${state.last_posted_date ?? "Never"}\`\n`
-          + `**Last Successful Auto-Post:** \`${metrics.last_successful_auto_post ?? "Never"}\``,
+          `**Mode:** \`${state.mode}\`\n` +
+          `**Dry Run:** \`${state.dry_run_auto_post ? "enabled" : "disabled"}\`\n` +
+          `**Auto Time:** \`${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}\`\n` +
+          `**Next Auto-Post:** ${nextRunText}\n` +
+          `**Last Posted Date:** \`${state.last_posted_date ?? "Never"}\`\n` +
+          `**Last Successful Auto-Post:** \`${metrics.last_successful_auto_post ?? "Never"}\``,
         inline: false,
       },
       {
         name: "Channels",
         value:
-          `**Court Channel:** ${channelText}\n`
-          + `**Log Channel:** ${logChannelText}`,
+          `**Court Channel:** ${channelText}\n` +
+          `**Log Channel:** ${logChannelText}`,
         inline: false,
       },
       {
         name: "Tasks",
         value:
-          "**Auto Poster Loop:** `running`\n"
-          + "**Thread Closer Loop:** `running`\n"
-          + "**Weekly Digest Loop:** `running`\n"
-          + "**Retention Loop:** `running`",
+          "**Auto Poster Loop:** `running`\n" +
+          "**Thread Closer Loop:** `running`\n" +
+          "**Weekly Digest Loop:** `running`\n" +
+          "**Retention Loop:** `running`",
         inline: true,
       },
       {
         name: "Data",
         value:
-          `**Questions:** \`${totalQuestions}\`\n`
-          + `**Used Pool:** \`${state.used_questions.length}\`\n`
-          + `**Open Posts:** \`${openPosts}\`\n`
-          + `**DB:** \`${dbSummary.status}\` (${dbSummary.sizeKb} KB)`,
+          `**Questions:** \`${totalQuestions}\`\n` +
+          `**Used Pool:** \`${state.used_questions.length}\`\n` +
+          `**Open Posts:** \`${openPosts}\`\n` +
+          `**DB:** \`${dbSummary.status}\` (${dbSummary.sizeKb} KB)`,
         inline: true,
       },
       {
         name: "Warnings",
-        value: warnings.length > 0 ? warnings.map((warning) => `- ${warning}`).join("\n") : "None.",
+        value:
+          warnings.length > 0
+            ? warnings.map((warning) => `- ${warning}`).join("\n")
+            : "None.",
         inline: false,
       },
     );
@@ -1090,7 +1423,9 @@ async function handleCourtHealth(interaction: ChatInputCommandInteraction, runti
   if (missingPermissions.length > 0) {
     embed.addFields({
       name: "Missing Permissions",
-      value: missingPermissions.map((permission) => `- ${permission}`).join("\n"),
+      value: missingPermissions
+        .map((permission) => `- ${permission}`)
+        .join("\n"),
       inline: false,
     });
   }
@@ -1099,12 +1434,17 @@ async function handleCourtHealth(interaction: ChatInputCommandInteraction, runti
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }
 
-async function handleCourtAnalytics(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtAnalytics(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const metrics = runtime.storage.metricsSnapshot();
   const posts = runtime.storage.listPostRecords(true, 100);
   const today = runtime.now().toFormat("yyyy-LL-dd");
 
-  const postsToday = posts.filter((post) => String(post.posted_at).startsWith(today)).length;
+  const postsToday = posts.filter((post) =>
+    String(post.posted_at).startsWith(today),
+  ).length;
   const openPosts = posts.filter((post) => !post.closed).length;
   const totalAnswers = runtime.storage.countAllAnswerRecords();
   const postCount = Math.max(posts.length, 1);
@@ -1113,12 +1453,18 @@ async function handleCourtAnalytics(interaction: ChatInputCommandInteraction, ru
   const topCategories = Object.entries(metrics.posts_by_category)
     .sort((left, right) => right[1] - left[1])
     .slice(0, 5);
-  const categoryLines = topCategories.map(([category, count]) => `- \`${category}\`: \`${count}\``).join("\n") || "No data yet.";
+  const categoryLines =
+    topCategories
+      .map(([category, count]) => `- \`${category}\`: \`${count}\``)
+      .join("\n") || "No data yet.";
 
   const topCommands = Object.entries(metrics.command_usage)
     .sort((left, right) => right[1] - left[1])
     .slice(0, 8);
-  const commandLines = topCommands.map(([commandName, count]) => `- \`${commandName}\`: \`${count}\``).join("\n") || "No command usage yet.";
+  const commandLines =
+    topCommands
+      .map(([commandName, count]) => `- \`${commandName}\`: \`${count}\``)
+      .join("\n") || "No command usage yet.";
 
   const embed = new EmbedBuilder()
     .setTitle("Court Analytics")
@@ -1129,20 +1475,20 @@ async function handleCourtAnalytics(interaction: ChatInputCommandInteraction, ru
       {
         name: "Posts",
         value:
-          `**Lifetime Total:** \`${metrics.posts_total}\`\n`
-          + `**Auto Posts:** \`${metrics.posts_auto}\`\n`
-          + `**Manual Posts:** \`${metrics.posts_manual}\`\n`
-          + `**Custom Posts:** \`${metrics.custom_posts}\`\n`
-          + `**Posts Today (recent window):** \`${postsToday}\`\n`
-          + `**Open Posts:** \`${openPosts}\``,
+          `**Lifetime Total:** \`${metrics.posts_total}\`\n` +
+          `**Auto Posts:** \`${metrics.posts_auto}\`\n` +
+          `**Manual Posts:** \`${metrics.posts_manual}\`\n` +
+          `**Custom Posts:** \`${metrics.custom_posts}\`\n` +
+          `**Posts Today (recent window):** \`${postsToday}\`\n` +
+          `**Open Posts:** \`${openPosts}\``,
         inline: false,
       },
       {
         name: "Engagement",
         value:
-          `**Tracked Answers:** \`${metrics.answers_total}\`\n`
-          + `**Current Answer Records:** \`${totalAnswers}\`\n`
-          + `**Avg Answers per Post (recent window):** \`${averageAnswers.toFixed(2)}\``,
+          `**Tracked Answers:** \`${metrics.answers_total}\`\n` +
+          `**Current Answer Records:** \`${totalAnswers}\`\n` +
+          `**Avg Answers per Post (recent window):** \`${averageAnswers.toFixed(2)}\``,
         inline: false,
       },
       {
@@ -1161,7 +1507,10 @@ async function handleCourtAnalytics(interaction: ChatInputCommandInteraction, ru
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }
 
-async function handleCourtDryRun(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtDryRun(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const enabled = interaction.options.getBoolean("enabled", true);
   runtime.storage.updateStateAtomic((state) => {
     state.dry_run_auto_post = enabled;
@@ -1177,15 +1526,27 @@ async function handleCourtDryRun(interaction: ChatInputCommandInteraction, runti
   });
 }
 
-async function handleCourtExportState(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtExportState(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const payload = JSON.stringify(runtime.storage.getState(), null, 2);
-  const attachment = new AttachmentBuilder(Buffer.from(payload, "utf-8"), { name: "court_state_export.json" });
+  const attachment = new AttachmentBuilder(Buffer.from(payload, "utf-8"), {
+    name: "court_state_export.json",
+  });
 
   runtime.storage.recordCommandMetric("court.exportstate");
-  await interaction.reply({ content: "State export attached.", files: [attachment], ephemeral: true });
+  await interaction.reply({
+    content: "State export attached.",
+    files: [attachment],
+    ephemeral: true,
+  });
 }
 
-async function handleCourtImportState(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtImportState(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const file = interaction.options.getAttachment("file", true);
   const confirm = interaction.options.getString("confirm", true);
 
@@ -1203,26 +1564,45 @@ async function handleCourtImportState(interaction: ChatInputCommandInteraction, 
     const raw = await response.text();
     imported = JSON.parse(raw);
   } catch {
-    await interaction.reply({ content: "Failed to parse state JSON file.", ephemeral: true });
+    await interaction.reply({
+      content: "Failed to parse state JSON file.",
+      ephemeral: true,
+    });
     return;
   }
 
   if (typeof imported !== "object" || imported === null) {
-    await interaction.reply({ content: "Imported state must be a JSON object.", ephemeral: true });
+    await interaction.reply({
+      content: "Imported state must be a JSON object.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const merged = mergeImportedState(imported, runtime.storage.getState(), runtime.config.courtChannelId);
+  const merged = mergeImportedState(
+    imported,
+    runtime.storage.getState(),
+    runtime.config.courtChannelId,
+  );
   runtime.storage.saveState(merged);
 
   runtime.storage.recordCommandMetric("court.importstate");
-  await interaction.reply({ content: "State imported successfully.", ephemeral: true });
+  await interaction.reply({
+    content: "State imported successfully.",
+    ephemeral: true,
+  });
 }
 
-async function handleCourtChannel(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtChannel(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const channel = interaction.options.getChannel("channel", true);
   if (!(channel instanceof TextChannel)) {
-    await interaction.reply({ content: "Channel must be a text channel.", ephemeral: true });
+    await interaction.reply({
+      content: "Channel must be a text channel.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1231,7 +1611,10 @@ async function handleCourtChannel(interaction: ChatInputCommandInteraction, runt
   });
 
   runtime.storage.recordCommandMetric("court.channel");
-  await interaction.reply({ content: `Court channel set to ${channel.toString()}.`, ephemeral: true });
+  await interaction.reply({
+    content: `Court channel set to ${channel.toString()}.`,
+    ephemeral: true,
+  });
 
   await sendLog(
     interaction,
@@ -1241,10 +1624,16 @@ async function handleCourtChannel(interaction: ChatInputCommandInteraction, runt
   );
 }
 
-async function handleCourtLogChannel(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtLogChannel(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const channel = interaction.options.getChannel("channel");
   if (channel && !(channel instanceof TextChannel)) {
-    await interaction.reply({ content: "Log channel must be a text channel.", ephemeral: true });
+    await interaction.reply({
+      content: "Log channel must be a text channel.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1254,11 +1643,17 @@ async function handleCourtLogChannel(interaction: ChatInputCommandInteraction, r
 
   runtime.storage.recordCommandMetric("court.logchannel");
   if (!channel) {
-    await interaction.reply({ content: "Log channel disabled.", ephemeral: true });
+    await interaction.reply({
+      content: "Log channel disabled.",
+      ephemeral: true,
+    });
     return;
   }
 
-  await interaction.reply({ content: `Log channel set to ${channel.toString()}.`, ephemeral: true });
+  await interaction.reply({
+    content: `Log channel set to ${channel.toString()}.`,
+    ephemeral: true,
+  });
   await sendLog(
     interaction,
     runtime,
@@ -1267,15 +1662,20 @@ async function handleCourtLogChannel(interaction: ChatInputCommandInteraction, r
   );
 }
 
-async function handleCourtListCategories(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtListCategories(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const questions = runtime.storage.getQuestions();
   let total = 0;
 
-  const lines = Object.entries(CATEGORY_DESCRIPTIONS).map(([category, description]) => {
-    const count = questions[category]?.length ?? 0;
-    total += count;
-    return `- \`${category}\`: \`${count}\` question(s) - ${description}`;
-  });
+  const lines = Object.entries(CATEGORY_DESCRIPTIONS).map(
+    ([category, description]) => {
+      const count = questions[category]?.length ?? 0;
+      total += count;
+      return `- \`${category}\`: \`${count}\` question(s) - ${description}`;
+    },
+  );
 
   runtime.storage.recordCommandMetric("court.listcategories");
   await interaction.reply({
@@ -1284,9 +1684,14 @@ async function handleCourtListCategories(interaction: ChatInputCommandInteractio
   });
 }
 
-async function handleCourtAddQuestion(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtAddQuestion(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const category = interaction.options.getString("category", true);
-  const cleanQuestion = normalizeQuestionText(interaction.options.getString("question", true));
+  const cleanQuestion = normalizeQuestionText(
+    interaction.options.getString("question", true),
+  );
 
   if (!cleanQuestion) {
     await interaction.reply({ content: MSG_QUESTION_EMPTY, ephemeral: true });
@@ -1299,9 +1704,14 @@ async function handleCourtAddQuestion(interaction: ChatInputCommandInteraction, 
 
   const questions = runtime.storage.getQuestions();
   const categoryItems = questions[category] ?? [];
-  const alreadyExists = categoryItems.some((existing) => existing.trim().toLowerCase() === cleanQuestion.toLowerCase());
+  const alreadyExists = categoryItems.some(
+    (existing) => existing.trim().toLowerCase() === cleanQuestion.toLowerCase(),
+  );
   if (alreadyExists) {
-    await interaction.reply({ content: `That question already exists in \`${category}\`.`, ephemeral: true });
+    await interaction.reply({
+      content: `That question already exists in \`${category}\`.`,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1309,7 +1719,10 @@ async function handleCourtAddQuestion(interaction: ChatInputCommandInteraction, 
   runtime.storage.setQuestions(questions);
   runtime.storage.recordCommandMetric("court.addquestion");
 
-  await interaction.reply({ content: `Added question to \`${category}\`.`, ephemeral: true });
+  await interaction.reply({
+    content: `Added question to \`${category}\`.`,
+    ephemeral: true,
+  });
   await sendLog(
     interaction,
     runtime,
@@ -1318,9 +1731,14 @@ async function handleCourtAddQuestion(interaction: ChatInputCommandInteraction, 
   );
 }
 
-async function handleCourtDeleteQuestion(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtDeleteQuestion(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const category = interaction.options.getString("category", true);
-  const cleanQuestion = normalizeQuestionText(interaction.options.getString("question", true));
+  const cleanQuestion = normalizeQuestionText(
+    interaction.options.getString("question", true),
+  );
 
   if (!cleanQuestion) {
     await interaction.reply({ content: MSG_QUESTION_EMPTY, ephemeral: true });
@@ -1334,9 +1752,14 @@ async function handleCourtDeleteQuestion(interaction: ChatInputCommandInteractio
   const questions = runtime.storage.getQuestions();
   const items = questions[category] ?? [];
   const target = cleanQuestion.toLowerCase();
-  const kept = items.filter((question) => question.trim().toLowerCase() !== target);
+  const kept = items.filter(
+    (question) => question.trim().toLowerCase() !== target,
+  );
   if (kept.length === items.length) {
-    await interaction.reply({ content: "Question not found in that category.", ephemeral: true });
+    await interaction.reply({
+      content: "Question not found in that category.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1345,7 +1768,10 @@ async function handleCourtDeleteQuestion(interaction: ChatInputCommandInteractio
   removeQuestionFromState(runtime, cleanQuestion);
   runtime.storage.recordCommandMetric("court.deletequestion");
 
-  await interaction.reply({ content: `Removed \`${items.length - kept.length}\` matching question(s) from \`${category}\`.`, ephemeral: true });
+  await interaction.reply({
+    content: `Removed \`${items.length - kept.length}\` matching question(s) from \`${category}\`.`,
+    ephemeral: true,
+  });
   await sendLog(
     interaction,
     runtime,
@@ -1354,13 +1780,23 @@ async function handleCourtDeleteQuestion(interaction: ChatInputCommandInteractio
   );
 }
 
-async function handleCourtEditQuestion(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtEditQuestion(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const category = interaction.options.getString("category", true);
-  const oldQuestion = normalizeQuestionText(interaction.options.getString("old_question", true));
-  const newQuestion = normalizeQuestionText(interaction.options.getString("new_question", true));
+  const oldQuestion = normalizeQuestionText(
+    interaction.options.getString("old_question", true),
+  );
+  const newQuestion = normalizeQuestionText(
+    interaction.options.getString("new_question", true),
+  );
 
   if (!oldQuestion || !newQuestion) {
-    await interaction.reply({ content: "Old and new question text must be non-empty.", ephemeral: true });
+    await interaction.reply({
+      content: "Old and new question text must be non-empty.",
+      ephemeral: true,
+    });
     return;
   }
   if (!(category in CATEGORY_DESCRIPTIONS)) {
@@ -1372,10 +1808,15 @@ async function handleCourtEditQuestion(interaction: ChatInputCommandInteraction,
   const items = [...(questions[category] ?? [])];
 
   if (
-    oldQuestion.toLowerCase() !== newQuestion.toLowerCase()
-    && items.some((question) => question.trim().toLowerCase() === newQuestion.toLowerCase())
+    oldQuestion.toLowerCase() !== newQuestion.toLowerCase() &&
+    items.some(
+      (question) => question.trim().toLowerCase() === newQuestion.toLowerCase(),
+    )
   ) {
-    await interaction.reply({ content: "That replacement question already exists in this category.", ephemeral: true });
+    await interaction.reply({
+      content: "That replacement question already exists in this category.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1389,7 +1830,10 @@ async function handleCourtEditQuestion(interaction: ChatInputCommandInteraction,
   }
 
   if (!replaced) {
-    await interaction.reply({ content: "Question not found in that category.", ephemeral: true });
+    await interaction.reply({
+      content: "Question not found in that category.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1398,7 +1842,10 @@ async function handleCourtEditQuestion(interaction: ChatInputCommandInteraction,
   replaceQuestionInState(runtime, oldQuestion, newQuestion);
   runtime.storage.recordCommandMetric("court.editquestion");
 
-  await interaction.reply({ content: `Updated question in \`${category}\`.`, ephemeral: true });
+  await interaction.reply({
+    content: `Updated question in \`${category}\`.`,
+    ephemeral: true,
+  });
   await sendLog(
     interaction,
     runtime,
@@ -1407,14 +1854,20 @@ async function handleCourtEditQuestion(interaction: ChatInputCommandInteraction,
   );
 }
 
-async function handleCourtResetHistory(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtResetHistory(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   runtime.storage.updateStateAtomic((state) => {
     state.history = [];
     state.used_questions = [];
   });
 
   runtime.storage.recordCommandMetric("court.resethistory");
-  await interaction.reply({ content: "Question history and used pool have been reset.", ephemeral: true });
+  await interaction.reply({
+    content: "Question history and used pool have been reset.",
+    ephemeral: true,
+  });
   await sendLog(
     interaction,
     runtime,
@@ -1426,18 +1879,33 @@ async function handleCourtResetHistory(interaction: ChatInputCommandInteraction,
 function removeQuestionFromState(runtime: BotRuntime, question: string): void {
   runtime.storage.updateStateAtomic((state) => {
     state.history = state.history.filter((item) => item !== question);
-    state.used_questions = state.used_questions.filter((item) => item !== question);
+    state.used_questions = state.used_questions.filter(
+      (item) => item !== question,
+    );
   });
 }
 
-function replaceQuestionInState(runtime: BotRuntime, oldQuestion: string, newQuestion: string): void {
+function replaceQuestionInState(
+  runtime: BotRuntime,
+  oldQuestion: string,
+  newQuestion: string,
+): void {
   runtime.storage.updateStateAtomic((state) => {
-    state.history = state.history.map((item) => (item === oldQuestion ? newQuestion : item));
-    state.used_questions = state.used_questions.map((item) => (item === oldQuestion ? newQuestion : item));
+    state.history = state.history.map((item) =>
+      item === oldQuestion ? newQuestion : item,
+    );
+    state.used_questions = state.used_questions.map((item) =>
+      item === oldQuestion ? newQuestion : item,
+    );
   });
 }
 
-function buildNextRunText(mode: BotMode, hour: number, minute: number, now: DateTime): string {
+function buildNextRunText(
+  mode: BotMode,
+  hour: number,
+  minute: number,
+  now: DateTime,
+): string {
   if (mode !== "auto") {
     return `Not scheduled while mode is \`${mode}\``;
   }
@@ -1447,7 +1915,10 @@ function buildNextRunText(mode: BotMode, hour: number, minute: number, now: Date
   return `${effectiveNextRun.toFormat("yyyy-LL-dd HH:mm")} (in ${formatDuration(effectiveNextRun.diff(now))})`;
 }
 
-function findMissingChannelPermissions(channel: TextChannel | null, me: GuildMember | null): string[] {
+function findMissingChannelPermissions(
+  channel: TextChannel | null,
+  me: GuildMember | null,
+): string[] {
   if (!channel || !me) {
     return [];
   }
@@ -1472,17 +1943,26 @@ function findMissingChannelPermissions(channel: TextChannel | null, me: GuildMem
   return missing;
 }
 
-async function handleCourtMode(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtMode(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const requestedMode = interaction.options.getString("mode");
 
   if (!requestedMode) {
     const state = runtime.storage.getState();
-    await interaction.reply({ content: `Current mode is ${state.mode}.`, ephemeral: true });
+    await interaction.reply({
+      content: `Current mode is ${state.mode}.`,
+      ephemeral: true,
+    });
     return;
   }
 
   if (!["off", "manual", "auto"].includes(requestedMode)) {
-    await interaction.reply({ content: "Invalid mode. Use off, manual, or auto.", ephemeral: true });
+    await interaction.reply({
+      content: "Invalid mode. Use off, manual, or auto.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1490,10 +1970,16 @@ async function handleCourtMode(interaction: ChatInputCommandInteraction, runtime
     state.mode = requestedMode as BotMode;
   });
 
-  await interaction.reply({ content: `Mode updated to ${requestedMode}.`, ephemeral: true });
+  await interaction.reply({
+    content: `Mode updated to ${requestedMode}.`,
+    ephemeral: true,
+  });
 }
 
-async function handleCourtSchedule(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtSchedule(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const hour = interaction.options.getInteger("hour");
   const minute = interaction.options.getInteger("minute");
 
@@ -1507,12 +1993,18 @@ async function handleCourtSchedule(interaction: ChatInputCommandInteraction, run
   }
 
   if (hour !== null && (hour < 0 || hour > 23)) {
-    await interaction.reply({ content: "hour must be between 0 and 23", ephemeral: true });
+    await interaction.reply({
+      content: "hour must be between 0 and 23",
+      ephemeral: true,
+    });
     return;
   }
 
   if (minute !== null && (minute < 0 || minute > 59)) {
-    await interaction.reply({ content: "minute must be between 0 and 59", ephemeral: true });
+    await interaction.reply({
+      content: "minute must be between 0 and 59",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1532,14 +2024,20 @@ async function handleCourtSchedule(interaction: ChatInputCommandInteraction, run
   });
 }
 
-async function handleQuestionCount(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleQuestionCount(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const category = interaction.options.getString("category");
   const questions = runtime.storage.getQuestions();
 
   if (category) {
     const selected = questions[category] ?? [];
     runtime.storage.recordCommandMetric("court.questions.count");
-    await interaction.reply({ content: `${category}: ${selected.length} question(s).`, ephemeral: true });
+    await interaction.reply({
+      content: `${category}: ${selected.length} question(s).`,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1548,10 +2046,16 @@ async function handleQuestionCount(interaction: ChatInputCommandInteraction, run
     .map(([name, items]) => `${name}: ${items.length}`);
 
   runtime.storage.recordCommandMetric("court.questions.count");
-  await interaction.reply({ content: lines.join("\n") || "No questions found.", ephemeral: true });
+  await interaction.reply({
+    content: lines.join("\n") || "No questions found.",
+    ephemeral: true,
+  });
 }
 
-async function handleQuestionUnused(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleQuestionUnused(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const category = interaction.options.getString("category");
   const questions = runtime.storage.getQuestions();
   const used = new Set(runtime.storage.getState().used_questions);
@@ -1559,7 +2063,11 @@ async function handleQuestionUnused(interaction: ChatInputCommandInteraction, ru
   if (category) {
     const items = questions[category] ?? [];
     const unused = items.filter((question) => !used.has(question));
-    const preview = unused.slice(0, 10).map((question) => `- ${question}`).join("\n") || "None.";
+    const preview =
+      unused
+        .slice(0, 10)
+        .map((question) => `- ${question}`)
+        .join("\n") || "None.";
 
     runtime.storage.recordCommandMetric("court.questions.unused");
     await interaction.reply({
@@ -1583,7 +2091,10 @@ async function handleQuestionUnused(interaction: ChatInputCommandInteraction, ru
   });
 }
 
-async function handleQuestionAudit(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleQuestionAudit(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const report = buildQuestionAuditReport(runtime.storage.getQuestions());
   runtime.storage.recordCommandMetric("court.questions.audit");
   await interaction.reply({ content: report.slice(0, 1900), ephemeral: true });
@@ -1614,8 +2125,14 @@ function buildQuestionAuditReport(questions: Record<string, string[]>): string {
     }
   }
 
-  const shortQuestions = allItems.filter(([, question]) => question.length < 20).slice(0, 10).map(([category, question]) => `- \`${category}\`: ${question}`);
-  const longQuestions = allItems.filter(([, question]) => question.length > 160).slice(0, 10).map(([category, question]) => `- \`${category}\`: ${question}`);
+  const shortQuestions = allItems
+    .filter(([, question]) => question.length < 20)
+    .slice(0, 10)
+    .map(([category, question]) => `- \`${category}\`: ${question}`);
+  const longQuestions = allItems
+    .filter(([, question]) => question.length > 160)
+    .slice(0, 10)
+    .map(([category, question]) => `- \`${category}\`: ${question}`);
 
   const lines = [
     "**Question Audit Report**",
@@ -1649,33 +2166,48 @@ function questionFingerprint(question: string): string {
     .join(" ");
 }
 
-async function handleFunVerdict(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleFunVerdict(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const verdict = randomImperialVerdict(runtime.randomInt);
   await interaction.reply({ content: verdict });
 }
 
-async function handleFunTitle(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleFunTitle(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const title = randomImperialTitle(runtime.randomInt);
   await interaction.reply({ content: `Imperial title granted: ${title}` });
 }
 
-async function handleFate(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleFate(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const requestedRoll = interaction.options.getInteger("roll");
   const roll = requestedRoll ?? runtime.randomInt(100) + 1;
   const [tier, reading] = getFateReading(roll);
-  const omen = IMPERIAL_OMENS[runtime.randomInt(IMPERIAL_OMENS.length)] ?? IMPERIAL_OMENS[0];
+  const omen =
+    IMPERIAL_OMENS[runtime.randomInt(IMPERIAL_OMENS.length)] ??
+    IMPERIAL_OMENS[0];
 
   const embed = new EmbedBuilder()
     .setTitle("Imperial Fate")
     .setColor(ROLE_COLOR)
     .setDescription(`Roll: ${roll}\nTier: ${tier}\n${reading}`)
     .addFields({ name: "Omen", value: omen })
-    .setFooter({ text: `Generated in ${formatDuration(runtime.now().diff(runtime.now().minus({ seconds: 0 })))}.` });
+    .setFooter({
+      text: `Generated in ${formatDuration(runtime.now().diff(runtime.now().minus({ seconds: 0 })))}.`,
+    });
 
   await interaction.reply({ embeds: [embed] });
 }
 
-async function handleInvictusSay(interaction: ChatInputCommandInteraction): Promise<void> {
+async function handleInvictusSay(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -1683,31 +2215,45 @@ async function handleInvictusSay(interaction: ChatInputCommandInteraction): Prom
 
   const targetChannelOption = interaction.options.getChannel("channel", true);
   if (!(targetChannelOption instanceof TextChannel)) {
-    await interaction.reply({ content: "Target channel must be a text channel.", ephemeral: true });
+    await interaction.reply({
+      content: "Target channel must be a text channel.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const mentionEveryone = interaction.options.getBoolean("mention_everyone") ?? false;
-  await interaction.showModal(buildAdminSayModal(targetChannelOption.id, mentionEveryone));
+  const mentionEveryone =
+    interaction.options.getBoolean("mention_everyone") ?? false;
+  await interaction.showModal(
+    buildAdminSayModal(targetChannelOption.id, mentionEveryone),
+  );
 }
 
-async function handleInvictusDmPanel(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusDmPanel(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
   }
 
   const requestedChannel = interaction.options.getChannel("channel");
-  const targetChannel = (isDmPanelTargetChannel(requestedChannel) ? requestedChannel : null) ?? getDmPanelTargetChannel(interaction);
+  const targetChannel =
+    (isDmPanelTargetChannel(requestedChannel) ? requestedChannel : null) ??
+    getDmPanelTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
-      content: "Provide a text-based channel, or run this command from a text-based channel.",
+      content:
+        "Provide a text-based channel, or run this command from a text-based channel.",
       ephemeral: true,
     });
     return;
   }
 
-  const buttonLabel = (interaction.options.getString("button_label") ?? "").trim() || INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL;
+  const buttonLabel =
+    (interaction.options.getString("button_label") ?? "").trim() ||
+    INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL;
   if (buttonLabel.length > ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH) {
     await interaction.reply({
       content: `Button label must be ${ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH} characters or fewer.`,
@@ -1716,9 +2262,14 @@ async function handleInvictusDmPanel(interaction: ChatInputCommandInteraction, r
     return;
   }
 
-  const me = interaction.guild.members.me ?? (await interaction.guild.members.fetchMe().catch(() => null));
+  const me =
+    interaction.guild.members.me ??
+    (await interaction.guild.members.fetchMe().catch(() => null));
   if (!me) {
-    await interaction.reply({ content: MSG_BOT_CONTEXT_ERROR, ephemeral: true });
+    await interaction.reply({
+      content: MSG_BOT_CONTEXT_ERROR,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1734,26 +2285,35 @@ async function handleInvictusDmPanel(interaction: ChatInputCommandInteraction, r
     interaction.options.getString("description"),
     runtime,
   );
-  const panelComponents = buildInvictusDmPanelComponents(buttonLabel);
-  const mentionEveryone = interaction.options.getBoolean("mention_everyone") ?? false;
+  const panelComponents = buildInvictusDmPanelComponents(
+    buttonLabel,
+    interaction.user.id,
+  );
+  const mentionEveryone =
+    interaction.options.getBoolean("mention_everyone") ?? false;
   const mentionPayload = buildAnnouncementMentions(mentionEveryone);
 
   const sent = await targetChannel
     .send({
-      ...(mentionPayload.content === null ? {} : { content: mentionPayload.content }),
+      ...(mentionPayload.content === null
+        ? {}
+        : { content: mentionPayload.content }),
       embeds: [panelEmbed],
       components: panelComponents,
       allowedMentions: mentionPayload.allowedMentions,
     })
     .catch(() => null);
   if (!sent) {
-    await interaction.reply({ content: "Failed to create the DM panel.", ephemeral: true });
+    await interaction.reply({
+      content: "Failed to create the DM panel in that channel.",
+      ephemeral: true,
+    });
     return;
   }
 
   runtime.storage.recordCommandMetric("invictus.dmpanel");
   await interaction.reply({
-    content: `DM panel posted in ${targetChannel.toString()}. Messages will be forwarded to you by DM.`,
+    content: `DM panel posted in ${targetChannel.toString()}. Button clicks will relay messages to your DMs.`,
     ephemeral: true,
   });
 
@@ -1776,33 +2336,53 @@ async function handleAdminSayModalSubmit(
     return;
   }
 
-  const actor = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const actor = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
   if (!actor) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return;
   }
 
-  const channel = interaction.guild.channels.cache.get(channelId) ?? (await interaction.guild.channels.fetch(channelId).catch(() => null));
+  const channel =
+    interaction.guild.channels.cache.get(channelId) ??
+    (await interaction.guild.channels.fetch(channelId).catch(() => null));
   if (!(channel instanceof TextChannel)) {
-    await interaction.reply({ content: "Target channel no longer exists or is not a text channel.", ephemeral: true });
+    await interaction.reply({
+      content: "Target channel no longer exists or is not a text channel.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const me = interaction.guild.members.me ?? (await interaction.guild.members.fetchMe().catch(() => null));
+  const me =
+    interaction.guild.members.me ??
+    (await interaction.guild.members.fetchMe().catch(() => null));
   if (!me) {
-    await interaction.reply({ content: MSG_BOT_CONTEXT_ERROR, ephemeral: true });
+    await interaction.reply({
+      content: MSG_BOT_CONTEXT_ERROR,
+      ephemeral: true,
+    });
     return;
   }
 
   const permissionError = getRolePanelChannelPermissionError(channel, me);
   if (permissionError) {
-    await interaction.reply({ content: "I do not have permission to send messages there.", ephemeral: true });
+    await interaction.reply({
+      content: "I do not have permission to send messages there.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const messageContent = interaction.fields.getTextInputValue(ADMIN_SAY_MODAL_INPUT_ID).trim();
+  const messageContent = interaction.fields
+    .getTextInputValue(ADMIN_SAY_MODAL_INPUT_ID)
+    .trim();
   if (!messageContent) {
-    await interaction.reply({ content: "Message cannot be empty.", ephemeral: true });
+    await interaction.reply({
+      content: "Message cannot be empty.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1814,18 +2394,26 @@ async function handleAdminSayModalSubmit(
 
   const sent = await channel
     .send({
-      ...(mentionPayload.content === null ? {} : { content: mentionPayload.content }),
+      ...(mentionPayload.content === null
+        ? {}
+        : { content: mentionPayload.content }),
       embeds: [embed],
       allowedMentions: mentionPayload.allowedMentions,
     })
     .catch(() => null);
   if (!sent) {
-    await interaction.reply({ content: "Failed to send the message.", ephemeral: true });
+    await interaction.reply({
+      content: "Failed to send the message.",
+      ephemeral: true,
+    });
     return;
   }
 
   runtime.storage.recordCommandMetric("invictus.say");
-  await interaction.reply({ content: `Announcement sent to ${channel.toString()}.`, ephemeral: true });
+  await interaction.reply({
+    content: `Announcement sent to ${channel.toString()}.`,
+    ephemeral: true,
+  });
 
   await sendLog(
     interaction,
@@ -1845,41 +2433,68 @@ async function handleInvictusDmPanelModalSubmit(
     return;
   }
 
-  const messageContent = interaction.fields.getTextInputValue(INVICTUS_DM_PANEL_MODAL_INPUT_ID).trim();
+  const messageContent = interaction.fields
+    .getTextInputValue(INVICTUS_DM_PANEL_MODAL_INPUT_ID)
+    .trim();
   if (!messageContent) {
-    await interaction.reply({ content: "Message cannot be empty.", ephemeral: true });
+    await interaction.reply({
+      content: "Message cannot be empty.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const recipient = await interaction.client.users.fetch(targetUserId).catch(() => null);
+  const recipient = await interaction.client.users
+    .fetch(targetUserId)
+    .catch(() => null);
   if (!recipient) {
-    await interaction.reply({ content: "Could not find the configured DM recipient.", ephemeral: true });
+    await interaction.reply({
+      content: "Could not find the configured DM recipient.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const sourceChannel = interaction.channel?.isTextBased() ? interaction.channel.toString() : "Unknown";
+  const sourceChannel = interaction.channel?.isTextBased()
+    ? interaction.channel.toString()
+    : "Unknown";
   const dmEmbed = new EmbedBuilder()
     .setTitle("Invictus Panel Message")
     .setDescription(messageContent)
     .setColor(ROLE_COLOR)
     .setTimestamp(runtime.now().toJSDate())
     .addFields(
-      { name: "From", value: `${interaction.user.toString()} (\`${interaction.user.id}\`)`, inline: false },
-      { name: "Server", value: `${interaction.guild.name} (\`${interaction.guild.id}\`)`, inline: false },
+      {
+        name: "From",
+        value: `${interaction.user.toString()} (\`${interaction.user.id}\`)`,
+        inline: false,
+      },
+      {
+        name: "Server",
+        value: `${interaction.guild.name} (\`${interaction.guild.id}\`)`,
+        inline: false,
+      },
       { name: "Channel", value: sourceChannel, inline: false },
     );
 
-  const delivered = await recipient.send({ embeds: [dmEmbed] }).then(() => true).catch(() => false);
+  const delivered = await recipient
+    .send({ embeds: [dmEmbed] })
+    .then(() => true)
+    .catch(() => false);
   if (!delivered) {
     await interaction.reply({
-      content: "Failed to deliver your message. The recipient may have DMs disabled.",
+      content:
+        "Failed to deliver your message. The recipient may have DMs disabled.",
       ephemeral: true,
     });
     return;
   }
 
   runtime.storage.recordCommandMetric("invictus.dmpanel.forward");
-  await interaction.reply({ content: "Your message has been sent privately.", ephemeral: true });
+  await interaction.reply({
+    content: "Your message has been sent privately.",
+    ephemeral: true,
+  });
 
   await sendLog(
     interaction,
@@ -1889,7 +2504,10 @@ async function handleInvictusDmPanelModalSubmit(
   );
 }
 
-async function handleInvictusResetRoyalTimer(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusResetRoyalTimer(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   runtime.storage.updateStateAtomic((state) => {
     state.royal_presence.last_message_at_by_title.Emperor = null;
     state.royal_presence.last_message_at_by_title.Empress = null;
@@ -1899,7 +2517,8 @@ async function handleInvictusResetRoyalTimer(interaction: ChatInputCommandIntera
 
   runtime.storage.recordCommandMetric("invictus.resetroyaltimer");
   await interaction.reply({
-    content: "Royal timer reset. The next message from the Emperor or the Empress can trigger the H1 announcement immediately.",
+    content:
+      "Royal timer reset. The next message from the Emperor or the Empress can trigger the H1 announcement immediately.",
     ephemeral: true,
   });
 
@@ -1911,14 +2530,19 @@ async function handleInvictusResetRoyalTimer(interaction: ChatInputCommandIntera
   );
 }
 
-async function handleInvictusAfk(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusAfk(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const royalContext = await requireRoyal(interaction, runtime);
   if (!royalContext) {
     return;
   }
 
   const { actor, titles } = royalContext;
-  const cleanReason = normalizeQuestionText(interaction.options.getString("reason") ?? "");
+  const cleanReason = normalizeQuestionText(
+    interaction.options.getString("reason") ?? "",
+  );
 
   if (cleanReason) {
     const nowIso = isoNow(runtime.config.timezoneName);
@@ -1935,7 +2559,10 @@ async function handleInvictusAfk(interaction: ChatInputCommandInteraction, runti
 
     runtime.storage.recordCommandMetric("invictus.afk");
     const joinedTitles = titles.join(", ");
-    await interaction.reply({ content: `AFK enabled for ${joinedTitles}.`, ephemeral: true });
+    await interaction.reply({
+      content: `AFK enabled for ${joinedTitles}.`,
+      ephemeral: true,
+    });
 
     await sendLog(
       interaction,
@@ -1966,7 +2593,10 @@ async function handleInvictusAfk(interaction: ChatInputCommandInteraction, runti
   runtime.storage.recordCommandMetric("invictus.afk");
   if (cleared.length > 0) {
     const joinedTitles = cleared.join(", ");
-    await interaction.reply({ content: `AFK cleared for ${joinedTitles}.`, ephemeral: true });
+    await interaction.reply({
+      content: `AFK cleared for ${joinedTitles}.`,
+      ephemeral: true,
+    });
 
     await sendLog(
       interaction,
@@ -1977,16 +2607,31 @@ async function handleInvictusAfk(interaction: ChatInputCommandInteraction, runti
     return;
   }
 
-  await interaction.reply({ content: "No AFK status was active. Provide a reason to set AFK.", ephemeral: true });
+  await interaction.reply({
+    content: "No AFK status was active. Provide a reason to set AFK.",
+    ephemeral: true,
+  });
 }
 
-async function handleInvictusAfkStatus(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
-  const report = buildRoyalAfkStatusReport(runtime.storage.getState().royal_afk, runtime.now());
+async function handleInvictusAfkStatus(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
+  const report = buildRoyalAfkStatusReport(
+    runtime.storage.getState().royal_afk,
+    runtime.now(),
+  );
   runtime.storage.recordCommandMetric("invictus.afkstatus");
-  await interaction.reply({ content: `**Royal AFK Status**\n${report}`, ephemeral: true });
+  await interaction.reply({
+    content: `**Royal AFK Status**\n${report}`,
+    ephemeral: true,
+  });
 }
 
-async function handleInvictusBackfillStats(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusBackfillStats(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -1994,7 +2639,8 @@ async function handleInvictusBackfillStats(interaction: ChatInputCommandInteract
 
   if (runtime.backfillStatus.running) {
     await interaction.reply({
-      content: "A user stats backfill is already running. Wait for it to finish before starting another.",
+      content:
+        "A user stats backfill is already running. Wait for it to finish before starting another.",
       ephemeral: true,
     });
     return;
@@ -2003,17 +2649,27 @@ async function handleInvictusBackfillStats(interaction: ChatInputCommandInteract
   const lookbackDays = interaction.options.getInteger("days") ?? 0;
   const lookbackText = backfillLookbackText(lookbackDays);
 
-  markBackfillStarted(runtime.backfillStatus, interaction.user.id, lookbackDays, isoNow(runtime.config.timezoneName));
+  markBackfillStarted(
+    runtime.backfillStatus,
+    interaction.user.id,
+    lookbackDays,
+    isoNow(runtime.config.timezoneName),
+  );
   runtime.storage.recordCommandMetric("invictus.backfillstats");
 
   await interaction.reply({
     content:
-      `Starting user stats backfill for ${lookbackText}. This can take a while and may hit API rate limits on large servers. `
-      + "A completion summary will be sent to the configured log channel.",
+      `Starting user stats backfill for ${lookbackText}. This can take a while and may hit API rate limits on large servers. ` +
+      "A completion summary will be sent to the configured log channel.",
     ephemeral: true,
   });
 
-  void runUserActivityBackfill(interaction, runtime, interaction.guild, lookbackDays);
+  void runUserActivityBackfill(
+    interaction,
+    runtime,
+    interaction.guild,
+    lookbackDays,
+  );
 }
 
 async function runUserActivityBackfill(
@@ -2033,33 +2689,52 @@ async function runUserActivityBackfill(
   );
 
   try {
-    const result = await backfillUserActivityMetrics(guild, runtime, lookbackDays);
+    const result = await backfillUserActivityMetrics(
+      guild,
+      runtime,
+      lookbackDays,
+    );
     const elapsed = formatDuration(runtime.now().diff(startedAt));
 
     const summary =
-      `channels=${result.scanned_channels}, messages=${result.scanned_messages}, reactions=${result.scanned_reactions}, `
-      + `updates=${result.message_updates + result.reaction_sent_updates + result.reaction_received_updates}`;
+      `channels=${result.scanned_channels}, messages=${result.scanned_messages}, reactions=${result.scanned_reactions}, ` +
+      `updates=${result.message_updates + result.reaction_sent_updates + result.reaction_received_updates}`;
 
-    markBackfillFinished(runtime.backfillStatus, "completed", isoNow(runtime.config.timezoneName), summary, null);
+    markBackfillFinished(
+      runtime.backfillStatus,
+      "completed",
+      isoNow(runtime.config.timezoneName),
+      summary,
+      null,
+    );
 
     await sendLog(
       interaction,
       runtime,
       "User Stats Backfill Complete",
-      `**By:** ${interaction.user.toString()}\n`
-        + `**Lookback:** ${lookbackText}\n`
-        + `**Elapsed:** \`${elapsed}\`\n`
-        + `**Scanned Channels:** \`${result.scanned_channels}\`\n`
-        + `**Skipped Channels:** \`${result.skipped_channels}\`\n`
-        + `**Scanned Messages:** \`${result.scanned_messages}\`\n`
-        + `**Scanned Reactions:** \`${result.scanned_reactions}\`\n`
-        + `**Messages Users Seen:** \`${result.message_users_seen}\` (updated \`${result.message_updates}\`)\n`
-        + `**Reactions Sent Users Seen:** \`${result.reaction_sent_users_seen}\` (updated \`${result.reaction_sent_updates}\`)\n`
-        + `**Reactions Received Users Seen:** \`${result.reaction_received_users_seen}\` (updated \`${result.reaction_received_updates}\`)`,
+      `**By:** ${interaction.user.toString()}\n` +
+        `**Lookback:** ${lookbackText}\n` +
+        `**Elapsed:** \`${elapsed}\`\n` +
+        `**Scanned Channels:** \`${result.scanned_channels}\`\n` +
+        `**Skipped Channels:** \`${result.skipped_channels}\`\n` +
+        `**Scanned Messages:** \`${result.scanned_messages}\`\n` +
+        `**Scanned Reactions:** \`${result.scanned_reactions}\`\n` +
+        `**Messages Users Seen:** \`${result.message_users_seen}\` (updated \`${result.message_updates}\`)\n` +
+        `**Reactions Sent Users Seen:** \`${result.reaction_sent_users_seen}\` (updated \`${result.reaction_sent_updates}\`)\n` +
+        `**Reactions Received Users Seen:** \`${result.reaction_received_users_seen}\` (updated \`${result.reaction_received_updates}\`)`,
     );
   } catch (error) {
-    const errorText = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-    markBackfillFinished(runtime.backfillStatus, "failed", isoNow(runtime.config.timezoneName), null, errorText.slice(0, 400));
+    const errorText =
+      error instanceof Error
+        ? `${error.name}: ${error.message}`
+        : String(error);
+    markBackfillFinished(
+      runtime.backfillStatus,
+      "failed",
+      isoNow(runtime.config.timezoneName),
+      null,
+      errorText.slice(0, 400),
+    );
 
     await sendLog(
       interaction,
@@ -2086,7 +2761,10 @@ async function backfillUserActivityMetrics(
   reaction_sent_updates: number;
   reaction_received_updates: number;
 }> {
-  const afterTimestamp = lookbackDays > 0 ? runtime.now().minus({ days: lookbackDays }).toMillis() : null;
+  const afterTimestamp =
+    lookbackDays > 0
+      ? runtime.now().minus({ days: lookbackDays }).toMillis()
+      : null;
 
   const messageCounts: Record<number, number> = {};
   const reactionsSentCounts: Record<number, number> = {};
@@ -2101,13 +2779,14 @@ async function backfillUserActivityMetrics(
   for (const target of targets) {
     scannedChannels += 1;
     try {
-      const [channelMessages, channelReactions] = await scanBackfillHistoryTarget(
-        target,
-        afterTimestamp,
-        messageCounts,
-        reactionsSentCounts,
-        reactionsReceivedCounts,
-      );
+      const [channelMessages, channelReactions] =
+        await scanBackfillHistoryTarget(
+          target,
+          afterTimestamp,
+          messageCounts,
+          reactionsSentCounts,
+          reactionsReceivedCounts,
+        );
       scannedMessages += channelMessages;
       scannedReactions += channelReactions;
     } catch {
@@ -2115,12 +2794,18 @@ async function backfillUserActivityMetrics(
     }
   }
 
-  const [messageUsersSeen, messageUpdates] = runtime.storage.mergeUserMetricBackfill(messageCounts, "messages_sent");
-  const [reactionSentUsersSeen, reactionSentUpdates] = runtime.storage.mergeUserMetricBackfill(reactionsSentCounts, "reactions_sent");
-  const [reactionReceivedUsersSeen, reactionReceivedUpdates] = runtime.storage.mergeUserMetricBackfill(
-    reactionsReceivedCounts,
-    "reactions_received",
-  );
+  const [messageUsersSeen, messageUpdates] =
+    runtime.storage.mergeUserMetricBackfill(messageCounts, "messages_sent");
+  const [reactionSentUsersSeen, reactionSentUpdates] =
+    runtime.storage.mergeUserMetricBackfill(
+      reactionsSentCounts,
+      "reactions_sent",
+    );
+  const [reactionReceivedUsersSeen, reactionReceivedUpdates] =
+    runtime.storage.mergeUserMetricBackfill(
+      reactionsReceivedCounts,
+      "reactions_received",
+    );
 
   return {
     scanned_channels: scannedChannels,
@@ -2153,7 +2838,9 @@ async function getBackfillHistoryTargets(
     }
   }
 
-  const activeThreads = await guild.channels.fetchActiveThreads().catch(() => null);
+  const activeThreads = await guild.channels
+    .fetchActiveThreads()
+    .catch(() => null);
   if (activeThreads) {
     for (const thread of activeThreads.threads.values()) {
       if (seenIds.has(thread.id)) {
@@ -2179,7 +2866,10 @@ async function scanBackfillHistoryTarget(
   let before: string | undefined;
 
   while (true) {
-    const batch = await target.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+    const batch = await target.messages.fetch({
+      limit: 100,
+      ...(before ? { before } : {}),
+    });
     if (batch.size === 0) {
       break;
     }
@@ -2200,7 +2890,10 @@ async function scanBackfillHistoryTarget(
     }
 
     before = oldest.id;
-    if (batchResult.reachedLookback || (afterTimestamp !== null && oldest.createdTimestamp < afterTimestamp)) {
+    if (
+      batchResult.reachedLookback ||
+      (afterTimestamp !== null && oldest.createdTimestamp < afterTimestamp)
+    ) {
       break;
     }
   }
@@ -2214,7 +2907,11 @@ async function scanBackfillMessageBatch(
   messageCounts: Record<number, number>,
   reactionsSentCounts: Record<number, number>,
   reactionsReceivedCounts: Record<number, number>,
-): Promise<{ scannedMessages: number; scannedReactions: number; reachedLookback: boolean }> {
+): Promise<{
+  scannedMessages: number;
+  scannedReactions: number;
+  reachedLookback: boolean;
+}> {
   let scannedMessages = 0;
   let scannedReactions = 0;
   let reachedLookback = false;
@@ -2231,7 +2928,11 @@ async function scanBackfillMessageBatch(
       incrementCount(messageCounts, messageAuthorId, 1);
     }
 
-    scannedReactions += await tallyReactionCountsForMessage(message, reactionsSentCounts, reactionsReceivedCounts);
+    scannedReactions += await tallyReactionCountsForMessage(
+      message,
+      reactionsSentCounts,
+      reactionsReceivedCounts,
+    );
   }
 
   return { scannedMessages, scannedReactions, reachedLookback };
@@ -2271,7 +2972,9 @@ async function tallyReactionCountsForMessage(
   return scannedReactions;
 }
 
-function getNonBotUserIdAsNumber(user: { id: string; bot?: boolean } | null | undefined): number | null {
+function getNonBotUserIdAsNumber(
+  user: { id: string; bot?: boolean } | null | undefined,
+): number | null {
   if (!user || user.bot) {
     return null;
   }
@@ -2284,32 +2987,73 @@ function getNonBotUserIdAsNumber(user: { id: string; bot?: boolean } | null | un
   return parsedId;
 }
 
-function incrementCount(store: Record<number, number>, key: number, amount = 1): void {
+function incrementCount(
+  store: Record<number, number>,
+  key: number,
+  amount = 1,
+): void {
   store[key] = (store[key] ?? 0) + amount;
 }
 
-async function handleInvictusBackfillStatus(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusBackfillStatus(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const snapshot = getBackfillStatusSnapshot(runtime.backfillStatus);
   const embed = new EmbedBuilder()
     .setTitle("User Stats Backfill Status")
     .setColor(ROLE_COLOR)
     .setTimestamp(runtime.now().toJSDate())
     .addFields(
-      { name: "Running", value: `\`${snapshot.running ? "yes" : "no"}\``, inline: true },
-      { name: "Lookback", value: backfillLookbackText(snapshot.lookback_days), inline: true },
-      { name: "Last Status", value: `\`${snapshot.last_status}\``, inline: true },
-      { name: "Started At", value: snapshot.started_at ?? "n/a", inline: false },
-      { name: "Last Started", value: snapshot.last_started_at ?? "n/a", inline: true },
-      { name: "Last Completed", value: snapshot.last_completed_at ?? "n/a", inline: true },
-      { name: "Last Summary", value: snapshot.last_summary ?? "n/a", inline: false },
-      { name: "Last Error", value: snapshot.last_error ?? "n/a", inline: false },
+      {
+        name: "Running",
+        value: `\`${snapshot.running ? "yes" : "no"}\``,
+        inline: true,
+      },
+      {
+        name: "Lookback",
+        value: backfillLookbackText(snapshot.lookback_days),
+        inline: true,
+      },
+      {
+        name: "Last Status",
+        value: `\`${snapshot.last_status}\``,
+        inline: true,
+      },
+      {
+        name: "Started At",
+        value: snapshot.started_at ?? "n/a",
+        inline: false,
+      },
+      {
+        name: "Last Started",
+        value: snapshot.last_started_at ?? "n/a",
+        inline: true,
+      },
+      {
+        name: "Last Completed",
+        value: snapshot.last_completed_at ?? "n/a",
+        inline: true,
+      },
+      {
+        name: "Last Summary",
+        value: snapshot.last_summary ?? "n/a",
+        inline: false,
+      },
+      {
+        name: "Last Error",
+        value: snapshot.last_error ?? "n/a",
+        inline: false,
+      },
     );
 
   runtime.storage.recordCommandMetric("invictus.backfillstatus");
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }
 
-async function handleInvictusHelp(interaction: ChatInputCommandInteraction): Promise<void> {
+async function handleInvictusHelp(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
   const helpText = [
     "**Imperial Court Bot Commands**",
     "",
@@ -2336,31 +3080,48 @@ async function handleInvictusHelp(interaction: ChatInputCommandInteraction): Pro
     "`/greetings rio`, `/greetings taylor`",
   ].join("\n");
 
-  const embed = new EmbedBuilder().setTitle("Command Reference").setDescription(helpText).setColor(ROLE_COLOR).setTimestamp(new Date());
+  const embed = new EmbedBuilder()
+    .setTitle("Command Reference")
+    .setDescription(helpText)
+    .setColor(ROLE_COLOR)
+    .setTimestamp(new Date());
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }
 
-async function handleFunBattle(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleFunBattle(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
   }
 
-  const challenger = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const challenger = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
   if (!challenger) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return;
   }
 
   const opponentUser = interaction.options.getUser("opponent", true);
-  const opponent = await interaction.guild.members.fetch(opponentUser.id).catch(() => null);
+  const opponent = await interaction.guild.members
+    .fetch(opponentUser.id)
+    .catch(() => null);
   if (!opponent) {
-    await interaction.reply({ content: "Could not resolve that opponent.", ephemeral: true });
+    await interaction.reply({
+      content: "Could not resolve that opponent.",
+      ephemeral: true,
+    });
     return;
   }
 
   if (opponent.id === challenger.id) {
-    await interaction.reply({ content: "You can't battle yourself, coward!", ephemeral: true });
+    await interaction.reply({
+      content: "You can't battle yourself, coward!",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -2377,18 +3138,28 @@ async function handleFunBattle(interaction: ChatInputCommandInteraction, runtime
   }
   const loser = winner.id === challenger.id ? opponent : challenger;
 
-  runtime.storage.metricsIncrement(runtime.storage.buildUserMetricKey(challenger.id, "battles_played"));
-  runtime.storage.metricsIncrement(runtime.storage.buildUserMetricKey(opponent.id, "battles_played"));
-  runtime.storage.metricsIncrement(runtime.storage.buildUserMetricKey(winner.id, "battles_won"));
+  runtime.storage.metricsIncrement(
+    runtime.storage.buildUserMetricKey(challenger.id, "battles_played"),
+  );
+  runtime.storage.metricsIncrement(
+    runtime.storage.buildUserMetricKey(opponent.id, "battles_played"),
+  );
+  runtime.storage.metricsIncrement(
+    runtime.storage.buildUserMetricKey(winner.id, "battles_won"),
+  );
 
-  const challengerStats = Object.fromEntries(BOSS_STATS.map((statName) => [
-    statName,
-    challenger.id === unbeatable ? 100 : runtime.randomInt(100) + 1,
-  ]));
-  const opponentStats = Object.fromEntries(BOSS_STATS.map((statName) => [
-    statName,
-    opponent.id === unbeatable ? 100 : runtime.randomInt(100) + 1,
-  ]));
+  const challengerStats = Object.fromEntries(
+    BOSS_STATS.map((statName) => [
+      statName,
+      challenger.id === unbeatable ? 100 : runtime.randomInt(100) + 1,
+    ]),
+  );
+  const opponentStats = Object.fromEntries(
+    BOSS_STATS.map((statName) => [
+      statName,
+      opponent.id === unbeatable ? 100 : runtime.randomInt(100) + 1,
+    ]),
+  );
 
   let battleText = `**${challenger.toString()} vs ${opponent.toString()}**\n\n**${challenger.displayName}'s Arsenal:**\n`;
   for (const [statName, value] of Object.entries(challengerStats)) {
@@ -2413,10 +3184,16 @@ async function handleFunBattle(interaction: ChatInputCommandInteraction, runtime
       { name: "Champion", value: winner.toString(), inline: false },
     );
 
-  await interaction.reply({ content: `${challenger.toString()} ${opponent.toString()}`, embeds: [embed] });
+  await interaction.reply({
+    content: `${challenger.toString()} ${opponent.toString()}`,
+    embeds: [embed],
+  });
 }
 
-async function handleFunStats(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleFunStats(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -2425,7 +3202,9 @@ async function handleFunStats(interaction: ChatInputCommandInteraction, runtime:
   const memberUser = interaction.options.getUser("member");
   const target = memberUser
     ? await interaction.guild.members.fetch(memberUser.id).catch(() => null)
-    : await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    : await interaction.guild.members
+        .fetch(interaction.user.id)
+        .catch(() => null);
 
   if (!target) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
@@ -2441,13 +3220,20 @@ async function handleFunStats(interaction: ChatInputCommandInteraction, runtime:
     .setFooter({ text: "Stats are tracked from this bot runtime onward." });
 
   for (const [metricName, label] of USER_FUN_METRIC_FIELDS) {
-    embed.addFields({ name: label, value: `\`${stats[metricName] ?? 0}\``, inline: true });
+    embed.addFields({
+      name: label,
+      value: `\`${stats[metricName] ?? 0}\``,
+      inline: true,
+    });
   }
 
   await interaction.reply({ embeds: [embed] });
 }
 
-async function handleFunLeaderboard(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleFunLeaderboard(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -2456,13 +3242,18 @@ async function handleFunLeaderboard(interaction: ChatInputCommandInteraction, ru
   const metric = interaction.options.getString("metric", true);
   const limit = interaction.options.getInteger("limit") ?? 5;
   if (!USER_FUN_LEADERBOARD_METRICS.has(metric)) {
-    await interaction.reply({ content: "Unknown leaderboard metric.", ephemeral: true });
+    await interaction.reply({
+      content: "Unknown leaderboard metric.",
+      ephemeral: true,
+    });
     return;
   }
 
   const topRows = runtime.storage.listTopUsersForMetric(metric, limit);
   if (topRows.length === 0) {
-    await interaction.reply({ content: "No data yet for that leaderboard. Go make some chaos first." });
+    await interaction.reply({
+      content: "No data yet for that leaderboard. Go make some chaos first.",
+    });
     return;
   }
 
@@ -2473,13 +3264,15 @@ async function handleFunLeaderboard(interaction: ChatInputCommandInteraction, ru
       continue;
     }
     const [userId, value] = row;
-    const member = interaction.guild.members.cache.get(String(userId))
-      ?? (await interaction.guild.members.fetch(String(userId)).catch(() => null));
+    const member =
+      interaction.guild.members.cache.get(String(userId)) ??
+      (await interaction.guild.members.fetch(String(userId)).catch(() => null));
     const display = member ? member.toString() : `<@${userId}>`;
     lines.push(`${index + 1}. ${display} - \`${value}\``);
   }
 
-  const metricLabel = USER_FUN_METRIC_LABELS.get(metric) ?? metric.replaceAll("_", " ");
+  const metricLabel =
+    USER_FUN_METRIC_LABELS.get(metric) ?? metric.replaceAll("_", " ");
   const embed = new EmbedBuilder()
     .setTitle(`Fun Leaderboard: ${metricLabel}`)
     .setDescription(lines.join("\n"))
@@ -2489,7 +3282,10 @@ async function handleFunLeaderboard(interaction: ChatInputCommandInteraction, ru
   await interaction.reply({ embeds: [embed] });
 }
 
-async function handleInvictusPurge(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusPurge(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const channel = getManageTargetChannel(interaction);
   if (!channel) {
     await interaction.reply({ content: MSG_USE_TEXT_CHANNEL, ephemeral: true });
@@ -2501,12 +3297,17 @@ async function handleInvictusPurge(interaction: ChatInputCommandInteraction, run
 
   const deleted = await channel.bulkDelete(amount, true).catch(() => null);
   if (!deleted) {
-    await interaction.editReply({ content: "Failed to purge messages." });
+    await interaction.editReply({
+      content:
+        "Could not purge messages in this channel. Check my Manage Messages permission and try again.",
+    });
     return;
   }
 
   runtime.storage.recordCommandMetric("invictus.purge");
-  await interaction.editReply({ content: `Deleted \`${deleted.size}\` message(s) in ${channel.toString()}.` });
+  await interaction.editReply({
+    content: `Purge complete: deleted \`${deleted.size}\` message(s) in ${channel.toString()}.`,
+  });
 
   await sendLog(
     interaction,
@@ -2516,7 +3317,10 @@ async function handleInvictusPurge(interaction: ChatInputCommandInteraction, run
   );
 }
 
-async function handleInvictusPurgeUser(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusPurgeUser(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const channel = getManageTargetChannel(interaction);
   if (!channel) {
     await interaction.reply({ content: MSG_USE_TEXT_CHANNEL, ephemeral: true });
@@ -2527,25 +3331,38 @@ async function handleInvictusPurgeUser(interaction: ChatInputCommandInteraction,
   const amount = interaction.options.getInteger("amount") ?? 100;
   await interaction.deferReply({ ephemeral: true });
 
-  const member = await interaction.guild?.members.fetch(memberUser.id).catch(() => null);
+  const member = await interaction.guild?.members
+    .fetch(memberUser.id)
+    .catch(() => null);
   if (!member) {
-    await interaction.editReply({ content: "Could not resolve that member." });
+    await interaction.editReply({
+      content: "Could not resolve that member in this server.",
+    });
     return;
   }
 
-  const recentMessages = await channel.messages.fetch({ limit: amount }).catch(() => null);
+  const recentMessages = await channel.messages
+    .fetch({ limit: amount })
+    .catch(() => null);
   if (!recentMessages) {
-    await interaction.editReply({ content: "Failed to fetch messages for purge." });
+    await interaction.editReply({
+      content: "Could not read recent channel messages for that purge.",
+    });
     return;
   }
 
-  const targetMessages = recentMessages.filter((message) => message.author.id === member.id);
-  const deleted = targetMessages.size > 0 ? await channel.bulkDelete(targetMessages, true).catch(() => null) : null;
+  const targetMessages = recentMessages.filter(
+    (message) => message.author.id === member.id,
+  );
+  const deleted =
+    targetMessages.size > 0
+      ? await channel.bulkDelete(targetMessages, true).catch(() => null)
+      : null;
   const deletedCount = deleted?.size ?? 0;
 
   runtime.storage.recordCommandMetric("invictus.purgeuser");
   await interaction.editReply({
-    content: `Deleted \`${deletedCount}\` message(s) from ${member.toString()} in ${channel.toString()}.`,
+    content: `User purge complete: deleted \`${deletedCount}\` message(s) from ${member.toString()} in ${channel.toString()}.`,
   });
 
   await sendLog(
@@ -2556,7 +3373,10 @@ async function handleInvictusPurgeUser(interaction: ChatInputCommandInteraction,
   );
 }
 
-async function handleInvictusLock(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusLock(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -2568,19 +3388,28 @@ async function handleInvictusLock(interaction: ChatInputCommandInteraction, runt
     return;
   }
 
-  const reason = interaction.options.getString("reason") ?? "Channel locked via /invictus lock";
+  const reason =
+    interaction.options.getString("reason") ??
+    "Channel locked via /invictus lock";
   const everyone = interaction.guild.roles.everyone;
   const success = await channel.permissionOverwrites
     .edit(everyone, { SendMessages: false }, { reason })
     .then(() => true)
     .catch(() => false);
   if (!success) {
-    await interaction.reply({ content: "Failed to lock this channel.", ephemeral: true });
+    await interaction.reply({
+      content:
+        "Could not lock this channel. Check my Manage Channels permission and role hierarchy.",
+      ephemeral: true,
+    });
     return;
   }
 
   runtime.storage.recordCommandMetric("invictus.lock");
-  await interaction.reply({ content: "Channel locked for @everyone.", ephemeral: true });
+  await interaction.reply({
+    content: "Lock enabled: @everyone can no longer send messages here.",
+    ephemeral: true,
+  });
 
   await sendLog(
     interaction,
@@ -2590,7 +3419,10 @@ async function handleInvictusLock(interaction: ChatInputCommandInteraction, runt
   );
 }
 
-async function handleInvictusUnlock(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusUnlock(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -2602,19 +3434,28 @@ async function handleInvictusUnlock(interaction: ChatInputCommandInteraction, ru
     return;
   }
 
-  const reason = interaction.options.getString("reason") ?? "Channel unlocked via /invictus unlock";
+  const reason =
+    interaction.options.getString("reason") ??
+    "Channel unlocked via /invictus unlock";
   const everyone = interaction.guild.roles.everyone;
   const success = await channel.permissionOverwrites
     .edit(everyone, { SendMessages: true }, { reason })
     .then(() => true)
     .catch(() => false);
   if (!success) {
-    await interaction.reply({ content: "Failed to unlock this channel.", ephemeral: true });
+    await interaction.reply({
+      content:
+        "Could not unlock this channel. Check my Manage Channels permission and role hierarchy.",
+      ephemeral: true,
+    });
     return;
   }
 
   runtime.storage.recordCommandMetric("invictus.unlock");
-  await interaction.reply({ content: "Channel unlocked for @everyone.", ephemeral: true });
+  await interaction.reply({
+    content: "Lock lifted: @everyone can send messages in this channel again.",
+    ephemeral: true,
+  });
 
   await sendLog(
     interaction,
@@ -2624,7 +3465,10 @@ async function handleInvictusUnlock(interaction: ChatInputCommandInteraction, ru
   );
 }
 
-async function handleInvictusSlowMode(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusSlowMode(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const channel = getManageTargetChannel(interaction);
   if (!channel) {
     await interaction.reply({ content: MSG_USE_TEXT_CHANNEL, ephemeral: true });
@@ -2632,14 +3476,23 @@ async function handleInvictusSlowMode(interaction: ChatInputCommandInteraction, 
   }
 
   const seconds = interaction.options.getInteger("seconds", true);
-  const success = await channel.setRateLimitPerUser(seconds, `Updated by ${interaction.user.tag}`).then(() => true).catch(() => false);
+  const success = await channel
+    .setRateLimitPerUser(seconds, `Updated by ${interaction.user.tag}`)
+    .then(() => true)
+    .catch(() => false);
   if (!success) {
-    await interaction.reply({ content: "Failed to update slowmode.", ephemeral: true });
+    await interaction.reply({
+      content: "Could not update slowmode in this channel.",
+      ephemeral: true,
+    });
     return;
   }
 
   runtime.storage.recordCommandMetric("invictus.slowmode");
-  await interaction.reply({ content: `Slowmode set to \`${seconds}\` second(s) in ${channel.toString()}.`, ephemeral: true });
+  await interaction.reply({
+    content: `Slowmode updated to \`${seconds}\` second(s) in ${channel.toString()}.`,
+    ephemeral: true,
+  });
 
   await sendLog(
     interaction,
@@ -2649,7 +3502,10 @@ async function handleInvictusSlowMode(interaction: ChatInputCommandInteraction, 
   );
 }
 
-async function handleInvictusTimeout(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusTimeout(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const timeoutContext = await getTimeoutContext(interaction);
   if (!timeoutContext) {
     return;
@@ -2657,9 +3513,14 @@ async function handleInvictusTimeout(interaction: ChatInputCommandInteraction, r
 
   const { actor, me } = timeoutContext;
   const memberUser = interaction.options.getUser("member", true);
-  const member = await interaction.guild?.members.fetch(memberUser.id).catch(() => null);
+  const member = await interaction.guild?.members
+    .fetch(memberUser.id)
+    .catch(() => null);
   if (!member) {
-    await interaction.reply({ content: "Could not resolve that member.", ephemeral: true });
+    await interaction.reply({
+      content: "Could not resolve that member in this server.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -2668,20 +3529,32 @@ async function handleInvictusTimeout(interaction: ChatInputCommandInteraction, r
 
   const [allowed, whyNot] = canTimeoutTarget(actor, me, member);
   if (!allowed) {
-    await interaction.reply({ content: `Cannot timeout ${member.toString()}: ${whyNot}.`, ephemeral: true });
+    await interaction.reply({
+      content: `Timeout blocked for ${member.toString()}: ${whyNot}.`,
+      ephemeral: true,
+    });
     return;
   }
 
   const modReason = buildTimeoutReason("Muted", actor, reason);
   const durationMs = minutes * 60_000;
-  const success = await member.timeout(durationMs, modReason).then(() => true).catch(() => false);
+  const success = await member
+    .timeout(durationMs, modReason)
+    .then(() => true)
+    .catch(() => false);
   if (!success) {
-    await interaction.reply({ content: `Failed to timeout ${member.toString()}.`, ephemeral: true });
+    await interaction.reply({
+      content: `Could not apply timeout to ${member.toString()}.`,
+      ephemeral: true,
+    });
     return;
   }
 
   runtime.storage.recordCommandMetric("invictus.timeout");
-  await interaction.reply({ content: `Timed out ${member.toString()} for \`${minutes}\` minute(s).`, ephemeral: true });
+  await interaction.reply({
+    content: `Timeout applied to ${member.toString()} for \`${minutes}\` minute(s).`,
+    ephemeral: true,
+  });
 
   await sendLog(
     interaction,
@@ -2691,7 +3564,10 @@ async function handleInvictusTimeout(interaction: ChatInputCommandInteraction, r
   );
 }
 
-async function handleInvictusUntimeout(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusUntimeout(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const timeoutContext = await getTimeoutContext(interaction);
   if (!timeoutContext) {
     return;
@@ -2699,33 +3575,53 @@ async function handleInvictusUntimeout(interaction: ChatInputCommandInteraction,
 
   const { actor, me } = timeoutContext;
   const memberUser = interaction.options.getUser("member", true);
-  const member = await interaction.guild?.members.fetch(memberUser.id).catch(() => null);
+  const member = await interaction.guild?.members
+    .fetch(memberUser.id)
+    .catch(() => null);
   if (!member) {
-    await interaction.reply({ content: "Could not resolve that member.", ephemeral: true });
+    await interaction.reply({
+      content: "Could not resolve that member in this server.",
+      ephemeral: true,
+    });
     return;
   }
 
   const reason = interaction.options.getString("reason");
   const [allowed, whyNot] = canTimeoutTarget(actor, me, member);
   if (!allowed) {
-    await interaction.reply({ content: `Cannot untimeout ${member.toString()}: ${whyNot}.`, ephemeral: true });
+    await interaction.reply({
+      content: `Untimeout blocked for ${member.toString()}: ${whyNot}.`,
+      ephemeral: true,
+    });
     return;
   }
 
   if (!isMemberTimedOut(member)) {
-    await interaction.reply({ content: `${member.toString()} is not currently timed out.`, ephemeral: true });
+    await interaction.reply({
+      content: `${member.toString()} is not currently timed out.`,
+      ephemeral: true,
+    });
     return;
   }
 
   const modReason = buildTimeoutReason("Unmuted", actor, reason);
-  const success = await member.timeout(null, modReason).then(() => true).catch(() => false);
+  const success = await member
+    .timeout(null, modReason)
+    .then(() => true)
+    .catch(() => false);
   if (!success) {
-    await interaction.reply({ content: `Failed to untimeout ${member.toString()}.`, ephemeral: true });
+    await interaction.reply({
+      content: `Could not remove timeout from ${member.toString()}.`,
+      ephemeral: true,
+    });
     return;
   }
 
   runtime.storage.recordCommandMetric("invictus.untimeout");
-  await interaction.reply({ content: `Removed timeout from ${member.toString()}.`, ephemeral: true });
+  await interaction.reply({
+    content: `Timeout removed from ${member.toString()}.`,
+    ephemeral: true,
+  });
 
   await sendLog(
     interaction,
@@ -2735,7 +3631,10 @@ async function handleInvictusUntimeout(interaction: ChatInputCommandInteraction,
   );
 }
 
-async function handleInvictusMuteMany(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusMuteMany(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const timeoutContext = await getTimeoutContext(interaction);
   if (!timeoutContext) {
     return;
@@ -2755,7 +3654,10 @@ async function handleInvictusMuteMany(interaction: ChatInputCommandInteraction, 
 
   const memberIds = parseMemberIds(membersRaw);
   if (memberIds.length === 0) {
-    await interaction.reply({ content: "No valid member mentions or IDs were provided.", ephemeral: true });
+    await interaction.reply({
+      content: "Provide at least one valid member mention or numeric ID.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -2765,14 +3667,16 @@ async function handleInvictusMuteMany(interaction: ChatInputCommandInteraction, 
   const preview = previewTimeoutTargets(actor, me, targets);
   const cap = runtime.config.muteallTargetCap;
   if (cap > 0 && preview.eligible > cap) {
-    await interaction.editReply({ content: buildTargetCapMessage(preview.eligible, cap) });
+    await interaction.editReply({
+      content: buildTargetCapMessage(preview.eligible, cap),
+    });
     return;
   }
 
   if (dryRun) {
     let summary =
-      `Dry run only: would mute \`${preview.eligible}\` member(s) for \`${minutes}\` minute(s).\n`
-      + `Skipped during preview: \`${preview.skipped}\` | Unknown IDs: \`${missingIds.length}\``;
+      `Dry run: would timeout \`${preview.eligible}\` member(s) for \`${minutes}\` minute(s).\n` +
+      `Preview skipped: \`${preview.skipped}\` | Unresolved IDs: \`${missingIds.length}\``;
     summary = appendPreviewIssues(summary, preview.details);
 
     runtime.storage.recordCommandMetric("invictus.mutemany");
@@ -2782,11 +3686,17 @@ async function handleInvictusMuteMany(interaction: ChatInputCommandInteraction, 
 
   const muteUntilMs = minutes * 60_000;
   const modReason = buildTimeoutReason("Muted", actor, reason);
-  const result = await applyTimeoutToTargets(actor, me, targets, muteUntilMs, modReason);
+  const result = await applyTimeoutToTargets(
+    actor,
+    me,
+    targets,
+    muteUntilMs,
+    modReason,
+  );
 
   let summary =
-    `Muted \`${result.applied}\` member(s) for \`${minutes}\` minute(s).\n`
-    + `Skipped: \`${result.skipped}\` | Failed: \`${result.failed}\` | Unknown IDs: \`${missingIds.length}\``;
+    `Timeout batch complete: applied \`${result.applied}\` member(s) for \`${minutes}\` minute(s).\n` +
+    `Skipped: \`${result.skipped}\` | Failed: \`${result.failed}\` | Unresolved IDs: \`${missingIds.length}\``;
   summary = appendIssueSummary(summary, result.details);
 
   runtime.storage.recordCommandMetric("invictus.mutemany");
@@ -2800,7 +3710,10 @@ async function handleInvictusMuteMany(interaction: ChatInputCommandInteraction, 
   );
 }
 
-async function handleInvictusUnmuteMany(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusUnmuteMany(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const timeoutContext = await getTimeoutContext(interaction);
   if (!timeoutContext) {
     return;
@@ -2819,7 +3732,10 @@ async function handleInvictusUnmuteMany(interaction: ChatInputCommandInteraction
 
   const memberIds = parseMemberIds(membersRaw);
   if (memberIds.length === 0) {
-    await interaction.reply({ content: "No valid member mentions or IDs were provided.", ephemeral: true });
+    await interaction.reply({
+      content: "Provide at least one valid member mention or numeric ID.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -2829,14 +3745,16 @@ async function handleInvictusUnmuteMany(interaction: ChatInputCommandInteraction
   const preview = previewTimeoutTargets(actor, me, targets, true);
   const cap = runtime.config.muteallTargetCap;
   if (cap > 0 && preview.eligible > cap) {
-    await interaction.editReply({ content: buildTargetCapMessage(preview.eligible, cap) });
+    await interaction.editReply({
+      content: buildTargetCapMessage(preview.eligible, cap),
+    });
     return;
   }
 
   if (dryRun) {
     let summary =
-      `Dry run only: would unmute \`${preview.eligible}\` member(s).\n`
-      + `Skipped during preview: \`${preview.skipped}\` | Unknown IDs: \`${missingIds.length}\``;
+      `Dry run: would remove timeout from \`${preview.eligible}\` member(s).\n` +
+      `Preview skipped: \`${preview.skipped}\` | Unresolved IDs: \`${missingIds.length}\``;
     summary = appendPreviewIssues(summary, preview.details);
 
     runtime.storage.recordCommandMetric("invictus.unmutemany");
@@ -2845,11 +3763,18 @@ async function handleInvictusUnmuteMany(interaction: ChatInputCommandInteraction
   }
 
   const modReason = buildTimeoutReason("Unmuted", actor, reason);
-  const result = await applyTimeoutToTargets(actor, me, targets, null, modReason, true);
+  const result = await applyTimeoutToTargets(
+    actor,
+    me,
+    targets,
+    null,
+    modReason,
+    true,
+  );
 
   let summary =
-    `Unmuted \`${result.applied}\` member(s).\n`
-    + `Skipped: \`${result.skipped}\` | Failed: \`${result.failed}\` | Unknown IDs: \`${missingIds.length}\``;
+    `Timeout removal batch complete: updated \`${result.applied}\` member(s).\n` +
+    `Skipped: \`${result.skipped}\` | Failed: \`${result.failed}\` | Unresolved IDs: \`${missingIds.length}\``;
   summary = appendIssueSummary(summary, result.details);
 
   runtime.storage.recordCommandMetric("invictus.unmutemany");
@@ -2863,7 +3788,10 @@ async function handleInvictusUnmuteMany(interaction: ChatInputCommandInteraction
   );
 }
 
-async function handleInvictusMuteAll(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusMuteAll(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const confirm = interaction.options.getString("confirm", true);
   if (!isConfirmed(confirm)) {
     await interaction.reply({ content: MSG_CONFIRM_REQUIRED, ephemeral: true });
@@ -2893,14 +3821,16 @@ async function handleInvictusMuteAll(interaction: ChatInputCommandInteraction, r
   const preview = previewTimeoutTargets(actor, me, targets);
   const cap = runtime.config.muteallTargetCap;
   if (cap > 0 && preview.eligible > cap) {
-    await interaction.editReply({ content: buildTargetCapMessage(preview.eligible, cap) });
+    await interaction.editReply({
+      content: buildTargetCapMessage(preview.eligible, cap),
+    });
     return;
   }
 
   if (dryRun) {
     let summary =
-      `Dry run only: would mute \`${preview.eligible}\` member(s) for \`${minutes}\` minute(s).\n`
-      + `Skipped during preview: \`${preview.skipped}\``;
+      `Dry run: would timeout \`${preview.eligible}\` member(s) for \`${minutes}\` minute(s).\n` +
+      `Preview skipped: \`${preview.skipped}\``;
     summary = appendPreviewIssues(summary, preview.details);
 
     runtime.storage.recordCommandMetric("invictus.muteall");
@@ -2910,11 +3840,17 @@ async function handleInvictusMuteAll(interaction: ChatInputCommandInteraction, r
 
   const muteUntilMs = minutes * 60_000;
   const modReason = buildTimeoutReason("Muted", actor, reason);
-  const result = await applyTimeoutToTargets(actor, me, targets, muteUntilMs, modReason);
+  const result = await applyTimeoutToTargets(
+    actor,
+    me,
+    targets,
+    muteUntilMs,
+    modReason,
+  );
 
   runtime.storage.recordCommandMetric("invictus.muteall");
   await interaction.editReply({
-    content: `Mute all complete. Muted \`${result.applied}\` member(s). Skipped \`${result.skipped}\`. Failed \`${result.failed}\`.`,
+    content: `Server-wide timeout complete: applied \`${result.applied}\`, skipped \`${result.skipped}\`, failed \`${result.failed}\`.`,
   });
 
   await sendLog(
@@ -2925,7 +3861,10 @@ async function handleInvictusMuteAll(interaction: ChatInputCommandInteraction, r
   );
 }
 
-async function handleInvictusUnmuteAll(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusUnmuteAll(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const confirm = interaction.options.getString("confirm", true);
   if (!isConfirmed(confirm)) {
     await interaction.reply({ content: MSG_CONFIRM_REQUIRED, ephemeral: true });
@@ -2954,14 +3893,16 @@ async function handleInvictusUnmuteAll(interaction: ChatInputCommandInteraction,
   const preview = previewTimeoutTargets(actor, me, targets, true);
   const cap = runtime.config.muteallTargetCap;
   if (cap > 0 && preview.eligible > cap) {
-    await interaction.editReply({ content: buildTargetCapMessage(preview.eligible, cap) });
+    await interaction.editReply({
+      content: buildTargetCapMessage(preview.eligible, cap),
+    });
     return;
   }
 
   if (dryRun) {
     let summary =
-      `Dry run only: would unmute \`${preview.eligible}\` member(s).\n`
-      + `Skipped during preview: \`${preview.skipped}\``;
+      `Dry run: would remove timeout from \`${preview.eligible}\` member(s).\n` +
+      `Preview skipped: \`${preview.skipped}\``;
     summary = appendPreviewIssues(summary, preview.details);
 
     runtime.storage.recordCommandMetric("invictus.unmuteall");
@@ -2970,11 +3911,18 @@ async function handleInvictusUnmuteAll(interaction: ChatInputCommandInteraction,
   }
 
   const modReason = buildTimeoutReason("Unmuted", actor, reason);
-  const result = await applyTimeoutToTargets(actor, me, targets, null, modReason, true);
+  const result = await applyTimeoutToTargets(
+    actor,
+    me,
+    targets,
+    null,
+    modReason,
+    true,
+  );
 
   runtime.storage.recordCommandMetric("invictus.unmuteall");
   await interaction.editReply({
-    content: `Unmute all complete. Unmuted \`${result.applied}\` member(s). Skipped \`${result.skipped}\`. Failed \`${result.failed}\`.`,
+    content: `Server-wide timeout removal complete: updated \`${result.applied}\`, skipped \`${result.skipped}\`, failed \`${result.failed}\`.`,
   });
 
   await sendLog(
@@ -2993,22 +3941,33 @@ async function getTimeoutContext(
     return null;
   }
 
-  const actor = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const actor = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
   if (!actor) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return null;
   }
 
-  const me = interaction.guild.members.me ?? (await interaction.guild.members.fetchMe().catch(() => null));
+  const me =
+    interaction.guild.members.me ??
+    (await interaction.guild.members.fetchMe().catch(() => null));
   if (!me) {
-    await interaction.reply({ content: MSG_BOT_CONTEXT_ERROR, ephemeral: true });
+    await interaction.reply({
+      content: MSG_BOT_CONTEXT_ERROR,
+      ephemeral: true,
+    });
     return null;
   }
 
   return { actor, me };
 }
 
-function canTimeoutTarget(actor: GuildMember, me: GuildMember, target: GuildMember): [boolean, string] {
+function canTimeoutTarget(
+  actor: GuildMember,
+  me: GuildMember,
+  target: GuildMember,
+): [boolean, string] {
   if (target.user.bot) {
     return [false, "target is a bot"];
   }
@@ -3026,14 +3985,21 @@ function canTimeoutTarget(actor: GuildMember, me: GuildMember, target: GuildMemb
   }
 
   const actorIsOwner = actor.id === actor.guild.ownerId;
-  if (!actorIsOwner && actor.roles.highest.comparePositionTo(target.roles.highest) <= 0) {
+  if (
+    !actorIsOwner &&
+    actor.roles.highest.comparePositionTo(target.roles.highest) <= 0
+  ) {
     return [false, "your role is not high enough"];
   }
 
   return [true, ""];
 }
 
-function buildTimeoutReason(action: string, user: GuildMember, reason: string | null): string {
+function buildTimeoutReason(
+  action: string,
+  user: GuildMember,
+  reason: string | null,
+): string {
   const base = `${action} by ${user.user.tag} via /admin`;
   return reason ? `${base} | ${reason}` : base;
 }
@@ -3056,7 +4022,9 @@ async function resolveMembers(
   const missing: string[] = [];
 
   for (const memberId of memberIds) {
-    const member = guild.members.cache.get(memberId) ?? (await guild.members.fetch(memberId).catch(() => null));
+    const member =
+      guild.members.cache.get(memberId) ??
+      (await guild.members.fetch(memberId).catch(() => null));
     if (!member) {
       missing.push(memberId);
       continue;
@@ -3103,7 +4071,12 @@ async function applyTimeoutToTargets(
   untilMs: number | null,
   reason: string,
   onlyIfTimedOut = false,
-): Promise<{ applied: number; skipped: number; failed: number; details: string[] }> {
+): Promise<{
+  applied: number;
+  skipped: number;
+  failed: number;
+  details: string[];
+}> {
   let applied = 0;
   let skipped = 0;
   let failed = 0;
@@ -3122,7 +4095,10 @@ async function applyTimeoutToTargets(
       continue;
     }
 
-    const success = await target.timeout(untilMs, reason).then(() => true).catch(() => false);
+    const success = await target
+      .timeout(untilMs, reason)
+      .then(() => true)
+      .catch(() => false);
     if (success) {
       applied += 1;
       continue;
@@ -3137,13 +4113,16 @@ async function applyTimeoutToTargets(
 
 function buildTargetCapMessage(eligibleTargets: number, cap: number): string {
   return (
-    `Safety cap blocked this action. Eligible targets: \`${eligibleTargets}\` exceeds cap \`${cap}\`. `
-    + "Set `MUTEALL_TARGET_CAP=0` or raise the cap in config for larger actions."
+    `Safety cap blocked this action: eligible targets \`${eligibleTargets}\` exceed cap \`${cap}\`. ` +
+    "Set `MUTEALL_TARGET_CAP=0` or raise the cap in config for larger actions."
   );
 }
 
 function formatIssueLines(details: string[]): string {
-  return details.slice(0, 10).map((line) => `- ${line}`).join("\n");
+  return details
+    .slice(0, 10)
+    .map((line) => `- ${line}`)
+    .join("\n");
 }
 
 function appendPreviewIssues(summary: string, details: string[]): string {
@@ -3159,16 +4138,21 @@ function appendIssueSummary(summary: string, details: string[]): string {
     return summary;
   }
 
-  return `${summary}\n\nIssues:\n${formatIssueLines(details)}`;
+  return `${summary}\n\nIssues encountered:\n${formatIssueLines(details)}`;
 }
 
-async function handleInvictusRolePanel(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusRolePanel(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
   }
 
-  const actor = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const actor = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
   if (!actor) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return;
@@ -3180,13 +4164,16 @@ async function handleInvictusRolePanel(interaction: ChatInputCommandInteraction,
       : null) ?? getManageTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
-      content: "Provide a text channel, or run this command from a text channel.",
+      content:
+        "Provide a text channel, or run this command from a text channel.",
       ephemeral: true,
     });
     return;
   }
 
-  const buttonLabel = (interaction.options.getString("button_label") ?? "").trim() || ROLE_PANEL_DEFAULT_BUTTON_LABEL;
+  const buttonLabel =
+    (interaction.options.getString("button_label") ?? "").trim() ||
+    ROLE_PANEL_DEFAULT_BUTTON_LABEL;
   if (buttonLabel.length > ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH) {
     await interaction.reply({
       content: `Button label must be ${ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH} characters or fewer.`,
@@ -3197,13 +4184,21 @@ async function handleInvictusRolePanel(interaction: ChatInputCommandInteraction,
 
   const role = await resolveRoleOption(interaction, "role", true);
   if (!role) {
-    await interaction.reply({ content: "The configured role no longer exists.", ephemeral: true });
+    await interaction.reply({
+      content: "The configured role no longer exists.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const me = interaction.guild.members.me ?? (await interaction.guild.members.fetchMe().catch(() => null));
+  const me =
+    interaction.guild.members.me ??
+    (await interaction.guild.members.fetchMe().catch(() => null));
   if (!me) {
-    await interaction.reply({ content: MSG_BOT_CONTEXT_ERROR, ephemeral: true });
+    await interaction.reply({
+      content: MSG_BOT_CONTEXT_ERROR,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3225,26 +4220,34 @@ async function handleInvictusRolePanel(interaction: ChatInputCommandInteraction,
     interaction.options.getString("description"),
     runtime,
   );
-  const panelComponents = buildRolePanelComponents([buttonLabel]);
-  const mentionEveryone = interaction.options.getBoolean("mention_everyone") ?? false;
+  const panelComponents = buildRolePanelComponents([
+    { label: buttonLabel, roleId: role.id },
+  ]);
+  const mentionEveryone =
+    interaction.options.getBoolean("mention_everyone") ?? false;
   const mentionPayload = buildAnnouncementMentions(mentionEveryone);
 
   const sent = await targetChannel
     .send({
-      ...(mentionPayload.content === null ? {} : { content: mentionPayload.content }),
+      ...(mentionPayload.content === null
+        ? {}
+        : { content: mentionPayload.content }),
       embeds: [panelEmbed],
       components: panelComponents,
       allowedMentions: mentionPayload.allowedMentions,
     })
     .catch(() => null);
   if (!sent) {
-    await interaction.reply({ content: "Failed to create the role panel.", ephemeral: true });
+    await interaction.reply({
+      content: "Failed to create the role panel in that channel.",
+      ephemeral: true,
+    });
     return;
   }
 
   runtime.storage.recordCommandMetric("invictus.rolepanel");
   await interaction.reply({
-    content: `Role panel posted in ${targetChannel.toString()} for ${role.toString()}.`,
+    content: `Role panel posted in ${targetChannel.toString()} for ${role.toString()}. Members can click again to remove it.`,
     ephemeral: true,
   });
 
@@ -3256,13 +4259,18 @@ async function handleInvictusRolePanel(interaction: ChatInputCommandInteraction,
   );
 }
 
-async function handleInvictusRolePanelMulti(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleInvictusRolePanelMulti(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
   }
 
-  const actor = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const actor = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
   if (!actor) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return;
@@ -3274,7 +4282,8 @@ async function handleInvictusRolePanelMulti(interaction: ChatInputCommandInterac
       : null) ?? getManageTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
-      content: "Provide a text channel, or run this command from a text channel.",
+      content:
+        "Provide a text channel, or run this command from a text channel.",
       ephemeral: true,
     });
     return;
@@ -3287,19 +4296,33 @@ async function handleInvictusRolePanelMulti(interaction: ChatInputCommandInterac
   const role5 = await resolveRoleOption(interaction, "role_5", false);
 
   if (!role1 || !role2) {
-    await interaction.reply({ content: "Could not resolve selected roles.", ephemeral: true });
+    await interaction.reply({
+      content: "Could not resolve selected roles.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const [selectedRoles, collectionError] = collectRolePanelRoles(role1, role2, role3, role4, role5);
+  const [selectedRoles, collectionError] = collectRolePanelRoles(
+    role1,
+    role2,
+    role3,
+    role4,
+    role5,
+  );
   if (collectionError) {
     await interaction.reply({ content: collectionError, ephemeral: true });
     return;
   }
 
-  const me = interaction.guild.members.me ?? (await interaction.guild.members.fetchMe().catch(() => null));
+  const me =
+    interaction.guild.members.me ??
+    (await interaction.guild.members.fetchMe().catch(() => null));
   if (!me) {
-    await interaction.reply({ content: MSG_BOT_CONTEXT_ERROR, ephemeral: true });
+    await interaction.reply({
+      content: MSG_BOT_CONTEXT_ERROR,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3321,20 +4344,31 @@ async function handleInvictusRolePanelMulti(interaction: ChatInputCommandInterac
     interaction.options.getString("description"),
     runtime,
   );
-  const panelComponents = buildRolePanelComponents(selectedRoles.map((selectedRole) => selectedRole.name));
-  const mentionEveryone = interaction.options.getBoolean("mention_everyone") ?? false;
+  const panelComponents = buildRolePanelComponents(
+    selectedRoles.map((selectedRole) => ({
+      label: selectedRole.name,
+      roleId: selectedRole.id,
+    })),
+  );
+  const mentionEveryone =
+    interaction.options.getBoolean("mention_everyone") ?? false;
   const mentionPayload = buildAnnouncementMentions(mentionEveryone);
 
   const sent = await targetChannel
     .send({
-      ...(mentionPayload.content === null ? {} : { content: mentionPayload.content }),
+      ...(mentionPayload.content === null
+        ? {}
+        : { content: mentionPayload.content }),
       embeds: [panelEmbed],
       components: panelComponents,
       allowedMentions: mentionPayload.allowedMentions,
     })
     .catch(() => null);
   if (!sent) {
-    await interaction.reply({ content: "Failed to create the multi-role panel.", ephemeral: true });
+    await interaction.reply({
+      content: "Failed to create the multi-role panel in that channel.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3344,7 +4378,9 @@ async function handleInvictusRolePanelMulti(interaction: ChatInputCommandInterac
     ephemeral: true,
   });
 
-  const roleLines = selectedRoles.map((selectedRole) => `- ${selectedRole.toString()} (\`${selectedRole.id}\`)`);
+  const roleLines = selectedRoles.map(
+    (selectedRole) => `- ${selectedRole.toString()} (\`${selectedRole.id}\`)`,
+  );
   await sendLog(
     interaction,
     runtime,
@@ -3353,7 +4389,9 @@ async function handleInvictusRolePanelMulti(interaction: ChatInputCommandInterac
   );
 }
 
-function getManageTargetChannel(interaction: ChatInputCommandInteraction): TextChannel | null {
+function getManageTargetChannel(
+  interaction: ChatInputCommandInteraction,
+): TextChannel | null {
   if (interaction.channel instanceof TextChannel) {
     return interaction.channel;
   }
@@ -3361,7 +4399,9 @@ function getManageTargetChannel(interaction: ChatInputCommandInteraction): TextC
   return null;
 }
 
-function getDmPanelTargetChannel(interaction: ChatInputCommandInteraction): DmPanelTargetChannel | null {
+function getDmPanelTargetChannel(
+  interaction: ChatInputCommandInteraction,
+): DmPanelTargetChannel | null {
   if (isDmPanelTargetChannel(interaction.channel)) {
     return interaction.channel;
   }
@@ -3369,7 +4409,9 @@ function getDmPanelTargetChannel(interaction: ChatInputCommandInteraction): DmPa
   return null;
 }
 
-function isDmPanelTargetChannel(channel: unknown): channel is DmPanelTargetChannel {
+function isDmPanelTargetChannel(
+  channel: unknown,
+): channel is DmPanelTargetChannel {
   if (channel instanceof TextChannel || channel instanceof NewsChannel) {
     return true;
   }
@@ -3379,7 +4421,10 @@ function isDmPanelTargetChannel(channel: unknown): channel is DmPanelTargetChann
   }
 
   const maybeThreadChannel = channel as { isThread?: () => boolean };
-  return typeof maybeThreadChannel.isThread === "function" && maybeThreadChannel.isThread();
+  return (
+    typeof maybeThreadChannel.isThread === "function" &&
+    maybeThreadChannel.isThread()
+  );
 }
 
 function canMemberManageRole(member: GuildMember, role: Role): boolean {
@@ -3390,7 +4435,11 @@ function canMemberManageRole(member: GuildMember, role: Role): boolean {
   return member.roles.highest.comparePositionTo(role) > 0;
 }
 
-function getRolePanelRoleError(actor: GuildMember, me: GuildMember, role: Role): string | null {
+function getRolePanelRoleError(
+  actor: GuildMember,
+  me: GuildMember,
+  role: Role,
+): string | null {
   if (role.id === role.guild.id) {
     return "You cannot create a panel for @everyone.";
   }
@@ -3414,16 +4463,23 @@ function getRolePanelRoleError(actor: GuildMember, me: GuildMember, role: Role):
   return null;
 }
 
-function getRolePanelChannelPermissionError(channel: DmPanelTargetChannel, me: GuildMember): string | null {
+function getRolePanelChannelPermissionError(
+  channel: DmPanelTargetChannel,
+  me: GuildMember,
+): string | null {
   const channelPermissions = channel.permissionsFor(me);
   const missingPermissions: string[] = [];
-  const sendPermission = channel.isThread() ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages;
+  const sendPermission = channel.isThread()
+    ? PermissionFlagsBits.SendMessagesInThreads
+    : PermissionFlagsBits.SendMessages;
 
   if (!channelPermissions.has(PermissionFlagsBits.ViewChannel)) {
     missingPermissions.push("View Channel");
   }
   if (!channelPermissions.has(sendPermission)) {
-    missingPermissions.push(channel.isThread() ? "Send Messages in Threads" : "Send Messages");
+    missingPermissions.push(
+      channel.isThread() ? "Send Messages in Threads" : "Send Messages",
+    );
   }
   if (!channelPermissions.has(PermissionFlagsBits.EmbedLinks)) {
     missingPermissions.push("Embed Links");
@@ -3461,7 +4517,11 @@ function collectRolePanelRoles(
   return [selectedRoles, null];
 }
 
-function getMultiRolePanelError(actor: GuildMember, me: GuildMember, roles: Role[]): string | null {
+function getMultiRolePanelError(
+  actor: GuildMember,
+  me: GuildMember,
+  roles: Role[],
+): string | null {
   for (const selectedRole of roles) {
     const roleError = getRolePanelRoleError(actor, me, selectedRole);
     if (roleError) {
@@ -3481,9 +4541,10 @@ function buildRolePanelEmbed(
   const panelRoles = roles.slice(0, ROLE_PANEL_MAX_BUTTONS);
   const panelTitle = (title ?? "").trim() || "Imperial Role Panel";
 
-  const defaultDescription = panelRoles.length === 1
-    ? `Click the button below to add or remove the **${panelRoles[0]?.name ?? "role"}** role.`
-    : "Click one of the buttons below to toggle the matching role.";
+  const defaultDescription =
+    panelRoles.length === 1
+      ? `Use the button below to toggle **${panelRoles[0]?.name ?? "the selected role"}**.`
+      : "Use the buttons below to toggle any listed role.";
   const panelDescription = (description ?? "").trim() || defaultDescription;
 
   const embed = new EmbedBuilder()
@@ -3495,29 +4556,62 @@ function buildRolePanelEmbed(
   if (panelRoles.length === 1) {
     const role = panelRoles[0];
     if (role) {
-      embed.addFields({ name: "Role", value: `${role.toString()} (\`${role.id}\`)`, inline: false });
-      embed.setFooter({ text: `${ROLE_PANEL_FOOTER_PREFIX}${role.id}` });
+      embed.addFields(
+        {
+          name: "Role",
+          value: `${role.toString()} (\`${role.id}\`)`,
+          inline: false,
+        },
+        {
+          name: "How It Works",
+          value: "Press once to claim the role. Press again to remove it.",
+          inline: false,
+        },
+      );
     }
     return embed;
   }
 
-  const roleLines = panelRoles.map((role, index) => `${index + 1}. ${role.toString()} (\`${role.id}\`)`);
-  const footerTargets = panelRoles.map((role, index) => `${index + 1}=${role.id}`);
-  embed.addFields({ name: "Roles", value: roleLines.join("\n"), inline: false });
-  embed.setFooter({ text: `${ROLE_PANEL_TARGETS_FOOTER_PREFIX}${footerTargets.join(",")}` });
+  const roleLines = panelRoles.map(
+    (role, index) => `${index + 1}. ${role.toString()} (\`${role.id}\`)`,
+  );
+  embed.addFields(
+    { name: "Roles", value: roleLines.join("\n"), inline: false },
+    {
+      name: "How It Works",
+      value: "Each button toggles the matching role on or off.",
+      inline: false,
+    },
+  );
   return embed;
 }
 
-function buildRolePanelComponents(buttonLabels: string[] = [ROLE_PANEL_DEFAULT_BUTTON_LABEL]): ActionRowBuilder<ButtonBuilder>[] {
-  const labels = buttonLabels.length > 0 ? buttonLabels : [ROLE_PANEL_DEFAULT_BUTTON_LABEL];
-  const trimmedLabels = labels.slice(0, ROLE_PANEL_MAX_BUTTONS);
+function buildRolePanelComponents(
+  buttonSpecs: Array<{ label: string; roleId: string }> = [
+    { label: ROLE_PANEL_DEFAULT_BUTTON_LABEL, roleId: "" },
+  ],
+): ActionRowBuilder<ButtonBuilder>[] {
+  const entries =
+    buttonSpecs.length > 0
+      ? buttonSpecs
+      : [{ label: ROLE_PANEL_DEFAULT_BUTTON_LABEL, roleId: "" }];
+  const trimmedEntries = entries.slice(0, ROLE_PANEL_MAX_BUTTONS);
 
   const row = new ActionRowBuilder<ButtonBuilder>();
-  for (const [indexRaw, rawLabel] of trimmedLabels.entries()) {
+  for (const [indexRaw, spec] of trimmedEntries.entries()) {
     const index = indexRaw + 1;
-    const fallback = index === 1 ? ROLE_PANEL_DEFAULT_BUTTON_LABEL : `Claim Role ${index}`;
-    const label = (rawLabel || "").trim() || fallback;
-    const customId = index === 1 ? ROLE_PANEL_BUTTON_CUSTOM_ID : `${ROLE_PANEL_BUTTON_CUSTOM_ID}:${index}`;
+    const fallback =
+      index === 1 ? ROLE_PANEL_DEFAULT_BUTTON_LABEL : `Claim Role ${index}`;
+    const label = (spec.label || "").trim() || fallback;
+    const roleId = String(spec.roleId ?? "").trim();
+
+    let customId = buildRolePanelButtonCustomId(roleId);
+    if (!/^\d+$/.test(roleId)) {
+      customId =
+        index === 1
+          ? ROLE_PANEL_BUTTON_CUSTOM_ID
+          : `${ROLE_PANEL_BUTTON_CUSTOM_ID}:${index}`;
+    }
 
     row.addComponents(
       new ButtonBuilder()
@@ -3553,49 +4647,68 @@ export function buildCategorySummary(): string {
     .join("\n");
 }
 
-async function requireStaff(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<boolean> {
+async function requireStaff(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<boolean> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return false;
   }
 
-  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const member = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
   if (!member) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return false;
   }
 
   const isAdmin =
-    member.permissions.has(PermissionFlagsBits.Administrator) || interaction.guild.ownerId === interaction.user.id;
+    member.permissions.has(PermissionFlagsBits.Administrator) ||
+    interaction.guild.ownerId === interaction.user.id;
   if (isAdmin) {
     return true;
   }
 
-  const isStaff = member.roles.cache.some((role) => runtime.config.staffRoleIdsText.has(role.id));
+  const isStaff = member.roles.cache.some((role) =>
+    runtime.config.staffRoleIdsText.has(role.id),
+  );
   if (!isStaff) {
-    await interaction.reply({ content: "You do not have permission to use this command.", ephemeral: true });
+    await interaction.reply({
+      content: "You do not have permission to use this command.",
+      ephemeral: true,
+    });
     return false;
   }
 
   return true;
 }
 
-async function requireAdmin(interaction: ChatInputCommandInteraction): Promise<boolean> {
+async function requireAdmin(
+  interaction: ChatInputCommandInteraction,
+): Promise<boolean> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return false;
   }
 
-  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const member = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
   if (!member) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return false;
   }
 
   const isAdmin =
-    member.permissions.has(PermissionFlagsBits.Administrator) || interaction.guild.ownerId === interaction.user.id;
+    member.permissions.has(PermissionFlagsBits.Administrator) ||
+    interaction.guild.ownerId === interaction.user.id;
   if (!isAdmin) {
-    await interaction.reply({ content: "You do not have permission to use this command.", ephemeral: true });
+    await interaction.reply({
+      content: "You do not have permission to use this command.",
+      ephemeral: true,
+    });
     return false;
   }
 
@@ -3605,13 +4718,19 @@ async function requireAdmin(interaction: ChatInputCommandInteraction): Promise<b
 async function requireRoyal(
   interaction: ChatInputCommandInteraction,
   runtime: BotRuntime,
-): Promise<{ guild: ChatInputCommandInteraction["guild"]; actor: GuildMember; titles: RoyalTitle[] } | null> {
+): Promise<{
+  guild: ChatInputCommandInteraction["guild"];
+  actor: GuildMember;
+  titles: RoyalTitle[];
+} | null> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return null;
   }
 
-  const actor = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const actor = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
   if (!actor) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return null;
@@ -3630,13 +4749,22 @@ async function requireRoyal(
   };
 }
 
-function getMemberRoyalTitles(member: GuildMember, runtime: BotRuntime): RoyalTitle[] {
+function getMemberRoyalTitles(
+  member: GuildMember,
+  runtime: BotRuntime,
+): RoyalTitle[] {
   const titles: RoyalTitle[] = [];
 
-  if (runtime.config.emperorRoleIdText && member.roles.cache.has(runtime.config.emperorRoleIdText)) {
+  if (
+    runtime.config.emperorRoleIdText &&
+    member.roles.cache.has(runtime.config.emperorRoleIdText)
+  ) {
     titles.push("Emperor");
   }
-  if (runtime.config.empressRoleIdText && member.roles.cache.has(runtime.config.empressRoleIdText)) {
+  if (
+    runtime.config.empressRoleIdText &&
+    member.roles.cache.has(runtime.config.empressRoleIdText)
+  ) {
     titles.push("Empress");
   }
 
@@ -3647,7 +4775,10 @@ function isConfirmed(value: string): boolean {
   return value.trim().toUpperCase() === "CONFIRM";
 }
 
-async function handleCourtPost(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtPost(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -3685,12 +4816,16 @@ async function handleCourtPost(interaction: ChatInputCommandInteraction, runtime
       `**By:** ${interaction.user.toString()}\n**Channel:** ${channel.toString()}\n**Category:** \`${chosenCategory}\`\n**Randomized:** \`${randomize}\`\n**Question:** ${question}`,
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to post question.";
+    const message =
+      error instanceof Error ? error.message : "Failed to post question.";
     await interaction.editReply({ content: message });
   }
 }
 
-async function handleCourtCustom(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtCustom(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -3698,7 +4833,9 @@ async function handleCourtCustom(interaction: ChatInputCommandInteraction, runti
 
   await interaction.deferReply({ ephemeral: true });
 
-  const cleanQuestion = normalizeQuestionText(interaction.options.getString("question", true));
+  const cleanQuestion = normalizeQuestionText(
+    interaction.options.getString("question", true),
+  );
   if (!cleanQuestion) {
     await interaction.editReply({ content: MSG_QUESTION_EMPTY });
     return;
@@ -3713,13 +4850,20 @@ async function handleCourtCustom(interaction: ChatInputCommandInteraction, runti
   const embed = buildCourtEmbed("custom", cleanQuestion, runtime);
   const mentionPayload = buildAnnouncementMentions(false);
   const sent = await channel.send({
-    ...(mentionPayload.content === null ? {} : { content: mentionPayload.content }),
+    ...(mentionPayload.content === null
+      ? {}
+      : { content: mentionPayload.content }),
     embeds: [embed],
     components: buildAnonymousAnswerComponents(),
     allowedMentions: mentionPayload.allowedMentions,
   });
 
-  const thread = await getOrCreateAnswerThread(sent, cleanQuestion, runtime, interaction);
+  const thread = await getOrCreateAnswerThread(
+    sent,
+    cleanQuestion,
+    runtime,
+    interaction,
+  );
   runtime.storage.upsertPostRow({
     message_id: String(sent.id),
     thread_id: thread?.id ?? null,
@@ -3739,7 +4883,9 @@ async function handleCourtCustom(interaction: ChatInputCommandInteraction, runti
   });
   runtime.storage.recordCommandMetric("court.custom");
 
-  await interaction.editReply({ content: `Custom question posted in ${channel.toString()}.` });
+  await interaction.editReply({
+    content: `Custom question posted in ${channel.toString()}.`,
+  });
 
   await sendLog(
     interaction,
@@ -3749,7 +4895,10 @@ async function handleCourtCustom(interaction: ChatInputCommandInteraction, runti
   );
 }
 
-async function handleCourtClose(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtClose(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -3758,13 +4907,22 @@ async function handleCourtClose(interaction: ChatInputCommandInteraction, runtim
   await interaction.deferReply({ ephemeral: true });
 
   const messageId = interaction.options.getString("message_id");
-  const record = messageId ? runtime.storage.getPostRecord(messageId) : runtime.storage.getLatestOpenPost();
+  const record = messageId
+    ? runtime.storage.getPostRecord(messageId)
+    : runtime.storage.getLatestOpenPost();
   if (!record) {
-    await interaction.editReply({ content: "No matching open court inquiry found." });
+    await interaction.editReply({
+      content: "No matching open court inquiry found.",
+    });
     return;
   }
 
-  const [ok, message] = await closeCourtPost(record, "manual", interaction, runtime);
+  const [ok, message] = await closeCourtPost(
+    record,
+    "manual",
+    interaction,
+    runtime,
+  );
   runtime.storage.recordCommandMetric("court.close");
 
   await interaction.editReply({ content: message });
@@ -3779,10 +4937,16 @@ async function handleCourtClose(interaction: ChatInputCommandInteraction, runtim
   }
 }
 
-async function handleCourtListOpen(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtListOpen(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const openPosts = runtime.storage.listPostRecords(false);
   if (openPosts.length === 0) {
-    await interaction.reply({ content: "No open court inquiries.", ephemeral: true });
+    await interaction.reply({
+      content: "No open court inquiries.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3796,10 +4960,13 @@ async function handleCourtListOpen(interaction: ChatInputCommandInteraction, run
     let closesText = "Unknown";
     if (deadline) {
       const remaining = deadline.diff(now);
-      closesText = remaining.toMillis() <= 0 ? "Overdue" : formatDuration(remaining);
+      closesText =
+        remaining.toMillis() <= 0 ? "Overdue" : formatDuration(remaining);
     }
 
-    const answerCount = runtime.storage.countAnswersForQuestion(post.message_id);
+    const answerCount = runtime.storage.countAnswersForQuestion(
+      post.message_id,
+    );
     lines.push(
       `- \`${post.message_id}\` | \`${post.category || "unknown"}\` | Age \`${ageText}\` | Closes in \`${closesText}\` | Answers \`${answerCount}\``,
     );
@@ -3812,13 +4979,22 @@ async function handleCourtListOpen(interaction: ChatInputCommandInteraction, run
   });
 }
 
-async function handleCourtExtend(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtExtend(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   const messageId = interaction.options.getString("message_id", true);
-  const additionalHours = interaction.options.getInteger("additional_hours", true);
+  const additionalHours = interaction.options.getInteger(
+    "additional_hours",
+    true,
+  );
 
   const record = runtime.storage.getPostRecord(messageId);
   if (!record) {
-    await interaction.reply({ content: "Court inquiry not found.", ephemeral: true });
+    await interaction.reply({
+      content: "Court inquiry not found.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3840,7 +5016,10 @@ async function handleCourtExtend(interaction: ChatInputCommandInteraction, runti
   );
 }
 
-async function handleCourtReopen(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtReopen(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -3849,7 +5028,8 @@ async function handleCourtReopen(interaction: ChatInputCommandInteraction, runti
   await interaction.deferReply({ ephemeral: true });
 
   const messageId = interaction.options.getString("message_id", true);
-  const closeAfterHours = interaction.options.getInteger("close_after_hours") ?? THREAD_CLOSE_HOURS;
+  const closeAfterHours =
+    interaction.options.getInteger("close_after_hours") ?? THREAD_CLOSE_HOURS;
 
   const record = runtime.storage.getPostRecord(messageId);
   if (!record) {
@@ -3857,7 +5037,12 @@ async function handleCourtReopen(interaction: ChatInputCommandInteraction, runti
     return;
   }
 
-  const [ok, message] = await reopenCourtPost(record, closeAfterHours, interaction, runtime);
+  const [ok, message] = await reopenCourtPost(
+    record,
+    closeAfterHours,
+    interaction,
+    runtime,
+  );
   runtime.storage.recordCommandMetric("court.reopen");
 
   await interaction.editReply({ content: message });
@@ -3872,7 +5057,10 @@ async function handleCourtReopen(interaction: ChatInputCommandInteraction, runti
   }
 }
 
-async function handleCourtRemoveAnswer(interaction: ChatInputCommandInteraction, runtime: BotRuntime): Promise<void> {
+async function handleCourtRemoveAnswer(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
@@ -3883,25 +5071,37 @@ async function handleCourtRemoveAnswer(interaction: ChatInputCommandInteraction,
   const messageId = interaction.options.getString("message_id", true);
   const recordMatch = runtime.storage.findAnswerRecord(messageId);
   if (!recordMatch) {
-    await interaction.editReply({ content: "Anonymous answer record not found." });
+    await interaction.editReply({
+      content: "Anonymous answer record not found.",
+    });
     return;
   }
 
-  const postRecord = runtime.storage.getPostRecord(recordMatch.question_message_id);
+  const postRecord = runtime.storage.getPostRecord(
+    recordMatch.question_message_id,
+  );
   if (!postRecord?.thread_id) {
-    await interaction.editReply({ content: "Could not find the parent court thread." });
+    await interaction.editReply({
+      content: "Could not find the parent court thread.",
+    });
     return;
   }
 
   const thread = await fetchThreadById(interaction, postRecord.thread_id);
   if (!thread) {
-    await interaction.editReply({ content: "Could not access the parent thread." });
+    await interaction.editReply({
+      content: "Could not access the parent thread.",
+    });
     return;
   }
 
-  const answerMessage = await thread.messages.fetch(messageId).catch(() => null);
+  const answerMessage = await thread.messages
+    .fetch(messageId)
+    .catch(() => null);
   if (!answerMessage) {
-    await interaction.editReply({ content: "Could not fetch that answer message." });
+    await interaction.editReply({
+      content: "Could not fetch that answer message.",
+    });
     return;
   }
 
@@ -3910,7 +5110,9 @@ async function handleCourtRemoveAnswer(interaction: ChatInputCommandInteraction,
     .then(() => true)
     .catch(() => false);
   if (!deleted) {
-    await interaction.editReply({ content: "Failed to delete that answer message." });
+    await interaction.editReply({
+      content: "Failed to delete that answer message.",
+    });
     return;
   }
 
@@ -3942,7 +5144,9 @@ async function closeCourtPost(
 
   const message = await getPostMessage(interaction.client, record);
   if (message) {
-    await message.edit({ components: buildClosedAnswerComponents() }).catch(() => null);
+    await message
+      .edit({ components: buildClosedAnswerComponents() })
+      .catch(() => null);
   }
 
   runtime.storage.markPostClosed(record.message_id, reason);
@@ -3972,10 +5176,15 @@ async function reopenCourtPost(
 
   const message = await getPostMessage(interaction.client, record);
   if (message) {
-    await message.edit({ components: buildAnonymousAnswerComponents() }).catch(() => null);
+    await message
+      .edit({ components: buildAnonymousAnswerComponents() })
+      .catch(() => null);
   }
 
-  const reopened = runtime.storage.markPostOpen(record.message_id, closeAfterHours);
+  const reopened = runtime.storage.markPostOpen(
+    record.message_id,
+    closeAfterHours,
+  );
   if (!reopened) {
     return [false, "Could not reopen this inquiry record."];
   }
@@ -3993,12 +5202,18 @@ async function postQuestion(
     mentionEveryone: boolean;
   },
 ): Promise<[string, string]> {
-  const [chosenCategory, question] = runtime.storage.pickQuestion(options.category, options.randomize, runtime.randomInt);
+  const [chosenCategory, question] = runtime.storage.pickQuestion(
+    options.category,
+    options.randomize,
+    runtime.randomInt,
+  );
   const embed = buildCourtEmbed(chosenCategory, question, runtime);
   const mentionPayload = buildAnnouncementMentions(options.mentionEveryone);
 
   const sent = await channel.send({
-    ...(mentionPayload.content === null ? {} : { content: mentionPayload.content }),
+    ...(mentionPayload.content === null
+      ? {}
+      : { content: mentionPayload.content }),
     embeds: [embed],
     components: buildAnonymousAnswerComponents(),
     allowedMentions: mentionPayload.allowedMentions,
@@ -4027,16 +5242,24 @@ async function postQuestion(
   return [chosenCategory, question];
 }
 
-function buildCourtEmbed(category: string, question: string, runtime: BotRuntime): EmbedBuilder {
+function buildCourtEmbed(
+  category: string,
+  question: string,
+  runtime: BotRuntime,
+): EmbedBuilder {
   return new EmbedBuilder()
     .setTitle("Imperial Court Inquiry")
-    .setDescription(`*The throne demands an answer.*\n\n**Question:** ${question}`)
+    .setDescription(
+      `*The throne demands an answer.*\n\n**Question:** ${question}`,
+    )
     .setColor(ROLE_COLOR)
     .setTimestamp(runtime.now().toJSDate())
     .setFooter({ text: `Category: ${category}` });
 }
 
-function extractQuestionFromMessage(message: Message | null | undefined): string {
+function extractQuestionFromMessage(
+  message: Message | null | undefined,
+): string {
   if (!message || message.embeds.length === 0) {
     return MSG_UNKNOWN_QUESTION;
   }
@@ -4092,7 +5315,10 @@ function buildAnonymousAnswerModal(questionMessageId: string): ModalBuilder {
     });
 }
 
-function buildAdminSayModal(channelId: string, mentionEveryone: boolean): ModalBuilder {
+function buildAdminSayModal(
+  channelId: string,
+  mentionEveryone: boolean,
+): ModalBuilder {
   const input = new TextInputBuilder()
     .setCustomId(ADMIN_SAY_MODAL_INPUT_ID)
     .setStyle(TextInputStyle.Paragraph)
@@ -4101,7 +5327,9 @@ function buildAdminSayModal(channelId: string, mentionEveryone: boolean): ModalB
     .setMaxLength(4000);
 
   return new ModalBuilder()
-    .setCustomId(`${ADMIN_SAY_MODAL_PREFIX}${channelId}:${mentionEveryone ? "1" : "0"}`)
+    .setCustomId(
+      `${ADMIN_SAY_MODAL_PREFIX}${channelId}:${mentionEveryone ? "1" : "0"}`,
+    )
     .setTitle("Send Announcement")
     .setLabelComponents({
       type: ComponentType.Label,
@@ -4118,8 +5346,8 @@ function buildInvictusDmPanelEmbed(
 ): EmbedBuilder {
   const panelTitle = (title ?? "").trim() || "Message Invictus";
   const defaultDescription =
-    `Press the button below to send a private message to <@${targetUserId}>. `
-    + "Invictus will DM your message and include who sent it.";
+    `Press the button below to send a private message to <@${targetUserId}>. ` +
+    "Your message is relayed by DM with sender and source context.";
   const panelDescription = (description ?? "").trim() || defaultDescription;
 
   return new EmbedBuilder()
@@ -4127,20 +5355,56 @@ function buildInvictusDmPanelEmbed(
     .setDescription(panelDescription)
     .setColor(ROLE_COLOR)
     .setTimestamp(runtime.now().toJSDate())
-    .setFooter({ text: `${INVICTUS_DM_PANEL_FOOTER_PREFIX}${targetUserId}` });
+    .addFields(
+      { name: "Recipient", value: `<@${targetUserId}>`, inline: true },
+      {
+        name: "Privacy",
+        value:
+          "Messages are forwarded privately and include sender identity plus channel context.",
+        inline: false,
+      },
+    );
 }
 
-function buildInvictusDmPanelComponents(buttonLabel: string): ActionRowBuilder<ButtonBuilder>[] {
-  const trimmedLabel = buttonLabel.trim() || INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL;
+function buildInvictusDmPanelComponents(
+  buttonLabel: string,
+  targetUserId: string,
+): ActionRowBuilder<ButtonBuilder>[] {
+  const trimmedLabel =
+    buttonLabel.trim() || INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL;
 
   return [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
-        .setCustomId(INVICTUS_DM_PANEL_BUTTON_ID)
+        .setCustomId(buildInvictusDmPanelButtonCustomId(targetUserId))
         .setLabel(trimmedLabel.slice(0, ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH))
         .setStyle(ButtonStyle.Primary),
     ),
   ];
+}
+
+function buildInvictusDmPanelButtonCustomId(targetUserId: string): string {
+  return `${INVICTUS_DM_PANEL_BUTTON_ID}:${targetUserId}`;
+}
+
+function parseInvictusDmPanelButtonTargetUserId(
+  customId: string | null | undefined,
+): string | null {
+  if (!customId) {
+    return null;
+  }
+
+  const prefix = `${INVICTUS_DM_PANEL_BUTTON_ID}:`;
+  if (!customId.startsWith(prefix)) {
+    return null;
+  }
+
+  const targetUserId = customId.slice(prefix.length).trim();
+  if (!/^\d+$/.test(targetUserId)) {
+    return null;
+  }
+
+  return targetUserId;
 }
 
 function buildInvictusDmPanelModal(targetUserId: string): ModalBuilder {
@@ -4161,7 +5425,9 @@ function buildInvictusDmPanelModal(targetUserId: string): ModalBuilder {
     });
 }
 
-function extractAdminSayContextFromModal(customId: string): { channelId: string; mentionEveryone: boolean } | null {
+function extractAdminSayContextFromModal(
+  customId: string,
+): { channelId: string; mentionEveryone: boolean } | null {
   if (!customId.startsWith(ADMIN_SAY_MODAL_PREFIX)) {
     return null;
   }
@@ -4178,12 +5444,16 @@ function extractAdminSayContextFromModal(customId: string): { channelId: string;
   };
 }
 
-function parseInvictusDmPanelModalTargetUserId(customId: string): string | null {
+function parseInvictusDmPanelModalTargetUserId(
+  customId: string,
+): string | null {
   if (!customId.startsWith(INVICTUS_DM_PANEL_MODAL_PREFIX)) {
     return null;
   }
 
-  const targetUserId = customId.slice(INVICTUS_DM_PANEL_MODAL_PREFIX.length).trim();
+  const targetUserId = customId
+    .slice(INVICTUS_DM_PANEL_MODAL_PREFIX.length)
+    .trim();
   if (!/^\d+$/.test(targetUserId)) {
     return null;
   }
@@ -4216,7 +5486,9 @@ function minimumAgeRequirementError(
 
   const subjectUtc = DateTime.fromJSDate(subjectTime, { zone: "utc" });
   const elapsedMs = nowUtc.diff(subjectUtc).toMillis();
-  const requiredMs = Duration.fromObject({ minutes: minimumMinutes }).toMillis();
+  const requiredMs = Duration.fromObject({
+    minutes: minimumMinutes,
+  }).toMillis();
   if (elapsedMs >= requiredMs) {
     return null;
   }
@@ -4225,21 +5497,32 @@ function minimumAgeRequirementError(
   return `${messagePrefix}Try again in \`${formatDuration(remaining)}\`.`;
 }
 
-function remainingAnonymousCooldownSeconds(userId: string, runtime: BotRuntime): number {
+function remainingAnonymousCooldownSeconds(
+  userId: string,
+  runtime: BotRuntime,
+): number {
   if (runtime.config.anonCooldownSeconds <= 0) {
     return 0;
   }
 
-  const lastAnswerAt = parseIso(runtime.storage.getLastAnswerTimeForUser(userId));
+  const lastAnswerAt = parseIso(
+    runtime.storage.getLastAnswerTimeForUser(userId),
+  );
   if (!lastAnswerAt) {
     return 0;
   }
 
-  const elapsedSeconds = Math.floor(DateTime.utc().diff(lastAnswerAt.toUTC()).as("seconds"));
+  const elapsedSeconds = Math.floor(
+    DateTime.utc().diff(lastAnswerAt.toUTC()).as("seconds"),
+  );
   return Math.max(runtime.config.anonCooldownSeconds - elapsedSeconds, 0);
 }
 
-function validateAnonymousAnswerSubmission(member: GuildMember, answerText: string, runtime: BotRuntime): string | null {
+function validateAnonymousAnswerSubmission(
+  member: GuildMember,
+  answerText: string,
+  runtime: BotRuntime,
+): string | null {
   const requiredRoleId = runtime.config.anonRequiredRoleIdText;
   if (requiredRoleId && !member.roles.cache.has(requiredRoleId)) {
     return "You are not eligible to submit anonymous court answers yet.";
@@ -4267,9 +5550,14 @@ function validateAnonymousAnswerSubmission(member: GuildMember, answerText: stri
     return memberAgeError;
   }
 
-  const cooldownRemainingSeconds = remainingAnonymousCooldownSeconds(member.id, runtime);
+  const cooldownRemainingSeconds = remainingAnonymousCooldownSeconds(
+    member.id,
+    runtime,
+  );
   if (cooldownRemainingSeconds > 0) {
-    const remaining = Duration.fromObject({ seconds: cooldownRemainingSeconds });
+    const remaining = Duration.fromObject({
+      seconds: cooldownRemainingSeconds,
+    });
     return `You are on cooldown for anonymous answers. Try again in \`${formatDuration(remaining)}\`.`;
   }
 
@@ -4280,71 +5568,113 @@ function validateAnonymousAnswerSubmission(member: GuildMember, answerText: stri
   return null;
 }
 
-async function handleRolePanelButtonInteraction(interaction: ButtonInteraction, buttonSlot: number): Promise<void> {
+async function handleRolePanelButtonInteraction(
+  interaction: ButtonInteraction,
+  buttonSlot: number,
+  roleIdFromCustomId: string | null = null,
+): Promise<void> {
   if (!interaction.guild || !interaction.message) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
   }
 
-  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const member = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
   if (!member) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return;
   }
 
-  const footerTexts = interaction.message.embeds.map((embed) => String(embed.footer?.text ?? ""));
-  const roleId = extractRolePanelRoleIdForSlot(footerTexts, buttonSlot);
-  if (!roleId) {
-    await interaction.reply({ content: "This role panel is missing role metadata.", ephemeral: true });
+  const footerTexts = interaction.message.embeds.map((embed) =>
+    String(embed.footer?.text ?? ""),
+  );
+  const roleIdFromFooter = extractRolePanelRoleIdForSlot(
+    footerTexts,
+    buttonSlot,
+  );
+  const roleIdText =
+    roleIdFromCustomId ?? (roleIdFromFooter ? String(roleIdFromFooter) : null);
+  if (!roleIdText) {
+    await interaction.reply({
+      content: "This role panel is missing role metadata.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const roleIdText = String(roleId);
-  const role = interaction.guild.roles.cache.get(roleIdText) ?? (await interaction.guild.roles.fetch(roleIdText).catch(() => null));
+  const role =
+    interaction.guild.roles.cache.get(roleIdText) ??
+    (await interaction.guild.roles.fetch(roleIdText).catch(() => null));
   if (!role) {
-    await interaction.reply({ content: "The configured role no longer exists.", ephemeral: true });
+    await interaction.reply({
+      content: "The configured role no longer exists.",
+      ephemeral: true,
+    });
     return;
   }
 
-  const me = interaction.guild.members.me ?? (await interaction.guild.members.fetchMe().catch(() => null));
+  const me =
+    interaction.guild.members.me ??
+    (await interaction.guild.members.fetchMe().catch(() => null));
   const permissionError = getRolePanelClaimPermissionError(role, me);
   if (permissionError) {
     await interaction.reply({ content: permissionError, ephemeral: true });
     return;
   }
 
-  const [successMessage, errorMessage] = await toggleRoleForMember(member, role, interaction.message.id);
+  const [successMessage, errorMessage] = await toggleRoleForMember(
+    member,
+    role,
+    interaction.message.id,
+  );
   if (errorMessage) {
     await interaction.reply({ content: errorMessage, ephemeral: true });
     return;
   }
 
-  await interaction.reply({ content: successMessage ?? "Role updated.", ephemeral: true });
+  await interaction.reply({
+    content: successMessage ?? "Role updated.",
+    ephemeral: true,
+  });
 }
 
-async function handleInvictusDmPanelButtonInteraction(interaction: ButtonInteraction): Promise<void> {
+async function handleInvictusDmPanelButtonInteraction(
+  interaction: ButtonInteraction,
+  targetUserIdFromCustomId: string | null = null,
+): Promise<void> {
   if (!interaction.guild || !interaction.message) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
   }
 
-  const footerTexts = interaction.message.embeds.map((embed) => String(embed.footer?.text ?? ""));
-  const targetUserId = extractInvictusDmPanelTargetUserId(footerTexts);
+  const footerTexts = interaction.message.embeds.map((embed) =>
+    String(embed.footer?.text ?? ""),
+  );
+  const targetUserId =
+    targetUserIdFromCustomId ?? extractInvictusDmPanelTargetUserId(footerTexts);
   if (!targetUserId) {
-    await interaction.reply({ content: "This DM panel is missing recipient metadata.", ephemeral: true });
+    await interaction.reply({
+      content: "This DM panel is missing recipient metadata.",
+      ephemeral: true,
+    });
     return;
   }
 
   await interaction.showModal(buildInvictusDmPanelModal(targetUserId));
 }
 
-function extractInvictusDmPanelTargetUserId(footerTexts: string[]): string | null {
+function extractInvictusDmPanelTargetUserId(
+  footerTexts: string[],
+): string | null {
   for (const footerText of footerTexts) {
     if (!footerText.startsWith(INVICTUS_DM_PANEL_FOOTER_PREFIX)) {
       continue;
     }
 
-    const targetUserId = footerText.slice(INVICTUS_DM_PANEL_FOOTER_PREFIX.length).trim();
+    const targetUserId = footerText
+      .slice(INVICTUS_DM_PANEL_FOOTER_PREFIX.length)
+      .trim();
     if (/^\d+$/.test(targetUserId)) {
       return targetUserId;
     }
@@ -4353,7 +5683,10 @@ function extractInvictusDmPanelTargetUserId(footerTexts: string[]): string | nul
   return null;
 }
 
-function getRolePanelClaimPermissionError(role: Role, me: GuildMember | null): string | null {
+function getRolePanelClaimPermissionError(
+  role: Role,
+  me: GuildMember | null,
+): string | null {
   if (role.managed || role.id === role.guild.id) {
     return "This role cannot be self-assigned from this panel.";
   }
@@ -4378,7 +5711,10 @@ async function toggleRoleForMember(
 
   if (hasRole) {
     try {
-      await member.roles.remove(role, `Self-removed via role panel (${messageId})`);
+      await member.roles.remove(
+        role,
+        `Self-removed via role panel (${messageId})`,
+      );
     } catch {
       return [null, "I do not have permission to remove this role."];
     }
@@ -4440,7 +5776,10 @@ async function getOrCreateAnswerThread(
 
   const existingRecord = runtime.storage.getPostRecord(message.id);
   if (existingRecord?.thread_id) {
-    const fetched = await fetchChannelById(message.client, existingRecord.thread_id);
+    const fetched = await fetchChannelById(
+      message.client,
+      existingRecord.thread_id,
+    );
     if (fetched?.isThread()) {
       runtime.storage.updatePostThreadId(message.id, fetched.id);
       return fetched;
@@ -4474,11 +5813,11 @@ async function getOrCreateAnswerThread(
 
   await thread
     .send(
-      "**Anonymous Court Replies**\n"
-        + "- One anonymous answer per person\n"
-        + "- Stay on topic\n"
-        + "- Anonymous does not mean consequence-free\n"
-        + `- This thread will close automatically after ${THREAD_CLOSE_HOURS} hours`,
+      "**Anonymous Court Replies**\n" +
+        "- One anonymous answer per person\n" +
+        "- Stay on topic\n" +
+        "- Anonymous does not mean consequence-free\n" +
+        `- This thread will close automatically after ${THREAD_CLOSE_HOURS} hours`,
     )
     .catch(() => null);
 
@@ -4519,7 +5858,9 @@ async function getTargetChannel(
       return cached;
     }
 
-    const fetched = await interaction.guild.channels.fetch(candidate).catch(() => null);
+    const fetched = await interaction.guild.channels
+      .fetch(candidate)
+      .catch(() => null);
     if (fetched instanceof TextChannel) {
       return fetched;
     }
@@ -4553,7 +5894,9 @@ async function getLogChannel(
       return cached;
     }
 
-    const fetched = await interaction.guild.channels.fetch(candidate).catch(() => null);
+    const fetched = await interaction.guild.channels
+      .fetch(candidate)
+      .catch(() => null);
     if (fetched instanceof TextChannel) {
       return fetched;
     }
@@ -4605,7 +5948,10 @@ async function sendLog(
   await destination.send({ embeds: [embed] }).catch(() => null);
 }
 
-async function fetchChannelById(client: ChatInputCommandInteraction["client"], channelId: string): Promise<Channel | null> {
+async function fetchChannelById(
+  client: ChatInputCommandInteraction["client"],
+  channelId: string,
+): Promise<Channel | null> {
   if (!/^\d+$/.test(channelId)) {
     return null;
   }
@@ -4634,7 +5980,10 @@ async function fetchThreadById(
   return null;
 }
 
-async function getPostMessage(client: ChatInputCommandInteraction["client"], record: PostRecord): Promise<Message | null> {
+async function getPostMessage(
+  client: ChatInputCommandInteraction["client"],
+  record: PostRecord,
+): Promise<Message | null> {
   const channel = await fetchChannelById(client, record.channel_id);
   if (!channel?.isTextBased()) {
     return null;

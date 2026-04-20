@@ -29,6 +29,7 @@ import type {
 } from "./types.js";
 
 const ROLE_PANEL_ROLE_ID_PATTERN = /^RolePanelTarget:(\d+)$/;
+const ROLE_PANEL_ROLE_CUSTOM_ID_PREFIX = `${ROLE_PANEL_BUTTON_CUSTOM_ID}:role:`;
 const VALID_BOT_MODES: Set<BotMode> = new Set<BotMode>(["off", "manual", "auto"]);
 
 export const IMPORT_STATE_DATE_KEYS = [
@@ -279,6 +280,28 @@ export function extractRolePanelRoleIdForSlot(footerTexts: string[], slot: numbe
 
 export function extractRolePanelRoleId(footerTexts: string[]): number | null {
   return extractRolePanelRoleIdForSlot(footerTexts, 1);
+}
+
+export function buildRolePanelButtonCustomId(roleId: string | number): string {
+  const roleIdText = String(roleId).trim();
+  if (!/^\d+$/.test(roleIdText)) {
+    return ROLE_PANEL_BUTTON_CUSTOM_ID;
+  }
+
+  return `${ROLE_PANEL_ROLE_CUSTOM_ID_PREFIX}${roleIdText}`;
+}
+
+export function extractRolePanelRoleIdFromCustomId(customId: string | null | undefined): string | null {
+  if (!customId?.startsWith(ROLE_PANEL_ROLE_CUSTOM_ID_PREFIX)) {
+    return null;
+  }
+
+  const roleId = customId.slice(ROLE_PANEL_ROLE_CUSTOM_ID_PREFIX.length).trim();
+  if (!/^\d+$/.test(roleId)) {
+    return null;
+  }
+
+  return roleId;
 }
 
 export function extractRolePanelButtonSlot(customId: string | null | undefined): number | null {

@@ -2,11 +2,13 @@ import { DateTime } from "luxon";
 import {
   DEFAULT_BACKFILL_STATUS,
   backfillLookbackText,
+  buildRolePanelButtonCustomId,
   buildRoyalAfkStatusReport,
   countOpenAndOverduePosts,
   ensureRoyalAfkShape,
   extractRolePanelButtonSlot,
   extractRolePanelRoleId,
+  extractRolePanelRoleIdFromCustomId,
   extractRolePanelRoleIdForSlot,
   flattenMetricsForStorage,
   getFateReading,
@@ -78,6 +80,15 @@ describe("parity helpers", () => {
     expect(extractRolePanelButtonSlot("court:role_panel_claim:5")).toBe(5);
     expect(extractRolePanelButtonSlot("court:role_panel_claim:6")).toBeNull();
     expect(extractRolePanelButtonSlot("court:other")).toBeNull();
+  });
+
+  it("builds and parses role panel custom IDs with role metadata", () => {
+    const customId = buildRolePanelButtonCustomId("123456789");
+
+    expect(customId).toBe("court:role_panel_claim:role:123456789");
+    expect(buildRolePanelButtonCustomId("bad-role-id")).toBe("court:role_panel_claim");
+    expect(extractRolePanelRoleIdFromCustomId(customId)).toBe("123456789");
+    expect(extractRolePanelRoleIdFromCustomId("court:role_panel_claim:2")).toBeNull();
   });
 
   it("formats fate reading bands", () => {

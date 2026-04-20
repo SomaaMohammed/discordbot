@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadRuntimeConfig } from "./config.js";
 import { createDiscordClient } from "./discord/bot.js";
+import { logError, logInfo } from "./logging.js";
 import { createRuntime } from "./runtime.js";
 
 const currentFile = fileURLToPath(import.meta.url);
@@ -20,12 +21,18 @@ async function main(): Promise<void> {
   const runtime = createRuntime(config, repoRoot);
   const client = createDiscordClient(runtime);
 
+  logInfo("bootstrap", "Starting TypeScript bot runtime", {
+    version: runtime.config.botVersion,
+    timezone: runtime.config.timezoneName,
+    guildId: runtime.config.testGuildIdText,
+  });
+
   await client.login(config.discordToken);
 }
 
 try {
   await main();
 } catch (error) {
-  console.error("Failed to start TypeScript bot", error);
+  logError("bootstrap", "Failed to start TypeScript bot", { error });
   process.exitCode = 1;
 }

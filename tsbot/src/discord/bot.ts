@@ -13,6 +13,7 @@ import {
   handleChatInputCommand,
   handleModalSubmitInteraction,
 } from "./commands.js";
+import { logError, logInfo, logWarn } from "../logging.js";
 import { wireRuntimeParity } from "./runtime-parity.js";
 import type { BotRuntime } from "../runtime.js";
 
@@ -32,17 +33,19 @@ export function createDiscordClient(runtime: BotRuntime): Client {
 
   client.once("clientReady", async () => {
     const me = client.user;
-    console.log(
-      `Logged in as ${me?.tag ?? "unknown"} | version=${runtime.config.botVersion}`,
-    );
+    logInfo("discord", "Client ready", {
+      userTag: me?.tag ?? "unknown",
+      userId: me?.id ?? "unknown",
+      version: runtime.config.botVersion,
+    });
 
     const guild = await client.guilds
       .fetch(runtime.config.testGuildIdText)
       .catch(() => null);
     if (!guild) {
-      console.warn(
-        `Failed to fetch guild ${runtime.config.testGuildIdText}. Commands were not synced.`,
-      );
+      logWarn("discord", "Failed to fetch test guild; commands were not synced", {
+        guildId: runtime.config.testGuildIdText,
+      });
       return;
     }
 
@@ -52,14 +55,18 @@ export function createDiscordClient(runtime: BotRuntime): Client {
     const synced = await guild.commands
       .set(commandDefinitions)
       .catch((error) => {
-        console.error("Command sync failed", error);
+        logError("discord", "Command sync failed", {
+          guildId: runtime.config.testGuildIdText,
+          error,
+        });
         return null;
       });
 
     if (synced) {
-      console.log(
-        `Synced ${synced.size} command(s) to guild ${runtime.config.testGuildIdText}`,
-      );
+      logInfo("discord", "Command sync completed", {
+        guildId: runtime.config.testGuildIdText,
+        commandCount: synced.size,
+      });
     }
   });
 
@@ -89,7 +96,7 @@ async function handleChatCommandInteraction(
   try {
     await handleChatInputCommand(interaction, runtime);
   } catch (error) {
-    console.error("Command failed", {
+    logError("interaction", "Command failed", {
       command: interaction.commandName,
       subcommand: interaction.options.getSubcommand(false),
       error,
@@ -117,7 +124,7 @@ async function handleButtonComponentInteraction(
   try {
     await handleButtonInteraction(interaction, runtime);
   } catch (error) {
-    console.error("Button interaction failed", {
+    logError("interaction", "Button interaction failed", {
       customId: interaction.customId,
       error,
     });
@@ -144,7 +151,7 @@ async function handleModalInteraction(
   try {
     await handleModalSubmitInteraction(interaction, runtime);
   } catch (error) {
-    console.error("Modal interaction failed", {
+    logError("interaction", "Modal interaction failed", {
       customId: interaction.customId,
       error,
     });

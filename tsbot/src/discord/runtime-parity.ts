@@ -34,6 +34,7 @@ import {
   parseReplyMuteMessage,
   shouldAnnounceRoyalPresence,
 } from "../parity.js";
+import { logError } from "../logging.js";
 import { getWeekKey, isoNow } from "../time.js";
 import type { BotRuntime } from "../runtime.js";
 import type { PostRecord, RoyalTitle } from "../types.js";
@@ -142,7 +143,10 @@ async function handleReactionAdd(
 function startBackgroundLoops(client: Client, runtime: BotRuntime): void {
   const run = (name: string, task: () => Promise<void>): void => {
     void task().catch((error) => {
-      console.error(`Background task failed: ${name}`, error);
+      logError("runtime-loop", "Background task failed", {
+        task: name,
+        error,
+      });
     });
   };
 
@@ -883,7 +887,10 @@ async function sendFailureAlert(
   context: string,
   fallbackChannelId?: string,
 ): Promise<void> {
-  console.error(`${title} | ${context}`, error);
+  logError("runtime-alert", title, {
+    context,
+    error,
+  });
   if (!guild) {
     return;
   }
