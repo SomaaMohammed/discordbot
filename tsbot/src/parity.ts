@@ -410,6 +410,76 @@ export function parseReplyMuteMessage(content: string): string | null {
   return null;
 }
 
+export type PrivilegedInvictusChatIntent =
+  | "greeting"
+  | "status"
+  | "counsel"
+  | "help"
+  | "title"
+  | "coinflip"
+  | "time"
+  | "thanks"
+  | "farewell";
+
+export function parsePrivilegedInvictusChatIntent(
+  content: string,
+): PrivilegedInvictusChatIntent | null {
+  const normalized = normalizeTriggerPhrase(content);
+  if (!/\binvictus\b/.test(normalized)) {
+    return null;
+  }
+
+  if (/\b(thanks|thank you|ty)\b/.test(normalized)) {
+    return "thanks";
+  }
+
+  if (/\b(goodnight|good night|sleep well)\b/.test(normalized)) {
+    return "farewell";
+  }
+
+  if (/\b(help|commands|options|what can you do)\b/.test(normalized)) {
+    return "help";
+  }
+
+  if (
+    /\b(title me|give me a title|grant me a title|bestow a title|bestow title)\b/.test(
+      normalized,
+    )
+  ) {
+    return "title";
+  }
+
+  if (/\b(flip a coin|flip coin|coin flip|heads or tails)\b/.test(normalized)) {
+    return "coinflip";
+  }
+
+  if (/\b(what time is it|time now|current time)\b/.test(normalized)) {
+    return "time";
+  }
+
+  if (/\b(status report|status)\b/.test(normalized)) {
+    return "status";
+  }
+
+  if (
+    /\b(advice|omen|prophecy|what should i do|what do you think)\b/.test(
+      normalized,
+    )
+  ) {
+    return "counsel";
+  }
+
+  if (
+    /\b(hi|hello|hey|yo|sup|good morning|good afternoon|good evening)\b/.test(
+      normalized,
+    )
+  ) {
+    return "greeting";
+  }
+
+  return null;
+}
+
 export function isSilenceLockTrigger(content: string): boolean {
   return SILENCE_LOCK_PHRASES.has(normalizeTriggerPhrase(content));
 }

@@ -29,9 +29,13 @@ import {
 import {
   buildAnnouncementMentions,
   getPostCloseDeadline,
+  randomImperialOmen,
+  randomImperialTitle,
+  randomImperialVerdict,
   getRoyalAfkResponse,
   isEmperorLockTrigger,
   isSilenceLockTrigger,
+  parsePrivilegedInvictusChatIntent,
   parseReplyMuteMessage,
   shouldAnnounceRoyalPresence,
 } from "../parity.js";
@@ -41,7 +45,8 @@ import type { BotRuntime } from "../runtime.js";
 import type { CourtState, PostRecord, RoyalTitle } from "../types.js";
 
 const ANON_ANSWER_BUTTON_ID = "court:anonymous_answer";
-const SILENT_LOCK_SECONDS = 10;
+const SILENT_LOCK_SECONDS = 120;
+const SILENCE_LOCK_CITIZEN_ROLE_ID = "1461386876475932806";
 type RuntimeTargetChannel = TextChannel | NewsChannel | AnyThreadChannel;
 
 let backgroundLoopsStarted = false;
@@ -121,6 +126,10 @@ async function handleMessageCreate(
   if (
     await maybeSendRoyalMentionResponse(message, runtime, inRoyalAlertChannel)
   ) {
+    return;
+  }
+
+  if (await maybeSendPrivilegedInvictusChatResponse(message, member, runtime)) {
     return;
   }
 
@@ -828,28 +837,114 @@ async function maybeSendRoyalMentionResponse(
   return true;
 }
 
+async function maybeSendPrivilegedInvictusChatResponse(
+  message: Message,
+  member: GuildMember,
+  runtime: BotRuntime,
+): Promise<boolean> {
+  const intent = parsePrivilegedInvictusChatIntent(message.content);
+  if (!intent) {
+    return false;
+  }
+
+  const isEmpress =
+    runtime.config.empressRoleIdText.length > 0 &&
+    member.roles.cache.has(runtime.config.empressRoleIdText);
+  const isConfiguredUser =
+    runtime.config.undefeatedUserIdText.length > 0 &&
+    member.id === runtime.config.undefeatedUserIdText;
+  if (!isEmpress && !isConfiguredUser) {
+    return false;
+  }
+
+  if (!isSendableChannel(message.channel)) {
+    return false;
+  }
+
+  const state = runtime.storage.getState();
+  const scheduledHour = String(Math.max(0, Math.min(23, state.hour))).padStart(
+    2,
+    "0",
+  );
+  const scheduledMinute = String(
+    Math.max(0, Math.min(59, state.minute)),
+  ).padStart(2, "0");
+  const courtChannelText = runtime.config.courtChannelIdText
+    ? `<#${runtime.config.courtChannelIdText}>`
+    : "not configured";
+
+  let response = "Invictus stands ready.";
+  if (intent === "greeting") {
+    const greetings = [
+      `At your command, ${member.toString()}.`,
+      `${member.toString()}, the throne is listening.`,
+      `Invictus stands ready for your orders, ${member.toString()}.`,
+      `Your will, my mandate. Speak, ${member.toString()}.`,
+    ];
+    response =
+      greetings[runtime.randomInt(greetings.length)] ??
+      `At your command, ${member.toString()}.`;
+  } else if (intent === "help") {
+    response = [
+      `Invictus command phrases for ${member.toString()}:`,
+      "- `hi invictus`",
+      "- `invictus status report`",
+      "- `invictus what should i do`",
+      "- `invictus title me`",
+      "- `invictus flip a coin`",
+      "- `invictus what time is it`",
+    ].join("\n");
+  } else if (intent === "title") {
+    response = `${member.toString()}, by decree you are now: **${randomImperialTitle(runtime.randomInt)}**.`;
+  } else if (intent === "coinflip") {
+    response =
+      runtime.randomInt(2) === 0
+        ? "The coin lands on **heads**."
+        : "The coin lands on **tails**.";
+  } else if (intent === "time") {
+    response = `Court time is \`${runtime.now().toFormat("yyyy-LL-dd HH:mm")}\` (${runtime.config.timezoneName}).`;
+  } else if (intent === "status") {
+    response = [
+      `Status report for ${member.toString()}:`,
+      `Mode: \`${state.mode}\``,
+      `Auto-post schedule: \`${scheduledHour}:${scheduledMinute}\` (${runtime.config.timezoneName})`,
+      `Court channel: ${courtChannelText}`,
+    ].join("\n");
+  } else if (intent === "counsel") {
+    response = [
+      `Decree: ${randomImperialVerdict(runtime.randomInt)}`,
+      `Omen: ${randomImperialOmen(runtime.randomInt)}`,
+    ].join("\n");
+  } else if (intent === "thanks") {
+    response = "Always. The court stands with you.";
+  } else if (intent === "farewell") {
+    response = "Rest well. Invictus will keep watch.";
+  }
+
+  await message.channel
+    .send({ content: response, allowedMentions: { parse: [] } })
+    .catch(() => null);
+  return true;
+}
+
 async function lockChannelSilently(
   channel: TextChannel,
   actor: GuildMember,
   runtime: BotRuntime,
   seconds: number,
 ): Promise<void> {
-  const excludedRoleIds = new Set<string>(
-    Array.from(runtime.config.silentLockExcludeRoles).map(String),
-  );
+  const targetRoleIds = new Set<string>([
+    actor.guild.roles.everyone.id,
+    SILENCE_LOCK_CITIZEN_ROLE_ID,
+  ]);
+  const targetRoles = Array.from(targetRoleIds)
+    .map((roleId) => actor.guild.roles.cache.get(roleId) ?? null)
+    .filter((role): role is Role => role !== null && !role.managed);
+
   const originalSendFlags = new Map<string, boolean | null>();
   const appliedRoles: Role[] = [];
 
-  for (const role of actor.guild.roles.cache.values()) {
-    if (role.permissions.has(PermissionFlagsBits.Administrator)) {
-      continue;
-    }
-    if (excludedRoleIds.has(role.id)) {
-      continue;
-    }
-    if (role.managed) {
-      continue;
-    }
+  for (const role of targetRoles) {
 
     const overwrite = channel.permissionOverwrites.cache.get(role.id);
     let originalSend: boolean | null = null;

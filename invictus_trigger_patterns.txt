@@ -1,0 +1,116 @@
+Invictus Trigger Patterns (case-insensitive)
+
+Reply Mute Triggers
+
+These patterns only run when all conditions are true:
+- Message is sent by an administrator (or server owner).
+- Message is in a server (not DM).
+- Message is sent as a reply to another member message.
+
+Valid trigger text:
+- hey invictus mute
+- hey invictus mute <anything>
+- hey, invictus mute <anything>
+- hey, invictus: mute <anything>
+- yo invictus mute <anything>
+- oi invictus mute <anything>
+- hey invictus silence
+- hey invictus silence <anything>
+- hey invictus timeout
+- hey invictus timeout <anything>
+- invictus mute
+- invictus mute <anything>
+- invictus silence
+- invictus silence <anything>
+- invictus timeout
+- invictus timeout <anything>
+- invictus: mute|silence|timeout <anything>
+- invictus quiet <anything>
+- invictus hush <anything>
+- invictus you know what to do
+- invictus, you know what to do <anything>
+- invictus u know what to do <anything>
+- hey invictus you know what to do <anything>
+- yo invictus do your thing <anything>
+- invictus do your thing <anything>
+- invictus handle this <anything>
+
+Silent Channel Lock Triggers
+
+These patterns only run when all conditions are true:
+- Message is sent by a member with the Emperor role.
+- Message is in a text channel.
+
+Valid trigger text:
+- silence
+- silence now
+- silence the court
+- court silence
+- order in the court
+- the emperor is here
+- emperor is here
+- the emperor has arrived
+- emperor has arrived
+- make way for the emperor
+- all rise for the emperor
+
+Behavior:
+- Locks the current text channel for 2 minutes.
+- Applies `SendMessages: false` only to:
+	- @everyone
+	- citizen role `1461386876475932806`
+- Restores each role to its original `SendMessages` overwrite value.
+- No bot message is posted for this action.
+
+Royal AFK Mention Trigger
+
+This trigger only runs in the configured royal alert channel.
+
+Pattern (word match anywhere in message):
+- Emperor aliases: sammy, emperor, his majesty, your majesty
+- Empress aliases: empress, her majesty, tay, taytay, taylor, tayla
+- Mentioning royal members by Discord mention also counts.
+
+Behavior:
+- Bot replies only when the referenced royal title is currently AFK.
+- Uses safe mentions (no everyone/user/role pings).
+
+Privileged Invictus Chat Triggers
+
+These conversational triggers only run when all conditions are true:
+- Message is in a server (not DM).
+- Message contains the word `invictus`.
+- Sender is either:
+	- A member with the Empress role.
+	- The configured user ID in `UNDEFEATED_USER_ID`.
+
+Intent phrases:
+- Greeting: hi, hello, hey, yo, sup, good morning, good afternoon, good evening
+- Thanks: thanks, thank you, ty
+- Farewell: goodnight, good night, sleep well
+- Status: status, status report
+- Counsel: advice, omen, prophecy, what should i do, what do you think
+- Help: help, commands, options, what can you do
+- Title: title me, give me a title, grant me a title, bestow a title, bestow title
+- Coin flip: flip a coin, flip coin, coin flip, heads or tails
+- Time: what time is it, time now, current time
+
+Behavior:
+- Sends an in-channel thematic reply based on intent.
+- Uses safe mentions (no everyone/user/role pings).
+
+Royal Presence Announcement (automatic)
+
+This is not a text keyword trigger. It runs automatically when a message in the royal alert channel is sent by:
+- Emperor role
+- Empress role
+
+Behavior:
+- Posts: # The Emperor has spoken or # The Empress has spoken.
+- Timer is separate for each role (not shared).
+- Interval is 3 hours per role.
+
+General Notes
+- Any capitalization works for all text triggers.
+- Extra text after a reply mute trigger is used as the mute reason.
+- If no extra text is provided, a default reason is used.

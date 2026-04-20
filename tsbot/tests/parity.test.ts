@@ -21,6 +21,7 @@ import {
   markBackfillStarted,
   mergeImportedState,
   normalizeQuestionText,
+  parsePrivilegedInvictusChatIntent,
   parseReplyMuteMessage,
   parseRoyalMentions,
 } from "../src/parity.js";
@@ -238,6 +239,36 @@ describe("parity helpers", () => {
       "@user being loud",
     );
     expect(parseReplyMuteMessage("hello there")).toBeNull();
+  });
+
+  it("parses privileged invictus chat intents", () => {
+    expect(parsePrivilegedInvictusChatIntent("hi invictus")).toBe(
+      "greeting",
+    );
+    expect(parsePrivilegedInvictusChatIntent("invictus help")).toBe("help");
+    expect(parsePrivilegedInvictusChatIntent("invictus title me")).toBe(
+      "title",
+    );
+    expect(parsePrivilegedInvictusChatIntent("invictus flip a coin")).toBe(
+      "coinflip",
+    );
+    expect(parsePrivilegedInvictusChatIntent("invictus what time is it")).toBe(
+      "time",
+    );
+    expect(parsePrivilegedInvictusChatIntent("invictus status report")).toBe(
+      "status",
+    );
+    expect(parsePrivilegedInvictusChatIntent("invictus what should i do")).toBe(
+      "counsel",
+    );
+    expect(parsePrivilegedInvictusChatIntent("thanks invictus")).toBe(
+      "thanks",
+    );
+    expect(parsePrivilegedInvictusChatIntent("good night invictus")).toBe(
+      "farewell",
+    );
+    expect(parsePrivilegedInvictusChatIntent("invictus mute @user")).toBeNull();
+    expect(parsePrivilegedInvictusChatIntent("hello there")).toBeNull();
   });
 
   it("handles AFK response and reporting", () => {

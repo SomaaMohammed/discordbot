@@ -12,6 +12,10 @@ The legacy Python runtime has been retired from this repository.
 - Build output: `tsbot/dist/`
 - Persistent data: `court.db` (SQLite)
 
+Trigger phrase reference:
+
+- `invictus_trigger_patterns.txt`
+
 ## Repository Layout
 
 ```text
