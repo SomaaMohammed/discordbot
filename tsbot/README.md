@@ -13,16 +13,23 @@ This directory contains the active production/runtime implementation of Imperial
 - Runtime parity includes:
   - anonymous answer modal flow
   - role panel button interactions
-  - privileged message-chat replies for Invictus trigger phrases
+  - message-chat replies for Invictus trigger phrases
   - background loops (`auto_poster`, `thread_closer`, `weekly_digest`, `retention_cleaner`)
   - SQLite-backed state, posts, answers, metrics, and cooldown storage
 
-## Privileged Invictus Chat
+## Invictus Chat
 
 - Triggered by normal messages that include `invictus` plus known conversational phrases.
-- Access is restricted to:
-  - members with the Empress role
-  - the configured `UNDEFEATED_USER_ID`
+- Available to all guild members for:
+  - greeting (`hi invictus`)
+  - help (`invictus help`)
+  - coin flip (`invictus flip a coin`)
+  - time (`invictus what time is it`)
+  - thanks and farewell phrases
+- Restricted to Empress role or Emperor role for:
+  - status report
+  - counsel (`what should i do`)
+  - title bestowal
 - Supported intents include greeting, status report, counsel, help, title bestowal, coin flip, time, thanks, and farewell.
 - Full phrase reference is maintained in `../invictus_trigger_patterns.txt`.
 

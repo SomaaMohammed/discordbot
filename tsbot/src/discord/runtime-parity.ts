@@ -33,6 +33,7 @@ import {
   randomImperialTitle,
   randomImperialVerdict,
   getRoyalAfkResponse,
+  isPublicInvictusChatIntent,
   isEmperorLockTrigger,
   isSilenceLockTrigger,
   parsePrivilegedInvictusChatIntent,
@@ -855,6 +856,18 @@ function canUsePrivilegedInvictusChat(
   return isEmpress || isConfiguredUser;
 }
 
+function canUseInvictusIntent(
+  intent: PrivilegedInvictusChatIntent,
+  member: GuildMember,
+  runtime: BotRuntime,
+): boolean {
+  if (isPublicInvictusChatIntent(intent)) {
+    return true;
+  }
+
+  return canUsePrivilegedInvictusChat(member, runtime);
+}
+
 function buildPrivilegedInvictusChatResponse(
   intent: PrivilegedInvictusChatIntent,
   member: GuildMember,
@@ -890,12 +903,21 @@ function buildPrivilegedInvictusChatResponse(
     case "help":
       return [
         `Invictus command phrases for ${memberMention}:`,
+        "**Public:**",
         "- `hi invictus`",
-        "- `invictus status report`",
-        "- `invictus what should i do`",
-        "- `invictus title me`",
+        "- `invictus help`",
         "- `invictus flip a coin`",
         "- `invictus what time is it`",
+        "- `thanks invictus`",
+        "- `good night invictus`",
+        ...(canUsePrivilegedInvictusChat(member, runtime)
+          ? [
+              "**Privileged:**",
+              "- `invictus status report`",
+              "- `invictus what should i do`",
+              "- `invictus title me`",
+            ]
+          : []),
       ].join("\n");
     case "title":
       return `${memberMention}, by decree you are now: **${randomImperialTitle(runtime.randomInt)}**.`;
@@ -936,7 +958,7 @@ async function maybeSendPrivilegedInvictusChatResponse(
     return false;
   }
 
-  if (!canUsePrivilegedInvictusChat(member, runtime)) {
+  if (!canUseInvictusIntent(intent, member, runtime)) {
     return false;
   }
 

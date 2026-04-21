@@ -15,6 +15,7 @@ import {
   getRoyalAfkResponse,
   hasEmperorMention,
   hasEmpressMention,
+  isPublicInvictusChatIntent,
   isEmperorLockTrigger,
   isSilenceLockTrigger,
   markBackfillFinished,
@@ -269,6 +270,19 @@ describe("parity helpers", () => {
     );
     expect(parsePrivilegedInvictusChatIntent("invictus mute @user")).toBeNull();
     expect(parsePrivilegedInvictusChatIntent("hello there")).toBeNull();
+  });
+
+  it("marks public versus privileged invictus intents", () => {
+    expect(isPublicInvictusChatIntent("greeting")).toBe(true);
+    expect(isPublicInvictusChatIntent("help")).toBe(true);
+    expect(isPublicInvictusChatIntent("coinflip")).toBe(true);
+    expect(isPublicInvictusChatIntent("time")).toBe(true);
+    expect(isPublicInvictusChatIntent("thanks")).toBe(true);
+    expect(isPublicInvictusChatIntent("farewell")).toBe(true);
+
+    expect(isPublicInvictusChatIntent("status")).toBe(false);
+    expect(isPublicInvictusChatIntent("counsel")).toBe(false);
+    expect(isPublicInvictusChatIntent("title")).toBe(false);
   });
 
   it("handles AFK response and reporting", () => {

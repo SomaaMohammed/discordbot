@@ -421,6 +421,22 @@ export type PrivilegedInvictusChatIntent =
   | "thanks"
   | "farewell";
 
+export const PUBLIC_INVICTUS_CHAT_INTENTS =
+  new Set<PrivilegedInvictusChatIntent>([
+    "greeting",
+    "help",
+    "coinflip",
+    "time",
+    "thanks",
+    "farewell",
+  ]);
+
+export function isPublicInvictusChatIntent(
+  intent: PrivilegedInvictusChatIntent,
+): boolean {
+  return PUBLIC_INVICTUS_CHAT_INTENTS.has(intent);
+}
+
 export function parsePrivilegedInvictusChatIntent(
   content: string,
 ): PrivilegedInvictusChatIntent | null {

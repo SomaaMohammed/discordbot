@@ -75,25 +75,27 @@ Behavior:
 - Bot replies only when the referenced royal title is currently AFK.
 - Uses safe mentions (no everyone/user/role pings).
 
-Privileged Invictus Chat Triggers
+Invictus Chat Triggers (mixed access)
 
-These conversational triggers only run when all conditions are true:
+These conversational triggers run when all conditions are true:
 - Message is in a server (not DM).
 - Message contains the word `invictus`.
-- Sender is either:
-	- A member with the Empress role.
-	- The configured user ID in `UNDEFEATED_USER_ID`.
 
-Intent phrases:
+Available to all members:
 - Greeting: hi, hello, hey, yo, sup, good morning, good afternoon, good evening
-- Thanks: thanks, thank you, ty
-- Farewell: goodnight, good night, sleep well
-- Status: status, status report
-- Counsel: advice, omen, prophecy, what should i do, what do you think
 - Help: help, commands, options, what can you do
-- Title: title me, give me a title, grant me a title, bestow a title, bestow title
 - Coin flip: flip a coin, flip coin, coin flip, heads or tails
 - Time: what time is it, time now, current time
+- Thanks: thanks, thank you, ty
+- Farewell: goodnight, good night, sleep well
+
+Restricted intents (Empress role or Emperor role):
+- Status: status, status report
+- Counsel: advice, omen, prophecy, what should i do, what do you think
+- Title: title me, give me a title, grant me a title, bestow a title, bestow title
+
+Intent phrases:
+- See the two lists above.
 
 Behavior:
 - Sends an in-channel thematic reply based on intent.
