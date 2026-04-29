@@ -160,6 +160,9 @@ type InteractionMockInput = {
 type InteractionMockOutput = {
   interaction: ChatInputCommandInteraction;
   reply: ReturnType<typeof vi.fn<(payload: unknown) => Promise<void>>>;
+  showModal: ReturnType<typeof vi.fn<(payload: unknown) => Promise<void>>>;
+  deferReply: ReturnType<typeof vi.fn<(payload: unknown) => Promise<void>>>;
+  editReply: ReturnType<typeof vi.fn<(payload: unknown) => Promise<void>>>;
 };
 
 function createInteractionMock(
@@ -205,6 +208,9 @@ function createInteractionMock(
   } as unknown as NonNullable<ChatInputCommandInteraction["guild"]>;
 
   const reply = vi.fn(async (_payload: unknown) => undefined);
+  const showModal = vi.fn(async (_payload: unknown) => undefined);
+  const deferReply = vi.fn(async (_payload: unknown) => undefined);
+  const editReply = vi.fn(async (_payload: unknown) => undefined);
 
   const options = {
     getSubcommand: vi.fn(() => input.subcommand),
@@ -224,13 +230,18 @@ function createInteractionMock(
     user: { id: userId },
     channel: null,
     reply,
-    deferReply: vi.fn(async () => undefined),
+    deferReply,
+    editReply,
+    showModal,
     followUp: vi.fn(async () => undefined),
   } as unknown as ChatInputCommandInteraction;
 
   return {
     interaction,
     reply,
+    showModal,
+    deferReply,
+    editReply,
   };
 }
 
@@ -478,6 +489,95 @@ describe("command parity dispatch", () => {
     expect(payload.content).toBe(
       "Provide a text-based channel, or run this command from a text-based channel.",
     );
+  });
+
+  it("opens the /invictus say modal when no message_file attachment is provided", async () => {
+    const now = DateTime.fromISO("2026-04-19T19:20:00Z");
+    const storage = createStorageMock(buildState(), buildMetrics(), []);
+    const runtime = createRuntimeMock(storage, now);
+    const { interaction, showModal, deferReply } = createInteractionMock({
+      commandName: "invictus",
+      subcommand: "say",
+      isAdmin: true,
+    });
+
+    const targetChannel = {
+      id: "1234567890",
+      isThread: vi.fn(() => true),
+      toString: vi.fn(() => "<#1234567890>"),
+      send: vi.fn(async () => ({ id: "msg-1" })),
+    };
+    const getChannel = interaction.options.getChannel as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    getChannel.mockImplementation((name: string) =>
+      name === "channel" ? targetChannel : null,
+    );
+
+    await handleChatInputCommand(interaction, runtime);
+
+    expect(showModal).toHaveBeenCalledTimes(1);
+    expect(deferReply).not.toHaveBeenCalled();
+    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith("invictus.say");
+  });
+
+  it("supports /invictus say message_file and chunks long content", async () => {
+    const now = DateTime.fromISO("2026-04-19T19:25:00Z");
+    const storage = createStorageMock(buildState(), buildMetrics(), []);
+    const runtime = createRuntimeMock(storage, now);
+    const { interaction, showModal, deferReply, editReply } = createInteractionMock(
+      {
+        commandName: "invictus",
+        subcommand: "say",
+        isAdmin: true,
+      },
+    );
+
+    const send = vi.fn(async () => ({ id: "msg-1" }));
+    const targetChannel = {
+      id: "1234567891",
+      isThread: vi.fn(() => true),
+      toString: vi.fn(() => "<#1234567891>"),
+      send,
+    };
+    const getChannel = interaction.options.getChannel as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    getChannel.mockImplementation((name: string) =>
+      name === "channel" ? targetChannel : null,
+    );
+
+    const longMessage = "A".repeat(4500);
+    const getAttachment = interaction.options
+      .getAttachment as unknown as ReturnType<typeof vi.fn>;
+    getAttachment.mockImplementation((name: string) =>
+      name === "message_file"
+        ? {
+            name: "announcement.txt",
+            size: longMessage.length,
+            url: "https://example.com/announcement.txt",
+          }
+        : null,
+    );
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      text: async () => longMessage,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await handleChatInputCommand(interaction, runtime);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    expect(showModal).not.toHaveBeenCalled();
+    expect(deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(storage.recordCommandMetric).toHaveBeenCalledWith("invictus.say");
+
+    const payload = editReply.mock.calls.at(-1)?.[0] as { content: string };
+    expect(payload.content).toContain("in 2 parts");
   });
 
   it("blocks /invictus timeout when target is self", async () => {

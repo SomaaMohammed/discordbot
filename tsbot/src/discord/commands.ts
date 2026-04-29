@@ -143,6 +143,11 @@ const ANON_MODAL_PREFIX = "court:anonymous_answer_modal:";
 const ANON_MODAL_INPUT_ID = "answer";
 const ADMIN_SAY_MODAL_PREFIX = "invictus:admin_say_modal:";
 const ADMIN_SAY_MODAL_INPUT_ID = "message";
+const ADMIN_SAY_MODAL_MAX_LENGTH = 4000;
+const ADMIN_SAY_EMBED_CHUNK_MAX_LENGTH = 4000;
+const ADMIN_SAY_MAX_CHUNKS = 8;
+const ADMIN_SAY_ATTACHMENT_MAX_BYTES = 512 * 1024;
+const ADMIN_SAY_LOG_MESSAGE_MAX_LENGTH = 1000;
 const INVICTUS_DM_PANEL_BUTTON_ID = "invictus:dm_panel";
 const INVICTUS_DM_PANEL_MODAL_PREFIX = "invictus:dm_panel_modal:";
 const INVICTUS_DM_PANEL_MODAL_INPUT_ID = "dm_message";
@@ -459,7 +464,7 @@ const INVICTUS_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
   muteall: handleInvictusMuteAll,
   unmuteall: handleInvictusUnmuteAll,
   rolepanelmulti: handleInvictusRolePanelMulti,
-  say: async (interaction) => handleInvictusSay(interaction),
+  say: handleInvictusSay,
   resetroyaltimer: handleInvictusResetRoyalTimer,
   afk: handleInvictusAfk,
   afkstatus: handleInvictusAfkStatus,
@@ -630,6 +635,14 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
               .setName("channel")
               .setDescription("Target channel")
               .setRequired(true),
+          )
+          .addAttachmentOption((option) =>
+            option
+              .setName("message_file")
+              .setDescription(
+                "Optional text file for announcements longer than 4000 characters",
+              )
+              .setRequired(false),
           )
           .addBooleanOption((option) =>
             option
@@ -2192,6 +2205,7 @@ async function handleFate(
 
 async function handleInvictusSay(
   interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
 ): Promise<void> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
@@ -2209,9 +2223,152 @@ async function handleInvictusSay(
 
   const mentionEveryone =
     interaction.options.getBoolean("mention_everyone") ?? false;
-  await interaction.showModal(
-    buildAdminSayModal(targetChannelOption.id, mentionEveryone),
+  const messageFile = interaction.options.getAttachment("message_file");
+  if (!messageFile) {
+    await interaction.showModal(
+      buildAdminSayModal(targetChannelOption.id, mentionEveryone),
+    );
+    return;
+  }
+
+  if (messageFile.size > ADMIN_SAY_ATTACHMENT_MAX_BYTES) {
+    const maxKb = Math.floor(ADMIN_SAY_ATTACHMENT_MAX_BYTES / 1024);
+    await interaction.reply({
+      content: `Message file is too large. Keep it under ${maxKb} KB.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  const fileContent = await fetchAdminSayAttachmentText(messageFile.url);
+  if (fileContent === null) {
+    await interaction.editReply({
+      content: "Failed to read the message file. Please upload a plain text file.",
+    });
+    return;
+  }
+
+  const deliveryResult = await deliverAdminSayAnnouncement(
+    targetChannelOption,
+    runtime,
+    fileContent,
+    mentionEveryone,
   );
+  if (!deliveryResult.ok) {
+    await interaction.editReply({ content: deliveryResult.error });
+    return;
+  }
+
+  runtime.storage.recordCommandMetric("invictus.say");
+  await interaction.editReply({
+    content:
+      deliveryResult.chunkCount > 1
+        ? `Announcement sent to ${targetChannelOption.toString()} in ${deliveryResult.chunkCount} parts.`
+        : `Announcement sent to ${targetChannelOption.toString()}.`,
+  });
+
+  await sendLog(
+    interaction,
+    runtime,
+    "Admin Announcement Sent",
+    `**By:** ${interaction.user.toString()}\n**Channel:** ${targetChannelOption.toString()}\n**Source:** Attachment \`${messageFile.name}\` (\`${messageFile.size}\` bytes)\n**Parts:** \`${deliveryResult.chunkCount}\`\n**Message:** ${truncateLogText(deliveryResult.messageContent, ADMIN_SAY_LOG_MESSAGE_MAX_LENGTH)}`,
+  );
+}
+
+async function fetchAdminSayAttachmentText(fileUrl: string): Promise<string | null> {
+  try {
+    const response = await fetch(fileUrl);
+    if (!response.ok) {
+      return null;
+    }
+
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
+type AdminSayDeliveryResult =
+  | { ok: true; chunkCount: number; messageContent: string }
+  | { ok: false; error: string };
+
+async function deliverAdminSayAnnouncement(
+  channel: DmPanelTargetChannel,
+  runtime: BotRuntime,
+  rawMessageContent: string,
+  mentionEveryone: boolean,
+): Promise<AdminSayDeliveryResult> {
+  const messageContent = rawMessageContent.trim();
+  if (!messageContent) {
+    return { ok: false, error: "Message cannot be empty." };
+  }
+
+  const chunks = splitAdminSayChunks(messageContent);
+  if (chunks.length > ADMIN_SAY_MAX_CHUNKS) {
+    const maxChars = ADMIN_SAY_EMBED_CHUNK_MAX_LENGTH * ADMIN_SAY_MAX_CHUNKS;
+    return {
+      ok: false,
+      error: `Message is too long. Keep it under ${maxChars} characters.`,
+    };
+  }
+
+  const mentionPayload = buildAnnouncementMentions(mentionEveryone);
+  for (let index = 0; index < chunks.length; index += 1) {
+    const embed = new EmbedBuilder()
+      .setDescription(chunks[index] ?? "")
+      .setColor(ROLE_COLOR)
+      .setTimestamp(runtime.now().toJSDate());
+    if (chunks.length > 1) {
+      embed.setFooter({
+        text: `Part ${index + 1} of ${chunks.length}`,
+      });
+    }
+
+    const sent = await channel
+      .send({
+        ...(index === 0 && mentionPayload.content !== null
+          ? { content: mentionPayload.content }
+          : {}),
+        embeds: [embed],
+        ...(index === 0
+          ? { allowedMentions: mentionPayload.allowedMentions }
+          : {}),
+      })
+      .catch(() => null);
+    if (!sent) {
+      return { ok: false, error: "Failed to send the message." };
+    }
+  }
+
+  return {
+    ok: true,
+    chunkCount: chunks.length,
+    messageContent,
+  };
+}
+
+function splitAdminSayChunks(messageContent: string): string[] {
+  const chunks: string[] = [];
+  for (
+    let start = 0;
+    start < messageContent.length;
+    start += ADMIN_SAY_EMBED_CHUNK_MAX_LENGTH
+  ) {
+    chunks.push(
+      messageContent.slice(start, start + ADMIN_SAY_EMBED_CHUNK_MAX_LENGTH),
+    );
+  }
+
+  return chunks;
+}
+
+function truncateLogText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength)}... (truncated ${value.length - maxLength} chars)`;
 }
 
 async function handleInvictusDmPanel(
@@ -2360,35 +2517,18 @@ async function handleAdminSayModalSubmit(
     return;
   }
 
-  const messageContent = interaction.fields
-    .getTextInputValue(ADMIN_SAY_MODAL_INPUT_ID)
-    .trim();
-  if (!messageContent) {
+  const messageContent = interaction.fields.getTextInputValue(
+    ADMIN_SAY_MODAL_INPUT_ID,
+  );
+  const deliveryResult = await deliverAdminSayAnnouncement(
+    channel,
+    runtime,
+    messageContent,
+    mentionEveryone,
+  );
+  if (!deliveryResult.ok) {
     await interaction.reply({
-      content: "Message cannot be empty.",
-      ephemeral: true,
-    });
-    return;
-  }
-
-  const mentionPayload = buildAnnouncementMentions(mentionEveryone);
-  const embed = new EmbedBuilder()
-    .setDescription(messageContent)
-    .setColor(ROLE_COLOR)
-    .setTimestamp(runtime.now().toJSDate());
-
-  const sent = await channel
-    .send({
-      ...(mentionPayload.content === null
-        ? {}
-        : { content: mentionPayload.content }),
-      embeds: [embed],
-      allowedMentions: mentionPayload.allowedMentions,
-    })
-    .catch(() => null);
-  if (!sent) {
-    await interaction.reply({
-      content: "Failed to send the message.",
+      content: deliveryResult.error,
       ephemeral: true,
     });
     return;
@@ -2396,7 +2536,10 @@ async function handleAdminSayModalSubmit(
 
   runtime.storage.recordCommandMetric("invictus.say");
   await interaction.reply({
-    content: `Announcement sent to ${channel.toString()}.`,
+    content:
+      deliveryResult.chunkCount > 1
+        ? `Announcement sent to ${channel.toString()} in ${deliveryResult.chunkCount} parts.`
+        : `Announcement sent to ${channel.toString()}.`,
     ephemeral: true,
   });
 
@@ -2404,7 +2547,7 @@ async function handleAdminSayModalSubmit(
     interaction,
     runtime,
     "Admin Announcement Sent",
-    `**By:** ${interaction.user.toString()}\n**Channel:** ${channel.toString()}\n**Message:** ${messageContent}`,
+    `**By:** ${interaction.user.toString()}\n**Channel:** ${channel.toString()}\n**Source:** Modal\n**Parts:** \`${deliveryResult.chunkCount}\`\n**Message:** ${truncateLogText(deliveryResult.messageContent, ADMIN_SAY_LOG_MESSAGE_MAX_LENGTH)}`,
   );
 }
 
@@ -5309,7 +5452,7 @@ function buildAdminSayModal(
     .setStyle(TextInputStyle.Paragraph)
     .setPlaceholder("Paste your announcement here...")
     .setRequired(true)
-    .setMaxLength(4000);
+    .setMaxLength(ADMIN_SAY_MODAL_MAX_LENGTH);
 
   return new ModalBuilder()
     .setCustomId(

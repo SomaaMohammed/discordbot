@@ -69,4 +69,16 @@ describe("channel option compatibility", () => {
       expect(option.channel_types).toBeUndefined();
     }
   });
+
+  it("exposes optional message_file attachment on /invictus say", () => {
+    const commands = buildCommandDefinitions().map((command) =>
+      command.toJSON(),
+    ) as JsonCommand[];
+
+    const invictus = findCommand(commands, "invictus");
+    const say = findSubcommand(invictus, "say");
+    const messageFile = findOption(say, "message_file");
+
+    expect(messageFile.type).toBe(11);
+  });
 });
