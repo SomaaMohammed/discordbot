@@ -33,6 +33,13 @@ This directory contains the active production/runtime implementation of Imperial
 - Supported intents include greeting, status report, counsel, help, title bestowal, coin flip, time, thanks, and farewell.
 - Full phrase reference is maintained in `../invictus_trigger_patterns.txt`.
 
+## Invictus Admin Announcements
+
+- `/invictus say` supports two input modes:
+  - modal text input for normal-length announcements
+  - optional `message_file` attachment for longer text
+- When `message_file` is used, long text is automatically split across multiple embed messages.
+
 ## Local Commands
 
 ```bash

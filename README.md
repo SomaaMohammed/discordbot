@@ -16,6 +16,13 @@ Trigger phrase reference:
 
 - `invictus_trigger_patterns.txt`
 
+## Invictus Announcements
+
+- Use `/invictus say` for admin announcements.
+- For short messages, use the modal input directly.
+- For longer announcements, attach a plain text file with the optional `message_file` option.
+- Long announcement files are split into multiple embed parts automatically (up to 32,000 total characters).
+
 ## Repository Layout
 
 ```text
