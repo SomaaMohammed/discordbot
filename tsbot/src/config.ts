@@ -18,6 +18,10 @@ function envInt(name: string, defaultValue = 0): number {
     return defaultValue;
   }
 
+  if (!/^-?\d+$/.test(normalized)) {
+    throw new TypeError(`${name} must be an integer in .env`);
+  }
+
   const parsed = Number.parseInt(normalized, 10);
   if (Number.isNaN(parsed)) {
     throw new TypeError(`${name} must be an integer in .env`);
@@ -95,7 +99,7 @@ function resolveDefaultTimezone(): string {
 }
 
 export function loadRuntimeConfig(repoRoot: string): RuntimeConfig {
-  loadDotEnv({ path: path.join(repoRoot, ".env") });
+  loadDotEnv({ path: path.join(repoRoot, ".env"), quiet: true });
 
   const discordToken = String(process.env.DISCORD_TOKEN ?? "").trim();
   const testGuildIdText = envSnowflake("TEST_GUILD_ID");

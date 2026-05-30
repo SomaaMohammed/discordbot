@@ -27,19 +27,16 @@ Trigger phrase reference:
 
 ```text
 .
-├── tsbot/
-│   ├── src/
-│   ├── tests/
-│   ├── package.json
-│   └── tsconfig.json
-├── questions.json
-├── answers.json
-├── state.json
-├── court.db
-├── deploy_server.sh
-├── post_pull_server.sh
-├── backup_db.sh
-└── restore_db.sh
+|-- tsbot/
+|   |-- src/
+|   |-- tests/
+|   |-- package.json
+|   `-- tsconfig.json
+|-- questions.json
+|-- answers.json
+|-- state.json
+|-- court.db
+`-- ops.sh
 ```
 
 ## Local Development
@@ -47,6 +44,7 @@ Trigger phrase reference:
 ```bash
 cd tsbot
 npm ci
+npm run check
 npm run typecheck
 npm test
 npm run build
@@ -59,7 +57,7 @@ Preferred server deployment command:
 
 ```bash
 cd ~/imperial-court-bot
-RUN_TESTS=1 RUN_TYPECHECK=1 ./deploy_server.sh main
+RUN_TESTS=1 RUN_TYPECHECK=1 bash ./ops.sh deploy main
 ```
 
 Useful options:
@@ -68,7 +66,7 @@ Useful options:
 - `SKIP_PULL=1` runs rollout on current checkout without fetching.
 - `SKIP_SERVICE_RESTART=1` runs build/tests only (no `systemctl` restart).
 
-`deploy_vm.sh` is retained as a compatibility wrapper and forwards to `deploy_server.sh`.
+`ops.sh` also supports `rollout`, `backup`, and `restore` subcommands.
 
 ## Environment
 
@@ -78,7 +76,7 @@ Required keys in `.env`:
 - `TEST_GUILD_ID`
 - `COURT_CHANNEL_ID`
 
-Optional operational keys (defaults are applied by `post_pull_server.sh` when absent):
+Optional operational keys (defaults are applied by `bash ./ops.sh rollout` when absent):
 
 - `LOG_CHANNEL_ID`
 - `TIMEZONE`
@@ -103,7 +101,7 @@ Optional operational keys (defaults are applied by `post_pull_server.sh` when ab
 
 ## Database Operations
 
-- Create validated backup: `./backup_db.sh`
-- Restore validated backup: `./restore_db.sh /path/to/backup.db`
+- Create validated backup: `bash ./ops.sh backup`
+- Restore validated backup: `bash ./ops.sh restore /path/to/backup.db`
 
-Both scripts validate SQLite integrity and required tables before completing.
+Both database commands validate SQLite integrity and required tables before completing.

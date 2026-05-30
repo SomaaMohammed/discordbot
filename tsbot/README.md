@@ -45,6 +45,7 @@ This directory contains the active production/runtime implementation of Imperial
 ```bash
 cd tsbot
 npm ci
+npm run check
 npm run typecheck
 npm test
 npm run build

@@ -1,28 +1,41 @@
-.venv/
-.vscode/
+# Local editor and agent state
 .env
+.github/prompts/
+.obsidian/
+.vscode/
+forlater.txt
+OPERATIONS.md
+
+# Python artifacts
+.venv/
 __pycache__/
 *.pyc
 .mypy_cache/
+.pytest_cache/
 .ruff_cache/
 .coverage
 coverage.xml
 htmlcov/
+*.egg-info/
+
+# Node artifacts
+node_modules/
 build/
 dist/
-*.egg-info/
-.github/prompts/
-forlater.txt
-OPERATIONS.md
-invictus_trigger_patterns.txt
-ci_logs_extract/
+coverage/
+
+# Runtime data and backups
 court.db
 *.db-wal
 *.db-shm
 backups/
 *.log
-.pytest_cache/
-lore.txt
-lore_snippets.txt
-invictus_member_capabilities.txt
+ci_logs_extract/
+
+# Local lore and reference exports
+continuity_ledger_snippets.md
 invictus_continuity_ledger_snippets_I-VII.txt
+invictus_member_capabilities.txt
+invictus_trigger_patterns.txt
+lore*.md
+lore*.txt
