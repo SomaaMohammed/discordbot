@@ -1,6 +1,6 @@
 import type { RoyalTitle } from "./types.js";
 
-export const PACKAGE_VERSION = "1.0.0";
+export const PACKAGE_VERSION = "1.0.1";
 
 export const DEFAULT_STAFF_ROLE_IDS = new Set<string>([
   "1461376227095875707",
@@ -16,9 +16,9 @@ export const DEFAULT_SILENT_LOCK_EXCLUDE_ROLES = new Set<string>([
   "1461382351874424842",
 ]);
 
-export const STATE_FILE = "state.json";
-export const QUESTIONS_FILE = "questions.json";
-export const ANSWERS_FILE = "answers.json";
+export const STATE_FILE = "data/bootstrap/state.json";
+export const QUESTIONS_FILE = "data/bootstrap/questions.json";
+export const ANSWERS_FILE = "data/bootstrap/answers.json";
 
 export const STORAGE_JSON_KEYS: Record<string, string> = {
   [STATE_FILE]: "state",

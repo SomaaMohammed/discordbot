@@ -27,9 +27,9 @@ jobs:
 
       - name: Validate JSON files
         run: |
-          node -e "JSON.parse(require('node:fs').readFileSync('questions.json','utf8'))"
-          node -e "JSON.parse(require('node:fs').readFileSync('answers.json','utf8'))"
-          node -e "JSON.parse(require('node:fs').readFileSync('state.json','utf8'))"
+          node -e "JSON.parse(require('node:fs').readFileSync('data/bootstrap/questions.json','utf8'))"
+          node -e "JSON.parse(require('node:fs').readFileSync('data/bootstrap/answers.json','utf8'))"
+          node -e "JSON.parse(require('node:fs').readFileSync('data/bootstrap/state.json','utf8'))"
 
       - name: Typecheck
         run: |

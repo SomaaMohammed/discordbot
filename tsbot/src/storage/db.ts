@@ -711,7 +711,7 @@ export class CourtStorage {
     }
 
     if (pool.length === 0) {
-      throw new Error("No questions found in questions.json");
+      throw new Error("No questions found in data/bootstrap/questions.json");
     }
 
     let unused = pool.filter((entry) => !used.has(entry[1]));
@@ -727,7 +727,7 @@ export class CourtStorage {
     const selectedIndex = randomize ? randomInt(finalPool.length) : 0;
     const selected = finalPool[selectedIndex] ?? finalPool[0];
     if (!selected) {
-      throw new Error("No questions found in questions.json");
+      throw new Error("No questions found in data/bootstrap/questions.json");
     }
 
     return selected;
