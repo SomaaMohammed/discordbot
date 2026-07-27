@@ -1,20 +1,17 @@
 import { DateTime } from "luxon";
 import { describe, expect, it } from "vitest";
-import { shouldRunAutoPosterNow } from "../src/discord/runtime-parity.js";
-import type { CourtState } from "../src/types.js";
-
-type AutoPosterState = Pick<
-  CourtState,
-  "mode" | "hour" | "minute" | "dry_run_auto_post" | "last_dry_run_date"
->;
+import {
+  shouldRunAutoPosterNow,
+  type AutoPosterState,
+} from "../src/discord/runtime-parity.js";
 
 function buildState(overrides: Partial<AutoPosterState> = {}): AutoPosterState {
   return {
     mode: "auto",
     hour: 20,
     minute: 0,
-    dry_run_auto_post: false,
-    last_dry_run_date: null,
+    dryRun: false,
+    lastDryRunDate: null,
     ...overrides,
   };
 }
@@ -41,7 +38,7 @@ describe("auto-poster schedule gate", () => {
       setZone: true,
     });
     const shouldRun = shouldRunAutoPosterNow(
-      buildState({ dry_run_auto_post: true, last_dry_run_date: "2026-04-20" }),
+      buildState({ dryRun: true, lastDryRunDate: "2026-04-20" }),
       now,
       null,
     );
@@ -70,5 +67,23 @@ describe("auto-poster schedule gate", () => {
       "2026-04-19T22:30:00.000Z",
     );
     expect(shouldRun).toBe(false);
+  });
+
+  it("evaluates equal instants against independent guild timezones and modes", () => {
+    const instant = DateTime.fromISO("2026-04-20T19:30:00.000Z", {
+      setZone: true,
+    });
+    const ammanNow = instant.setZone("Asia/Amman");
+    const newYorkNow = instant.setZone("America/New_York");
+
+    expect(
+      shouldRunAutoPosterNow(buildState({ hour: 20 }), ammanNow, null),
+    ).toBe(true);
+    expect(
+      shouldRunAutoPosterNow(buildState({ hour: 20 }), newYorkNow, null),
+    ).toBe(false);
+    expect(
+      shouldRunAutoPosterNow(buildState({ mode: "manual" }), ammanNow, null),
+    ).toBe(false);
   });
 });

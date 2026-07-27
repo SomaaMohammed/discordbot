@@ -1,20 +1,6 @@
 import type { RoyalTitle } from "./types.js";
 
-export const PACKAGE_VERSION = "1.0.1";
-
-export const DEFAULT_STAFF_ROLE_IDS = new Set<string>([
-  "1461376227095875707",
-  "1461386876475932806",
-  "1461485629178122465",
-  "1461513633367330982",
-  "1461513909130498230",
-]);
-
-export const DEFAULT_SILENT_LOCK_EXCLUDE_ROLES = new Set<string>([
-  "1462082750101328029",
-  "1461500213746204921",
-  "1461382351874424842",
-]);
+export const PACKAGE_VERSION = "2.0.0";
 
 export const STATE_FILE = "data/bootstrap/state.json";
 export const QUESTIONS_FILE = "data/bootstrap/questions.json";
@@ -46,25 +32,6 @@ export const MSG_EVERYONE_MENTION = "@everyone";
 export const REPLY_MUTE_ACTION_PATTERN = "(?:mute|silence|timeout|quiet|hush)";
 export const REPLY_MUTE_INTENT_PATTERN = String.raw`(?:you\s+know\s+what\s+to\s+do|u\s+know\s+what\s+to\s+do|do\s+your\s+thing|handle\s+this)`;
 
-export const REPLY_MUTE_PATTERNS: RegExp[] = [
-  new RegExp(
-    String.raw`^\s*(?:hey|yo|oi)[\s,]+invictus[\s,:-]+${REPLY_MUTE_ACTION_PATTERN}\b(.*)$`,
-    "i",
-  ),
-  new RegExp(
-    String.raw`^\s*invictus[\s,:-]+${REPLY_MUTE_ACTION_PATTERN}\b(.*)$`,
-    "i",
-  ),
-  new RegExp(
-    String.raw`^\s*(?:hey|yo|oi)[\s,]+invictus[\s,:-]+${REPLY_MUTE_INTENT_PATTERN}\b(?:[\s,:-]*(.*))$`,
-    "i",
-  ),
-  new RegExp(
-    String.raw`^\s*invictus[\s,:-]+${REPLY_MUTE_INTENT_PATTERN}\b(?:[\s,:-]*(.*))$`,
-    "i",
-  ),
-];
-
 export const SILENCE_LOCK_PHRASES = new Set<string>([
   "silence",
   "silence now",
@@ -82,10 +49,6 @@ export const EMPEROR_LOCK_PHRASES = new Set<string>([
   "all rise for the emperor",
 ]);
 
-export const EMPEROR_MENTION_PATTERN =
-  /\b(sammy|emperor|his majesty|your majesty)\b/i;
-export const EMPRESS_MENTION_PATTERN =
-  /\b(empress|her majesty|tay|taytay|taylor|tayla)\b/i;
 export const URL_PATTERN = /https?:\/\/|discord\.gg\//i;
 
 export const USER_METRIC_PREFIX = "user_stats.";
@@ -135,6 +98,3 @@ export const IMPERIAL_OMENS = [
   "Tonight favors bold words and careful exits.",
   "A sealed letter is worth more than ten promises.",
 ] as const;
-
-export const RIO_USER_ID = "1206572825100685365";
-export const TAYLOR_USER_ID = "661069422869610537";

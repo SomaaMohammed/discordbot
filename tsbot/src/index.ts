@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadRuntimeConfig } from "./config.js";
+import { loadProcessConfig } from "./config.js";
 import { createDiscordClient } from "./discord/bot.js";
 import { logError, logInfo } from "./logging.js";
 import { createRuntime } from "./runtime.js";
@@ -17,14 +17,13 @@ if (path.basename(tsbotRoot) === "dist") {
 const repoRoot = path.resolve(tsbotRoot, "..");
 
 async function main(): Promise<void> {
-  const config = loadRuntimeConfig(repoRoot);
+  const config = loadProcessConfig(repoRoot);
   const runtime = createRuntime(config, repoRoot);
   const client = createDiscordClient(runtime);
 
   logInfo("bootstrap", "Starting TypeScript bot runtime", {
-    version: runtime.config.botVersion,
-    timezone: runtime.config.timezoneName,
-    guildId: runtime.config.testGuildIdText,
+    version: runtime.processConfig.botVersion,
+    commandRegistrationMode: runtime.processConfig.commandRegistrationMode,
   });
 
   await client.login(config.discordToken);

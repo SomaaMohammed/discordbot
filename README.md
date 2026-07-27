@@ -1,12 +1,23 @@
 # Imperial Court Bot
 
-Imperial Court Bot is a Discord bot powered by the active TypeScript runtime in `tsbot/`. It stores live state in the ignored root `court.db` SQLite database and can seed a fresh database from source-controlled JSON in `data/bootstrap/`.
+Imperial Court Bot is a multi-server Discord bot. One Discord application and one Node.js process can serve any number of guilds from one SQLite database while keeping each guild's configuration, state, schedules, and data isolated.
 
-## Project Areas
+The active runtime is TypeScript under `tsbot/`. The Imperial Court and Invictus identity is the default theme, but every guild configures its own channels, roles, labels, invocation trigger, limits, greetings, schedules, and enabled features through Discord slash commands.
 
-- [Documentation index](docs/README.md)
+## Safety Model
+
+- Every tenant-owned SQLite row is keyed by `guild_id`.
+- New and rejoined guilds remain disabled until an administrator validates and explicitly enables them.
+- Disabled guilds do not trigger chat, moderation, metrics, posting, or background jobs.
+- Leaving a guild marks it inactive; it does not delete its configuration or data.
+- Guild data is deleted only through the server-owner-only `/setup purge` confirmation flow.
+- An existing v1 database is upgraded only by the explicit, guarded migration command. Normal startup does not migrate an outdated database.
+
+## Documentation
+
+- [Configuration and Discord installation](docs/configuration.md)
 - [Development guide](docs/development.md)
-- [Operations runbook](docs/operations.md)
+- [Operations, migration, backup, and rollback](docs/operations.md)
 - [Member capabilities](docs/reference/member-capabilities.md)
 - [Trigger patterns](docs/reference/trigger-patterns.md)
 - [Invictus Empire lore](lore/README.md)
@@ -15,47 +26,36 @@ Imperial Court Bot is a Discord bot powered by the active TypeScript runtime in 
 
 ```text
 .
-|-- .github/
-|   `-- workflows/
-|-- data/
-|   `-- bootstrap/
-|       |-- answers.json
-|       |-- questions.json
-|       `-- state.json
-|-- docs/
-|   |-- README.md
-|   |-- development.md
-|   |-- operations.md
-|   `-- reference/
-|       |-- member-capabilities.md
-|       `-- trigger-patterns.md
-|-- lore/
-|   |-- README.md
-|   |-- continuity-ledger.md
-|   `-- snippets.md
+|-- .env.example              # sanitized process-only configuration
+|-- data/bootstrap/           # neutral templates copied per guild
+|-- docs/                     # configuration, development, and operations
+|-- lore/                     # setting and continuity references
 |-- tsbot/
-|   |-- src/
-|   |-- tests/
+|   |-- src/                  # active runtime and migration CLI
+|   |-- tests/                # unit, isolation, and migration tests
 |   |-- package.json
-|   |-- package-lock.json
-|   |-- tsconfig.json
-|   `-- vitest.config.ts
+|   `-- package-lock.json
 |-- AGENTS.md
 |-- README.md
 `-- ops.sh
 ```
 
-Ignored local state such as `.env`, `court.db*`, `backups/`, editor settings, dependencies, and build output is intentionally absent from the tracked layout.
+Local `.env`, `court.db*`, `backups/`, dependencies, build output, logs, and editor state are ignored and must never be committed.
 
-## Quick Start
+## Local Validation
+
+Node.js 22 or newer is recommended.
 
 ```bash
+cp .env.example .env
 cd tsbot
 npm ci
 npm run typecheck
 npm test
 npm run build
-npm run dev
+node --check dist/src/index.js
 ```
 
-For production deployment and database maintenance, follow the [operations runbook](docs/operations.md).
+Set a real token only when intentionally connecting to Discord. Do not use `npm run dev` or `npm run start` as a validation smoke test: both can log in and access the configured database.
+
+For a fresh installation, configure the process from `.env.example`, invite the bot with the required intents and permissions, start it, and complete `/setup` in each guild. For an existing v1 deployment, follow the backup and migration procedure in the [operations runbook](docs/operations.md) before starting version 2.

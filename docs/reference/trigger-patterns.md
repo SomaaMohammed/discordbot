@@ -1,51 +1,37 @@
 # Invictus Trigger Patterns
 
-All patterns in this reference are case-insensitive.
+Message triggers run only in an enabled guild with the relevant feature flag. They never run in DMs, disabled guilds, or an unrelated guild. Matching is case-insensitive.
 
-## Reply Mute Triggers
+`invictus` is the default conversational invocation keyword. Each guild can replace it and configure aliases with `/setup trigger`; examples below use `<keyword>` to mean the guild's keyword or one of its aliases.
 
-These patterns run only when all conditions are true:
+## Reply Moderation Triggers
 
-- The message is sent by an administrator or server owner.
-- The message is in a server, not a DM.
-- The message is sent as a reply to another member's message.
+Reply moderation runs only when all of these conditions are true:
 
-Valid trigger text:
+- the guild and reply-moderation feature are enabled;
+- the message author is the guild owner or has Administrator permission;
+- the message replies to another member in the same guild and channel;
+- the bot can moderate the target under Discord's ownership and role-hierarchy rules.
 
-- `hey invictus mute`
-- `hey invictus mute <anything>`
-- `hey, invictus mute <anything>`
-- `hey, invictus: mute <anything>`
-- `yo invictus mute <anything>`
-- `oi invictus mute <anything>`
-- `hey invictus silence`
-- `hey invictus silence <anything>`
-- `hey invictus timeout`
-- `hey invictus timeout <anything>`
-- `invictus mute`
-- `invictus mute <anything>`
-- `invictus silence`
-- `invictus silence <anything>`
-- `invictus timeout`
-- `invictus timeout <anything>`
-- `invictus: mute|silence|timeout <anything>`
-- `invictus quiet <anything>`
-- `invictus hush <anything>`
-- `invictus you know what to do`
-- `invictus, you know what to do <anything>`
-- `invictus u know what to do <anything>`
-- `hey invictus you know what to do <anything>`
-- `yo invictus do your thing <anything>`
-- `invictus do your thing <anything>`
-- `invictus handle this <anything>`
+Recognized forms include:
 
-Extra text after a reply-mute trigger is used as the mute reason. If none is provided, the bot uses a default reason.
+```text
+hey <keyword> mute [reason]
+yo <keyword> silence [reason]
+oi <keyword> timeout [reason]
+<keyword>: quiet [reason]
+<keyword> hush [reason]
+<keyword> you know what to do [reason]
+<keyword> u know what to do [reason]
+<keyword> do your thing [reason]
+<keyword> handle this [reason]
+```
 
-## Silent Channel Lock Triggers
+Punctuation around the invocation is optional. Extra text becomes the moderation reason; the bot uses a neutral default when it is absent.
 
-These patterns run only when the message is sent by a member with the Emperor role in a text channel.
+## Temporary Silence Lock Triggers
 
-Valid trigger text:
+Silence-lock phrases run only when the silence-lock feature is enabled and the author has the current guild's configured Emperor binding. Recognized phrases are:
 
 - `silence`
 - `silence now`
@@ -59,66 +45,37 @@ Valid trigger text:
 - `make way for the emperor`
 - `all rise for the emperor`
 
-Behavior:
+The temporary lock applies `SendMessages: false` only to roles in the guild's `silenceTargets` setting, minus roles in `silenceExcludes`. The bot records and restores each affected overwrite value. No citizen role, exclusion role, or other production snowflake is built into the active runtime. Manage Roles and role/channel access are required because Discord treats permission-overwrite edits as role management.
 
-- Locks the current text channel for two minutes.
-- Applies `SendMessages: false` only to:
-  - `@everyone`
-  - citizen role `1461386876475932806`
-- Restores each role to its original `SendMessages` overwrite value.
-- Posts no bot message for this action.
+## Royal AFK Mentions
 
-## Royal AFK Mention Trigger
+Royal AFK mention responses run only when royal AFK is enabled and the message is in the current guild's configured royal-alert channel. The bot resolves configured Emperor/Empress role mentions and title labels in that guild. It replies only when the referenced title is currently AFK and uses safe allowed-mention settings.
 
-This trigger runs only in the configured royal-alert channel.
+## Invictus Chat
 
-Word matches anywhere in the message:
+Invictus chat requires the `invictusChat` feature and the configured invocation keyword or alias.
 
-- Emperor aliases: sammy, emperor, his majesty, your majesty
-- Empress aliases: empress, her majesty, tay, taytay, taylor, tayla
-- Mentioning royal members by Discord mention also counts.
+Public intent phrases include:
 
-Behavior:
+- greeting: hi, hello, hey, yo, sup, good morning, good afternoon, good evening;
+- help: help, commands, options, what can you do;
+- coin flip: flip a coin, flip coin, coin flip, heads or tails;
+- time: what time is it, time now, current time;
+- thanks: thanks, thank you, ty;
+- farewell: goodnight, good night, sleep well.
 
-- The bot replies only when the referenced royal title is currently AFK.
-- Replies use safe mentions with no everyone, user, or role pings.
+A configured privileged-chat role or the configured champion user is required for:
 
-## Invictus Chat Triggers (Mixed Access)
+- status: status, status report;
+- counsel: advice, omen, prophecy, what should I do, what do you think;
+- title: title me, give me a title, grant me a title, bestow a title.
 
-These conversational triggers run only when a message is in a server, not a DM, and contains the word `invictus`.
+Emperor and Empress role bindings remain separate from privileged chat; bind the same role under `privileged-chat` as well if that guild wants royal-role members to receive these intents.
 
-Available to all members:
+Responses use the current guild's labels and timezone and do not allow everyone, user, or role pings unless a specific feature explicitly requires a controlled mention.
 
-- Greeting: hi, hello, hey, yo, sup, good morning, good afternoon, good evening
-- Help: help, commands, options, what can you do
-- Coin flip: flip a coin, flip coin, coin flip, heads or tails
-- Time: what time is it, time now, current time
-- Thanks: thanks, thank you, ty
-- Farewell: goodnight, good night, sleep well
+## Royal Presence Announcements
 
-Restricted to the Empress role or Emperor role:
+Royal presence is not a keyword trigger. When enabled, a message in the configured royal-alert channel from a member with the configured Emperor or Empress role can produce the corresponding title announcement.
 
-- Status: status, status report
-- Counsel: advice, omen, prophecy, what should i do, what do you think
-- Title: title me, give me a title, grant me a title, bestow a title, bestow title
-
-The two lists above are the intent-phrase lists. The bot sends an in-channel thematic reply based on the matching intent and uses safe mentions with no everyone, user, or role pings.
-
-## Royal Presence Announcement (Automatic)
-
-This is not a text-keyword trigger. It runs automatically when a message in the royal-alert channel is sent by a member with either of these roles:
-
-- Emperor role
-- Empress role
-
-Behavior:
-
-- Posts `# The Emperor has spoken` or `# The Empress has spoken`.
-- The timer is separate for each role, not shared.
-- The interval is three hours per role.
-
-## General Notes
-
-- Any capitalization works for all text triggers.
-- Extra text after a reply-mute trigger is used as the mute reason.
-- If no extra text is provided, a default reason is used.
+Presence timers are stored independently per title and per guild. The resolved channel and member roles must belong to the expected guild. A message in one guild cannot advance another guild's timer or select its fallback channel.

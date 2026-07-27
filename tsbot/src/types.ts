@@ -1,40 +1,91 @@
 export type BotMode = "off" | "manual" | "auto";
+export type CommandRegistrationMode = "global" | "guild";
 export type RoyalTitle = "Emperor" | "Empress";
 
-export interface RuntimeConfig {
+export interface ProcessConfig {
   discordToken: string;
   botVersion: string;
-  testGuildId: number;
-  testGuildIdText: string;
-  courtChannelId: number;
-  courtChannelIdText: string;
-  logChannelId: number;
-  logChannelIdText: string;
-  timezoneName: string;
-  staffRoleIds: Set<string>;
-  staffRoleIdsText: Set<string>;
-  emperorRoleId: number;
-  emperorRoleIdText: string;
-  empressRoleId: number;
-  empressRoleIdText: string;
-  silentLockExcludeRoles: Set<string>;
-  royalAlertChannelId: number;
-  royalAlertChannelIdText: string;
-  undefeatedUserId: number;
-  undefeatedUserIdText: string;
-  anonMinAccountAgeMinutes: number;
-  anonMinMemberAgeMinutes: number;
-  anonRequiredRoleId: number;
-  anonRequiredRoleIdText: string;
-  anonCooldownSeconds: number;
-  anonAllowLinks: boolean;
-  muteallTargetCap: number;
-  weeklyDigestChannelId: number;
-  weeklyDigestChannelIdText: string;
-  weeklyDigestWeekday: number;
-  weeklyDigestHour: number;
-  answerRetentionDays: number;
   dbFile: string;
+  commandRegistrationMode: CommandRegistrationMode;
+  devGuildIds: string[];
+  botOperatorUserIds: string[];
+  schedulerConcurrency: number;
+}
+
+export interface GuildGreetingProfile {
+  name: string;
+  userId: string | null;
+  message: string;
+}
+
+export interface GuildSettings {
+  version: number;
+  enabled: boolean;
+  timezone: string;
+  features: {
+    court: boolean;
+    invictusChat: boolean;
+    anonymousAnswers: boolean;
+    replyModeration: boolean;
+    silenceLock: boolean;
+    royalAfk: boolean;
+    royalPresence: boolean;
+    weeklyDigest: boolean;
+    greetings: boolean;
+  };
+  channels: {
+    court: string | null;
+    log: string | null;
+    weeklyDigest: string | null;
+    royalAlert: string | null;
+  };
+  roles: {
+    staff: string[];
+    privilegedChat: string[];
+    emperor: string | null;
+    empress: string | null;
+    silenceTargets: string[];
+    silenceExcludes: string[];
+    anonymousRequired: string | null;
+  };
+  labels: {
+    emperor: string;
+    empress: string;
+  };
+  invocation: {
+    keyword: string;
+    aliases: string[];
+  };
+  courtSchedule: {
+    mode: BotMode;
+    hour: number;
+    minute: number;
+    dryRun: boolean;
+  };
+  weeklyDigestSchedule: {
+    weekday: number;
+    hour: number;
+  };
+  limits: {
+    anonMinAccountAgeMinutes: number;
+    anonMinMemberAgeMinutes: number;
+    anonCooldownSeconds: number;
+    anonAllowLinks: boolean;
+    muteallTargetCap: number;
+    answerRetentionDays: number;
+  };
+  championUserId: string | null;
+  greetings: GuildGreetingProfile[];
+}
+
+export interface GuildRecord {
+  guildId: string;
+  enabled: boolean;
+  name: string | null;
+  joinedAt: string | null;
+  leftAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PostRecord {
@@ -79,21 +130,18 @@ export interface RoyalAfkShape {
   by_title: Record<RoyalTitle, RoyalAfkEntry>;
 }
 
+/** Mutable per-guild state. Configuration belongs in GuildSettings. */
 export interface CourtState {
-  mode: BotMode;
-  hour: number;
-  minute: number;
-  channel_id: number;
-  log_channel_id: number;
   last_posted_date: string | null;
-  dry_run_auto_post: boolean;
   last_dry_run_date: string | null;
   last_weekly_digest_week: string | null;
   history: string[];
   used_questions: string[];
   royal_presence: RoyalPresenceShape;
   royal_afk: RoyalAfkShape;
+  /** Derived from the guild-scoped posts table; not persisted in kv.state. */
   posts: PostRecord[];
+  /** Derived from the guild-scoped metrics table; not persisted in kv.state. */
   metrics: MetricsShape;
 }
 
@@ -107,4 +155,54 @@ export interface BackfillStatusSnapshot {
   last_status: string;
   last_summary: string | null;
   last_error: string | null;
+}
+
+export interface GuildAnswerExport {
+  questionMessageId: string;
+  userId: string;
+  answerMessageId: string;
+  createdAt: string;
+}
+
+export interface GuildMetricExport {
+  key: string;
+  value: string;
+  updatedAt: string;
+}
+
+export interface GuildCooldownExport {
+  userId: string;
+  lastAnswerAt: string;
+}
+
+export interface GuildKvExport {
+  key: string;
+  value: string;
+  updatedAt: string;
+}
+
+export interface GuildDataExport {
+  formatVersion: 1;
+  guildId: string;
+  exportedAt: string;
+  metadata: GuildRecord;
+  settings: GuildSettings;
+  state: CourtState;
+  questions: Record<string, string[]>;
+  kv: GuildKvExport[];
+  posts: PostRecord[];
+  answers: GuildAnswerExport[];
+  metrics: GuildMetricExport[];
+  cooldowns: GuildCooldownExport[];
+}
+
+export interface GuildPurgeResult {
+  guildId: string;
+  guilds: number;
+  settings: number;
+  kv: number;
+  posts: number;
+  answers: number;
+  metrics: number;
+  cooldowns: number;
 }

@@ -2,31 +2,21 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadRuntimeConfig } from "../src/config.js";
+import { loadDatabaseConfig, loadProcessConfig } from "../src/config.js";
+import { loadLegacyMigrationConfig } from "../src/storage/legacy-v1-settings.js";
 
 const CONFIG_ENV_KEYS = [
-  "ANON_ALLOW_LINKS",
-  "ANON_COOLDOWN_SECONDS",
-  "ANON_MIN_ACCOUNT_AGE_MINUTES",
-  "ANON_MIN_MEMBER_AGE_MINUTES",
-  "ANON_REQUIRED_ROLE_ID",
+  "BOT_OPERATOR_USER_IDS",
   "BOT_VERSION",
+  "COMMAND_REGISTRATION_MODE",
   "COURT_CHANNEL_ID",
   "DB_FILE",
+  "DEV_GUILD_IDS",
   "DISCORD_TOKEN",
-  "EMPEROR_ROLE_ID",
-  "EMPRESS_ROLE_ID",
-  "LOG_CHANNEL_ID",
-  "MUTEALL_TARGET_CAP",
-  "ROYAL_ALERT_CHANNEL_ID",
-  "SILENT_LOCK_EXCLUDE_ROLES",
-  "STAFF_ROLE_IDS",
+  "ENV_FILE",
+  "LEGACY_GUILD_ID",
+  "SCHEDULER_CONCURRENCY",
   "TEST_GUILD_ID",
-  "TIMEZONE",
-  "UNDEFEATED_USER_ID",
-  "WEEKLY_DIGEST_CHANNEL_ID",
-  "WEEKLY_DIGEST_HOUR",
-  "WEEKLY_DIGEST_WEEKDAY",
 ] as const;
 
 const originalEnv = { ...process.env };
@@ -49,9 +39,7 @@ function makeRepoRoot(): string {
   return repoRoot;
 }
 
-beforeEach(() => {
-  resetConfigEnv();
-});
+beforeEach(resetConfigEnv);
 
 afterEach(() => {
   process.env = { ...originalEnv };
@@ -60,39 +48,140 @@ afterEach(() => {
   }
 });
 
-describe("runtime config", () => {
-  it("loads required env and resolves relative database paths", () => {
+describe("process config", () => {
+  it("requires only the token and defaults command registration to global", () => {
     const repoRoot = makeRepoRoot();
     writeEnvFile(repoRoot, [
       "DISCORD_TOKEN=test-token",
-      "TEST_GUILD_ID=123456789012345678",
-      "COURT_CHANNEL_ID=234567890123456789",
       "DB_FILE=data/court.db",
-      "STAFF_ROLE_IDS=111, 222",
-      "ANON_ALLOW_LINKS=yes",
     ]);
 
-    const config = loadRuntimeConfig(repoRoot);
+    const config = loadProcessConfig(repoRoot);
 
     expect(config.discordToken).toBe("test-token");
-    expect(config.testGuildIdText).toBe("123456789012345678");
-    expect(config.courtChannelIdText).toBe("234567890123456789");
+    expect(config.commandRegistrationMode).toBe("global");
+    expect(config.devGuildIds).toEqual([]);
     expect(config.dbFile).toBe(path.join(repoRoot, "data/court.db"));
-    expect([...config.staffRoleIdsText]).toEqual(["111", "222"]);
-    expect(config.anonAllowLinks).toBe(true);
+    expect(config.schedulerConcurrency).toBe(4);
+    expect("testGuildId" in config).toBe(false);
+    expect("courtChannelId" in config).toBe(false);
   });
 
-  it("rejects malformed integer values instead of partially parsing them", () => {
+  it("validates every development guild and operator snowflake", () => {
     const repoRoot = makeRepoRoot();
     writeEnvFile(repoRoot, [
       "DISCORD_TOKEN=test-token",
-      "TEST_GUILD_ID=123456789012345678",
-      "COURT_CHANNEL_ID=234567890123456789",
-      "ANON_COOLDOWN_SECONDS=12seconds",
+      "COMMAND_REGISTRATION_MODE=guild",
+      "DEV_GUILD_IDS=111111111111111111,222222222222222222,111111111111111111",
+      "BOT_OPERATOR_USER_IDS=333333333333333333",
+      "SCHEDULER_CONCURRENCY=8",
     ]);
 
-    expect(() => loadRuntimeConfig(repoRoot)).toThrow(
-      "ANON_COOLDOWN_SECONDS must be an integer in .env",
+    const config = loadProcessConfig(repoRoot);
+
+    expect(config.devGuildIds).toEqual([
+      "111111111111111111",
+      "222222222222222222",
+    ]);
+    expect(config.botOperatorUserIds).toEqual(["333333333333333333"]);
+    expect(config.schedulerConcurrency).toBe(8);
+  });
+
+  it("rejects guild registration without development guilds", () => {
+    const repoRoot = makeRepoRoot();
+    writeEnvFile(repoRoot, [
+      "DISCORD_TOKEN=test-token",
+      "COMMAND_REGISTRATION_MODE=guild",
+    ]);
+    expect(() => loadProcessConfig(repoRoot)).toThrow("DEV_GUILD_IDS");
+  });
+
+  it("rejects malformed snowflakes and integer values", () => {
+    const repoRoot = makeRepoRoot();
+    writeEnvFile(repoRoot, [
+      "DISCORD_TOKEN=test-token",
+      "DEV_GUILD_IDS=not-a-snowflake",
+    ]);
+    expect(() => loadProcessConfig(repoRoot)).toThrow("DEV_GUILD_IDS");
+
+    delete process.env.DEV_GUILD_IDS;
+    writeEnvFile(repoRoot, [
+      "DISCORD_TOKEN=test-token",
+      "SCHEDULER_CONCURRENCY=4workers",
+    ]);
+    expect(() => loadProcessConfig(repoRoot)).toThrow(
+      "SCHEDULER_CONCURRENCY must be an integer",
     );
+  });
+
+  it("loads database-only configuration without a Discord token", () => {
+    const repoRoot = makeRepoRoot();
+    writeEnvFile(repoRoot, ["DB_FILE=temporary.sqlite"]);
+    expect(loadDatabaseConfig(repoRoot).dbFile).toBe(
+      path.join(repoRoot, "temporary.sqlite"),
+    );
+  });
+
+  it("loads a custom ENV_FILE relative to the repository root", () => {
+    const repoRoot = makeRepoRoot();
+    const configDirectory = path.join(repoRoot, "config");
+    fs.mkdirSync(configDirectory);
+    fs.writeFileSync(
+      path.join(configDirectory, "production.env"),
+      [
+        "DISCORD_TOKEN=custom-file-token",
+        "DB_FILE=data/custom.sqlite",
+        "LEGACY_GUILD_ID=222222222222222222",
+        "COURT_CHANNEL_ID=333333333333333333",
+      ].join("\n"),
+    );
+    process.env.ENV_FILE = "config/production.env";
+
+    expect(loadProcessConfig(repoRoot)).toMatchObject({
+      discordToken: "custom-file-token",
+      dbFile: path.join(repoRoot, "data/custom.sqlite"),
+    });
+    expect(loadLegacyMigrationConfig(repoRoot)).toMatchObject({
+      legacyGuildId: "222222222222222222",
+      environment: expect.objectContaining({
+        COURT_CHANNEL_ID: "333333333333333333",
+      }),
+    });
+  });
+
+  it("does not allow ENV_FILE inside dotenv to redirect later loads", () => {
+    const repoRoot = makeRepoRoot();
+    writeEnvFile(repoRoot, [
+      "DISCORD_TOKEN=selected-token",
+      "ENV_FILE=redirected.env",
+    ]);
+    fs.writeFileSync(
+      path.join(repoRoot, "redirected.env"),
+      "DISCORD_TOKEN=redirected-token\n",
+    );
+
+    expect(loadProcessConfig(repoRoot).discordToken).toBe("selected-token");
+    expect(process.env.ENV_FILE).toBeUndefined();
+    expect(loadProcessConfig(repoRoot).discordToken).toBe("selected-token");
+  });
+
+  it("uses TEST_GUILD_ID only as a deprecated migration fallback", () => {
+    const fallbackRoot = makeRepoRoot();
+    writeEnvFile(fallbackRoot, ["TEST_GUILD_ID=111111111111111111"]);
+    expect(loadLegacyMigrationConfig(fallbackRoot)).toMatchObject({
+      legacyGuildId: "111111111111111111",
+      legacyGuildIdSource: "TEST_GUILD_ID",
+    });
+
+    delete process.env.TEST_GUILD_ID;
+    const explicitRoot = makeRepoRoot();
+    writeEnvFile(explicitRoot, [
+      "TEST_GUILD_ID=111111111111111111",
+      "LEGACY_GUILD_ID=222222222222222222",
+    ]);
+    expect(loadLegacyMigrationConfig(explicitRoot)).toMatchObject({
+      legacyGuildId: "222222222222222222",
+      legacyGuildIdSource: "LEGACY_GUILD_ID",
+    });
   });
 });

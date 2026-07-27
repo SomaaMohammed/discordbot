@@ -1,3 +1,4 @@
+import { ChannelType } from "discord.js";
 import { describe, expect, it } from "vitest";
 import { buildCommandDefinitions } from "../src/discord/commands.js";
 
@@ -46,21 +47,47 @@ function findOption(subcommand: JsonOption, optionName: string): JsonOption {
 }
 
 describe("channel option compatibility", () => {
-  it("does not restrict channel option types on channel-taking commands", () => {
+  it("marks every slash command unavailable in DMs", () => {
+    const commands = buildCommandDefinitions().map((command) =>
+      command.toJSON(),
+    );
+
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands.every((command) => command.dm_permission === false)).toBe(
+      true,
+    );
+  });
+
+  it("restricts persisted bindings while leaving transient targets flexible", () => {
     const commands = buildCommandDefinitions().map((command) =>
       command.toJSON(),
     ) as JsonCommand[];
 
-    const targets: Array<[string, string, string]> = [
+    const persistentTargets: Array<[string, string, string]> = [
+      ["setup", "channel", "channel"],
       ["court", "channel", "channel"],
       ["court", "logchannel", "channel"],
+    ];
+    for (const [commandName, subcommandName, optionName] of persistentTargets) {
+      const command = findCommand(commands, commandName);
+      const subcommand = findSubcommand(command, subcommandName);
+      const option = findOption(subcommand, optionName);
+
+      expect(option.type).toBe(7);
+      expect(option.channel_types).toEqual([
+        ChannelType.GuildText,
+        ChannelType.GuildAnnouncement,
+      ]);
+    }
+
+    const transientTargets: Array<[string, string, string]> = [
       ["invictus", "dmpanel", "channel"],
       ["invictus", "say", "channel"],
       ["invictus", "rolepanel", "channel"],
       ["invictus", "rolepanelmulti", "channel"],
     ];
 
-    for (const [commandName, subcommandName, optionName] of targets) {
+    for (const [commandName, subcommandName, optionName] of transientTargets) {
       const command = findCommand(commands, commandName);
       const subcommand = findSubcommand(command, subcommandName);
       const option = findOption(subcommand, optionName);

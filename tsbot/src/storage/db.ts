@@ -1,14 +1,25 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import { DateTime } from "luxon";
+import { z } from "zod";
 import {
   HISTORY_LIMIT,
   POST_RECORD_LIMIT,
-  STORAGE_JSON_KEYS,
+  QUESTIONS_FILE,
   THREAD_CLOSE_HOURS,
   USER_METRIC_PREFIX,
 } from "../constants.js";
+import {
+  assertDiscordSnowflake,
+  createDefaultGuildSettings,
+  DISCORD_SNOWFLAKE_PATTERN,
+  GuildSettingsSchema,
+  parseGuildSettingsJson,
+  sanitizeGuildSettings,
+  serializeGuildSettings,
+} from "../guild-settings.js";
 import {
   coerceInt,
   ensureMetricsShape,
@@ -19,23 +30,26 @@ import {
 import { isoNow } from "../time.js";
 import type {
   CourtState,
+  GuildAnswerExport,
+  GuildCooldownExport,
+  GuildDataExport,
+  GuildKvExport,
+  GuildMetricExport,
+  GuildPurgeResult,
+  GuildRecord,
+  GuildSettings,
   MetricsShape,
   PostRecord,
-  RuntimeConfig,
+  ProcessConfig,
 } from "../types.js";
 import {
-  ANON_COOLDOWNS_TABLE_SQL,
-  ANSWERS_MESSAGE_ID_INDEX_SQL,
-  ANSWERS_QUESTION_CREATED_INDEX_SQL,
-  ANSWERS_TABLE_SQL,
-  KV_TABLE_SQL,
-  METRICS_TABLE_SQL,
-  POSTS_CLOSED_POSTED_AT_INDEX_SQL,
-  POSTS_TABLE_SQL,
+  detectDatabaseSchema,
+  initializeV2Schema,
+  validateV2Schema,
 } from "./schema.js";
 
 interface CountRow {
-  c: number;
+  count: number;
 }
 
 interface JsonRow {
@@ -45,6 +59,7 @@ interface JsonRow {
 interface MetricRow {
   metric_key: string;
   metric_value: string;
+  updated_at: string;
 }
 
 interface PostRow {
@@ -65,177 +80,778 @@ interface AnswerRecordRow {
   user_id: string;
 }
 
+interface AnswerRow extends AnswerRecordRow {
+  answer_message_id: string;
+  created_at: string;
+}
+
 interface CooldownRow {
+  user_id: string;
   last_answer_at: string;
 }
 
+interface GuildRow {
+  guild_id: string;
+  enabled: number;
+  name: string | null;
+  joined_at: string | null;
+  left_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface GuildSettingsRow {
+  settings_version: number;
+  settings_json: string;
+}
+
+export class GuildSettingsConflictError extends Error {
+  public constructor(guildId: string) {
+    super(
+      `Guild ${guildId} settings changed while the operation was in progress`,
+    );
+    this.name = "GuildSettingsConflictError";
+  }
+}
+
+const TENANT_TABLES = [
+  "guild_settings",
+  "kv",
+  "posts",
+  "answers",
+  "metrics",
+  "anon_cooldowns",
+] as const;
+
+const OBSOLETE_OR_DERIVED_STATE_KEYS = [
+  "mode",
+  "hour",
+  "minute",
+  "channel_id",
+  "log_channel_id",
+  "dry_run_auto_post",
+  "posts",
+  "metrics",
+] as const;
+
+const IMPORT_SNOWFLAKE_SCHEMA = z.string().regex(DISCORD_SNOWFLAKE_PATTERN);
+const IMPORT_ISO_TIMESTAMP_SCHEMA = z.string().refine(
+  (value) => DateTime.fromISO(value, { setZone: true }).isValid,
+  "must be a valid ISO timestamp",
+);
+const IMPORT_OPTIONAL_STRING_SCHEMA = z.string().nullable();
+const IMPORT_NONNEGATIVE_INTEGER_SCHEMA = z.number().int().nonnegative();
+
+const IMPORT_POST_SCHEMA = z
+  .object({
+    message_id: IMPORT_SNOWFLAKE_SCHEMA,
+    thread_id: IMPORT_SNOWFLAKE_SCHEMA.nullable(),
+    channel_id: IMPORT_SNOWFLAKE_SCHEMA,
+    category: z.string().refine((value) => value.trim().length > 0),
+    question: z.string().refine((value) => value.trim().length > 0),
+    posted_at: IMPORT_ISO_TIMESTAMP_SCHEMA,
+    close_after_hours: z.number().int().min(1),
+    closed: z.boolean(),
+    closed_at: IMPORT_ISO_TIMESTAMP_SCHEMA.nullable(),
+    close_reason: IMPORT_OPTIONAL_STRING_SCHEMA,
+  })
+  .strict();
+
+const IMPORT_NUMBER_RECORD_SCHEMA = z.record(
+  z.string(),
+  IMPORT_NONNEGATIVE_INTEGER_SCHEMA,
+);
+
+const IMPORT_METRICS_SHAPE_SCHEMA = z
+  .object({
+    command_usage: IMPORT_NUMBER_RECORD_SCHEMA,
+    command_failures: IMPORT_NUMBER_RECORD_SCHEMA,
+    posts_by_category: IMPORT_NUMBER_RECORD_SCHEMA,
+    posts_total: IMPORT_NONNEGATIVE_INTEGER_SCHEMA,
+    posts_auto: IMPORT_NONNEGATIVE_INTEGER_SCHEMA,
+    posts_manual: IMPORT_NONNEGATIVE_INTEGER_SCHEMA,
+    custom_posts: IMPORT_NONNEGATIVE_INTEGER_SCHEMA,
+    answers_total: IMPORT_NONNEGATIVE_INTEGER_SCHEMA,
+    last_successful_auto_post: IMPORT_ISO_TIMESTAMP_SCHEMA.nullable(),
+  })
+  .strict();
+
+const IMPORT_ROYAL_PRESENCE_SCHEMA = z
+  .object({
+    last_message_at_by_title: z
+      .object({
+        Emperor: IMPORT_OPTIONAL_STRING_SCHEMA,
+        Empress: IMPORT_OPTIONAL_STRING_SCHEMA,
+      })
+      .strict(),
+    last_message_at: IMPORT_OPTIONAL_STRING_SCHEMA,
+    last_speaker: z.enum(["Emperor", "Empress"]).nullable(),
+  })
+  .strict();
+
+const IMPORT_ROYAL_AFK_ENTRY_SCHEMA = z
+  .object({
+    active: z.boolean(),
+    reason: z.string(),
+    set_at: IMPORT_OPTIONAL_STRING_SCHEMA,
+    set_by_user_id: IMPORT_OPTIONAL_STRING_SCHEMA,
+  })
+  .strict();
+
+const IMPORT_ROYAL_AFK_SCHEMA = z
+  .object({
+    by_title: z
+      .object({
+        Emperor: IMPORT_ROYAL_AFK_ENTRY_SCHEMA,
+        Empress: IMPORT_ROYAL_AFK_ENTRY_SCHEMA,
+      })
+      .strict(),
+  })
+  .strict();
+
+const IMPORT_STATE_SCHEMA = z
+  .object({
+    last_posted_date: IMPORT_OPTIONAL_STRING_SCHEMA,
+    last_dry_run_date: IMPORT_OPTIONAL_STRING_SCHEMA,
+    last_weekly_digest_week: IMPORT_OPTIONAL_STRING_SCHEMA,
+    history: z.array(z.string()),
+    used_questions: z.array(z.string()),
+    royal_presence: IMPORT_ROYAL_PRESENCE_SCHEMA,
+    royal_afk: IMPORT_ROYAL_AFK_SCHEMA,
+    posts: z.array(IMPORT_POST_SCHEMA),
+    metrics: IMPORT_METRICS_SHAPE_SCHEMA,
+  })
+  .strict();
+
+const IMPORT_QUESTIONS_SCHEMA = z.record(z.string(), z.array(z.string()));
+
+const IMPORT_GUILD_RECORD_SCHEMA = z
+  .object({
+    guildId: IMPORT_SNOWFLAKE_SCHEMA,
+    enabled: z.boolean(),
+    name: z.string().nullable(),
+    joinedAt: IMPORT_ISO_TIMESTAMP_SCHEMA.nullable(),
+    leftAt: IMPORT_ISO_TIMESTAMP_SCHEMA.nullable(),
+    createdAt: IMPORT_ISO_TIMESTAMP_SCHEMA,
+    updatedAt: IMPORT_ISO_TIMESTAMP_SCHEMA,
+  })
+  .strict();
+
+const IMPORT_KV_SCHEMA = z
+  .object({
+    key: z.string().refine((value) => value.length > 0),
+    value: z.string(),
+    updatedAt: IMPORT_ISO_TIMESTAMP_SCHEMA,
+  })
+  .strict();
+
+const IMPORT_ANSWER_SCHEMA = z
+  .object({
+    questionMessageId: IMPORT_SNOWFLAKE_SCHEMA,
+    userId: IMPORT_SNOWFLAKE_SCHEMA,
+    answerMessageId: IMPORT_SNOWFLAKE_SCHEMA,
+    createdAt: IMPORT_ISO_TIMESTAMP_SCHEMA,
+  })
+  .strict();
+
+const IMPORT_METRIC_SCHEMA = z
+  .object({
+    key: z.string().refine((value) => value.trim().length > 0),
+    value: z.string(),
+    updatedAt: IMPORT_ISO_TIMESTAMP_SCHEMA,
+  })
+  .strict();
+
+const IMPORT_COOLDOWN_SCHEMA = z
+  .object({
+    userId: IMPORT_SNOWFLAKE_SCHEMA,
+    lastAnswerAt: IMPORT_ISO_TIMESTAMP_SCHEMA,
+  })
+  .strict();
+
+const GUILD_DATA_IMPORT_SCHEMA = z
+  .object({
+    formatVersion: z.literal(1),
+    guildId: IMPORT_SNOWFLAKE_SCHEMA,
+    exportedAt: IMPORT_ISO_TIMESTAMP_SCHEMA,
+    metadata: IMPORT_GUILD_RECORD_SCHEMA,
+    settings: GuildSettingsSchema,
+    state: IMPORT_STATE_SCHEMA,
+    questions: IMPORT_QUESTIONS_SCHEMA,
+    kv: z.array(IMPORT_KV_SCHEMA),
+    posts: z.array(IMPORT_POST_SCHEMA),
+    answers: z.array(IMPORT_ANSWER_SCHEMA),
+    metrics: z.array(IMPORT_METRIC_SCHEMA),
+    cooldowns: z.array(IMPORT_COOLDOWN_SCHEMA),
+  })
+  .strict();
+
 export class CourtStorage {
   private readonly db: Database.Database;
+  private initialized = false;
 
   public constructor(
-    private readonly config: RuntimeConfig,
+    config: Pick<ProcessConfig, "dbFile">,
     private readonly repoRoot: string,
   ) {
-    this.db = new Database(this.config.dbFile);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    // Deliberately do not set WAL or any other mutating pragma until the
+    // existing schema has been classified. A legacy startup must stay read-only.
+    this.db = new Database(config.dbFile);
   }
 
   public initStorage(): void {
-    this.db.exec(KV_TABLE_SQL);
-    this.db.exec(POSTS_TABLE_SQL);
-    this.db.exec(ANSWERS_TABLE_SQL);
-    this.db.exec(METRICS_TABLE_SQL);
-    this.db.exec(ANON_COOLDOWNS_TABLE_SQL);
-    this.db.exec(POSTS_CLOSED_POSTED_AT_INDEX_SQL);
-    this.db.exec(ANSWERS_QUESTION_CREATED_INDEX_SQL);
-    this.db.exec(ANSWERS_MESSAGE_ID_INDEX_SQL);
+    const schema = detectDatabaseSchema(this.db);
+    if (schema === "legacy-v1") {
+      throw new Error(
+        "Database uses the legacy v1 schema. Create a validated backup, set LEGACY_GUILD_ID, and run `cd tsbot && npm run migrate` before starting v2.",
+      );
+    }
+    if (schema === "unknown") {
+      throw new Error(
+        "Database schema is unknown or incomplete; startup refused without making schema changes.",
+      );
+    }
 
-    this.maybeMigrateJsonFiles();
-    this.migrateStructuredTables();
+    this.db.pragma("foreign_keys = ON");
+    if (schema === "empty") {
+      initializeV2Schema(this.db, utcNow());
+    } else {
+      const issues = validateV2Schema(this.db);
+      if (issues.length > 0) {
+        throw new Error(`Database schema validation failed: ${issues.join("; ")}`);
+      }
+    }
+
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("synchronous = NORMAL");
+    this.initialized = true;
+  }
+
+  public close(): void {
+    if (this.db.open) {
+      this.db.close();
+    }
+    this.initialized = false;
+  }
+
+  public forGuild(guildId: string): GuildStorage {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    if (!this.getGuild(normalized)) {
+      throw new Error(`Guild ${normalized} is not configured`);
+    }
+    return new GuildStorage(this.db, this, this.repoRoot, normalized);
+  }
+
+  public ensureGuild(
+    guildId: string,
+    name: string | null = null,
+    observedJoinedAt: string | null = null,
+  ): GuildRecord {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    const now = utcNow();
+    const normalizedName = normalizeGuildName(name);
+    const joinedAt = normalizeObservedTimestamp(observedJoinedAt) ?? now;
+
+    const ensure = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO guilds (
+             guild_id, enabled, name, joined_at, left_at, created_at, updated_at
+           ) VALUES (?, 0, ?, ?, NULL, ?, ?)
+           ON CONFLICT(guild_id) DO UPDATE SET
+             name = CASE
+               WHEN excluded.name IS NULL THEN guilds.name
+               ELSE excluded.name
+             END,
+             joined_at = CASE
+               WHEN guilds.joined_at IS NULL THEN excluded.joined_at
+               ELSE guilds.joined_at
+             END,
+             updated_at = excluded.updated_at`,
+        )
+        .run(normalized, normalizedName, joinedAt, now, now);
+
+      const existingSettings = this.getGuildSettings(normalized);
+      if (!existingSettings) {
+        this.insertSettings(normalized, createDefaultGuildSettings(), now);
+      }
+    });
+    ensure.immediate();
+    return this.requireGuild(normalized);
+  }
+
+  public reactivateGuild(
+    guildId: string,
+    name: string | null = null,
+    observedJoinedAt: string | null = null,
+  ): GuildRecord {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    const now = utcNow();
+    const normalizedName = normalizeGuildName(name);
+    const joinedAt = normalizeObservedTimestamp(observedJoinedAt) ?? now;
+    const priorSettings = this.getGuildSettings(normalized);
+
+    const reactivate = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO guilds (
+             guild_id, enabled, name, joined_at, left_at, created_at, updated_at
+           ) VALUES (?, 0, ?, ?, NULL, ?, ?)
+           ON CONFLICT(guild_id) DO UPDATE SET
+             enabled = 0,
+             name = CASE
+               WHEN excluded.name IS NULL THEN guilds.name
+               ELSE excluded.name
+             END,
+             joined_at = excluded.joined_at,
+             left_at = NULL,
+             updated_at = excluded.updated_at`,
+        )
+        .run(normalized, normalizedName, joinedAt, now, now);
+
+      const settings = priorSettings ?? createDefaultGuildSettings();
+      settings.enabled = false;
+      this.upsertSettings(normalized, settings, now);
+    });
+    reactivate.immediate();
+    return this.requireGuild(normalized);
+  }
+
+  public markGuildLeft(guildId: string): GuildRecord | null {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    if (!this.getGuild(normalized)) {
+      return null;
+    }
+    const priorSettings = this.getGuildSettings(normalized);
+    const now = utcNow();
+    const leave = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE guilds
+           SET enabled = 0, left_at = ?, updated_at = ?
+           WHERE guild_id = ?`,
+        )
+        .run(now, now, normalized);
+      const settings = priorSettings;
+      if (settings) {
+        settings.enabled = false;
+        this.upsertSettings(normalized, settings, now);
+      }
+    });
+    leave.immediate();
+    return this.requireGuild(normalized);
+  }
+
+  public getGuild(guildId: string): GuildRecord | null {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    const row = this.db
+      .prepare("SELECT * FROM guilds WHERE guild_id = ?")
+      .get(normalized) as GuildRow | undefined;
+    return row ? parseGuildRow(row) : null;
+  }
+
+  public listEnabledGuilds(): GuildRecord[] {
+    this.assertInitialized();
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM guilds
+         WHERE enabled = 1 AND left_at IS NULL
+         ORDER BY guild_id`,
+      )
+      .all() as GuildRow[];
+    return rows.map(parseGuildRow);
+  }
+
+  public listActiveGuilds(): GuildRecord[] {
+    this.assertInitialized();
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM guilds
+         WHERE left_at IS NULL
+         ORDER BY guild_id`,
+      )
+      .all() as GuildRow[];
+    return rows.map(parseGuildRow);
+  }
+
+  public getGuildSettings(guildId: string): GuildSettings | null {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    const row = this.db
+      .prepare(
+        `SELECT settings_version, settings_json
+         FROM guild_settings WHERE guild_id = ?`,
+      )
+      .get(normalized) as GuildSettingsRow | undefined;
+    if (!row) {
+      return null;
+    }
+    const settings = parseGuildSettingsJson(row.settings_json);
+    if (row.settings_version !== settings.version) {
+      throw new Error(`Guild ${normalized} settings version is inconsistent`);
+    }
+    const guild = this.db
+      .prepare("SELECT enabled FROM guilds WHERE guild_id = ?")
+      .get(normalized) as { enabled: number } | undefined;
+    if (!guild || Boolean(guild.enabled) !== settings.enabled) {
+      throw new Error(`Guild ${normalized} enabled state is inconsistent`);
+    }
+    return settings;
+  }
+
+  public saveGuildSettings(
+    guildId: string,
+    input: GuildSettings,
+    expectedSettings?: GuildSettings,
+  ): GuildSettings {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    const now = utcNow();
+    let saved: GuildSettings | null = null;
+    const save = this.db.transaction(() => {
+      const current = this.getGuildSettings(normalized);
+      if (!current) {
+        throw new Error(`Guild ${normalized} is not configured`);
+      }
+      if (
+        expectedSettings !== undefined &&
+        !isDeepStrictEqual(current, sanitizeGuildSettings(expectedSettings))
+      ) {
+        throw new GuildSettingsConflictError(normalized);
+      }
+
+      const settings = sanitizeGuildSettings(input);
+      // Enabling and disabling are separate operations. A configuration write
+      // must never resurrect a guild from a stale snapshot or disable a guild
+      // merely because its caller started before another enable operation.
+      settings.enabled = current.enabled;
+      this.db
+        .prepare(
+          "UPDATE guilds SET updated_at = ? WHERE guild_id = ?",
+        )
+        .run(now, normalized);
+      this.upsertSettings(normalized, settings, now);
+      saved = settings;
+    });
+    save.immediate();
+    return sanitizeGuildSettings(saved);
+  }
+
+  public setGuildEnabled(
+    guildId: string,
+    enabled: boolean,
+    expectedSettings?: GuildSettings,
+  ): GuildSettings {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    const now = utcNow();
+    let saved: GuildSettings | null = null;
+    const update = this.db.transaction(() => {
+      const current = this.getGuildSettings(normalized);
+      const guild = this.getGuild(normalized);
+      if (!current || !guild) {
+        throw new Error(`Guild ${normalized} is not configured`);
+      }
+      if (
+        expectedSettings !== undefined &&
+        !isDeepStrictEqual(current, sanitizeGuildSettings(expectedSettings))
+      ) {
+        throw new GuildSettingsConflictError(normalized);
+      }
+      if (enabled && guild.leftAt !== null) {
+        throw new Error("An inactive guild must rejoin before it can be enabled");
+      }
+
+      current.enabled = Boolean(enabled);
+      this.db
+        .prepare(
+          "UPDATE guilds SET enabled = ?, updated_at = ? WHERE guild_id = ?",
+        )
+        .run(current.enabled ? 1 : 0, now, normalized);
+      this.upsertSettings(normalized, current, now);
+      saved = current;
+    });
+    update.immediate();
+    return sanitizeGuildSettings(saved);
+  }
+
+  public purgeGuild(guildId: string): GuildPurgeResult {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    const result = this.previewGuildPurge(normalized);
+
+    const purge = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM guilds WHERE guild_id = ?").run(normalized);
+      for (const table of TENANT_TABLES) {
+        if (this.countForGuild(table, normalized) !== 0) {
+          throw new Error(`Guild purge left rows in ${table}`);
+        }
+      }
+    });
+    purge.immediate();
+    return result;
+  }
+
+  public previewGuildPurge(guildId: string): GuildPurgeResult {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    return {
+      guildId: normalized,
+      guilds: this.countForGuild("guilds", normalized),
+      settings: this.countForGuild("guild_settings", normalized),
+      kv: this.countForGuild("kv", normalized),
+      posts: this.countForGuild("posts", normalized),
+      answers: this.countForGuild("answers", normalized),
+      metrics: this.countForGuild("metrics", normalized),
+      cooldowns: this.countForGuild("anon_cooldowns", normalized),
+    };
+  }
+
+  public exportGuild(guildId: string): GuildDataExport {
+    return this.forGuild(guildId).exportData();
+  }
+
+  public importGuild(guildId: string, payload: unknown): void {
+    this.forGuild(guildId).importData(payload);
+  }
+
+  private assertInitialized(): void {
+    if (!this.initialized) {
+      throw new Error("CourtStorage.initStorage() must be called first");
+    }
+  }
+
+  private requireGuild(guildId: string): GuildRecord {
+    const guild = this.getGuild(guildId);
+    if (!guild) {
+      throw new Error(`Guild ${guildId} is not configured`);
+    }
+    return guild;
+  }
+
+  private insertSettings(
+    guildId: string,
+    settings: GuildSettings,
+    updatedAt: string,
+  ): void {
+    const validated = sanitizeGuildSettings(settings);
+    this.db
+      .prepare(
+        `INSERT INTO guild_settings (
+           guild_id, settings_version, settings_json, updated_at
+         ) VALUES (?, ?, ?, ?)`,
+      )
+      .run(
+        guildId,
+        validated.version,
+        serializeGuildSettings(validated),
+        updatedAt,
+      );
+  }
+
+  private upsertSettings(
+    guildId: string,
+    settings: GuildSettings,
+    updatedAt: string,
+  ): void {
+    const validated = sanitizeGuildSettings(settings);
+    this.db
+      .prepare(
+        `INSERT INTO guild_settings (
+           guild_id, settings_version, settings_json, updated_at
+         ) VALUES (?, ?, ?, ?)
+         ON CONFLICT(guild_id) DO UPDATE SET
+           settings_version = excluded.settings_version,
+           settings_json = excluded.settings_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        guildId,
+        validated.version,
+        serializeGuildSettings(validated),
+        updatedAt,
+      );
+  }
+
+  private countForGuild(table: string, guildId: string): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS count FROM ${quoteIdentifier(table)} WHERE guild_id = ?`)
+      .get(guildId) as CountRow;
+    return Number(row.count);
+  }
+}
+
+export class GuildStorage {
+  public constructor(
+    private readonly db: Database.Database,
+    private readonly root: CourtStorage,
+    private readonly repoRoot: string,
+    public readonly guildId: string,
+  ) {}
+
+  public getSettings(): GuildSettings {
+    const settings = this.root.getGuildSettings(this.guildId);
+    if (!settings) {
+      throw new Error(`Guild ${this.guildId} has no settings`);
+    }
+    return settings;
+  }
+
+  public saveSettings(settings: GuildSettings): GuildSettings {
+    return this.root.saveGuildSettings(this.guildId, settings);
+  }
+
+  public initializeCourtQuestions(): boolean {
+    if (this.dbHasKey("questions")) {
+      return false;
+    }
+    const filePath = path.join(this.repoRoot, QUESTIONS_FILE);
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new TypeError("The bootstrap question template must be an object");
+    }
+    this.setQuestions(parsed as Record<string, string[]>);
+    return true;
   }
 
   public getState(): CourtState {
-    const defaultState = this.defaultStatePayload();
-    const state = this.dbGetJson("state", defaultState) as Partial<CourtState>;
-
-    const mergedState: CourtState = {
-      ...defaultState,
-      ...state,
-      mode: state.mode ?? defaultState.mode,
-      hour: coerceInt(state.hour, defaultState.hour, 0, 23),
-      minute: coerceInt(state.minute, defaultState.minute, 0, 59),
-      channel_id: coerceInt(state.channel_id, defaultState.channel_id, 1),
-      log_channel_id: coerceInt(
-        state.log_channel_id,
-        defaultState.log_channel_id,
-        0,
-      ),
-      last_posted_date: state.last_posted_date ?? null,
-      dry_run_auto_post: Boolean(state.dry_run_auto_post ?? false),
-      last_dry_run_date: state.last_dry_run_date ?? null,
-      last_weekly_digest_week: state.last_weekly_digest_week ?? null,
-      history: Array.isArray(state.history)
-        ? state.history.filter(
-            (item): item is string => typeof item === "string",
-          )
-        : [],
-      used_questions: Array.isArray(state.used_questions)
-        ? state.used_questions.filter(
-            (item): item is string => typeof item === "string",
-          )
-        : [],
+    const defaults = this.defaultStatePayload();
+    const rawState = this.dbGetJson("state", defaults);
+    if (
+      typeof rawState !== "object" ||
+      rawState === null ||
+      Array.isArray(rawState)
+    ) {
+      throw new TypeError(`Guild ${this.guildId} state must be a JSON object`);
+    }
+    const state = rawState as Partial<CourtState>;
+    const merged: CourtState = {
+      last_posted_date: optionalString(state.last_posted_date),
+      last_dry_run_date: optionalString(state.last_dry_run_date),
+      last_weekly_digest_week: optionalString(state.last_weekly_digest_week),
+      history: stringArray(state.history).slice(-HISTORY_LIMIT),
+      used_questions: dedupeStrings(stringArray(state.used_questions)),
       royal_presence: ensureRoyalPresenceShape(state.royal_presence),
       royal_afk: ensureRoyalAfkShape(state.royal_afk),
       posts: this.listPostRecords(true, POST_RECORD_LIMIT),
       metrics: this.metricsSnapshot(),
     };
-
-    if (mergedState.channel_id <= 0) {
-      mergedState.channel_id = this.config.courtChannelId;
-    }
-
-    const stateToPersist: CourtState = {
-      ...mergedState,
-      posts: [],
-      metrics: ensureMetricsShape({}),
-    };
-    this.saveState(stateToPersist, { persistMetrics: false });
-
-    return mergedState;
+    return merged;
   }
 
   public saveState(
     state: CourtState,
     options: { persistMetrics?: boolean } = {},
   ): void {
-    const persistMetrics = options.persistMetrics ?? true;
-
-    const nextState: CourtState = {
-      ...state,
-      history: state.history.slice(-HISTORY_LIMIT),
-      used_questions: dedupeStrings(state.used_questions),
-      metrics: ensureMetricsShape(state.metrics),
-      royal_presence: ensureRoyalPresenceShape(state.royal_presence),
-      royal_afk: ensureRoyalAfkShape(state.royal_afk),
-      posts: state.posts.slice(-POST_RECORD_LIMIT),
+    const rawState = this.dbGetJson("state", {});
+    if (
+      typeof rawState !== "object" ||
+      rawState === null ||
+      Array.isArray(rawState)
+    ) {
+      throw new TypeError(`Guild ${this.guildId} state must be a JSON object`);
+    }
+    const preservedState = {
+      ...(rawState as Record<string, unknown>),
     };
-
-    for (const post of nextState.posts) {
-      this.upsertPostRow(post);
+    for (const key of OBSOLETE_OR_DERIVED_STATE_KEYS) {
+      delete preservedState[key];
     }
 
+    const persistMetrics = options.persistMetrics ?? true;
+    const next: CourtState = {
+      last_posted_date: optionalString(state.last_posted_date),
+      last_dry_run_date: optionalString(state.last_dry_run_date),
+      last_weekly_digest_week: optionalString(state.last_weekly_digest_week),
+      history: stringArray(state.history).slice(-HISTORY_LIMIT),
+      used_questions: dedupeStrings(stringArray(state.used_questions)),
+      royal_presence: ensureRoyalPresenceShape(state.royal_presence),
+      royal_afk: ensureRoyalAfkShape(state.royal_afk),
+      posts: Array.isArray(state.posts) ? state.posts.slice(-POST_RECORD_LIMIT) : [],
+      metrics: ensureMetricsShape(state.metrics),
+    };
+
+    for (const post of next.posts) {
+      this.upsertPostRow(post);
+    }
     if (persistMetrics) {
-      for (const [metricKey, metricValue] of Object.entries(
-        flattenMetricsForStorage(nextState.metrics),
+      for (const [key, value] of Object.entries(
+        flattenMetricsForStorage(next.metrics),
       )) {
-        this.metricsSet(metricKey, metricValue);
+        this.metricsSet(key, value);
       }
     }
 
-    const persisted: CourtState = {
-      ...nextState,
-      posts: [],
-      metrics: ensureMetricsShape({}),
-    };
-
-    this.dbSetJson("state", persisted);
+    this.dbSetJson("state", {
+      ...preservedState,
+      last_posted_date: next.last_posted_date,
+      last_dry_run_date: next.last_dry_run_date,
+      last_weekly_digest_week: next.last_weekly_digest_week,
+      history: next.history,
+      used_questions: next.used_questions,
+      royal_presence: next.royal_presence,
+      royal_afk: next.royal_afk,
+    });
   }
 
   public updateStateAtomic(mutator: (state: CourtState) => void): CourtState {
-    const state = this.getState();
-    mutator(state);
-    this.saveState(state);
-
-    return {
-      ...state,
-      posts: this.listPostRecords(true, POST_RECORD_LIMIT),
-      metrics: this.metricsSnapshot(),
-    };
+    const update = this.db.transaction(() => {
+      const state = this.getState();
+      mutator(state);
+      this.saveState(state);
+      return this.getState();
+    });
+    return update.immediate();
   }
 
   public getQuestions(): Record<string, string[]> {
-    const fallback: Record<string, string[]> = {
-      general: [],
-      gaming: [],
-      music: [],
-      "hot-take": [],
-      chaos: [],
-    };
-
-    const data = this.dbGetJson("questions", fallback);
-    if (typeof data !== "object" || data === null) {
+    const fallback = defaultQuestions();
+    // Reading an uninitialized guild must not consume its one-time template
+    // initialization. The court feature copies the tracked pool explicitly.
+    if (!this.dbHasKey("questions")) {
       return fallback;
     }
-
-    const parsed: Record<string, string[]> = {};
-    for (const [category, items] of Object.entries(
-      data as Record<string, unknown>,
-    )) {
-      if (!Array.isArray(items)) {
-        continue;
-      }
-      parsed[category] = items.filter(
-        (item): item is string => typeof item === "string",
+    const data = this.dbGetJson("questions", fallback);
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+      throw new TypeError(
+        `Guild ${this.guildId} questions must be a JSON object`,
       );
     }
-
+    const parsed: Record<string, string[]> = {};
+    for (const [category, items] of Object.entries(data)) {
+      if (
+        !Array.isArray(items) ||
+        items.some((item) => typeof item !== "string")
+      ) {
+        throw new TypeError(
+          `Guild ${this.guildId} question category ${category} must be an array of strings`,
+        );
+      }
+      parsed[category] = [...items];
+    }
     return { ...fallback, ...parsed };
   }
 
   public setQuestions(questions: Record<string, string[]>): void {
     const sanitized: Record<string, string[]> = {};
-    for (const [category, items] of Object.entries(questions)) {
-      if (!Array.isArray(items)) {
+    for (const [categoryRaw, items] of Object.entries(questions)) {
+      const category = categoryRaw.trim();
+      if (!category || !Array.isArray(items)) {
         continue;
       }
-
-      sanitized[category] = items
-        .filter((item): item is string => typeof item === "string")
-        .map((item) => item.trim())
-        .filter(Boolean);
+      sanitized[category] = dedupeStrings(
+        items
+          .filter((item): item is string => typeof item === "string")
+          .map((item) => item.trim())
+          .filter(Boolean),
+      );
     }
-
     this.dbSetJson("questions", sanitized);
   }
 
@@ -255,42 +871,55 @@ export class CourtStorage {
   }
 
   public metricsSet(key: string, value: string | number): void {
+    const metricKey = key.trim();
+    if (!metricKey) {
+      throw new TypeError("Metric key must not be empty");
+    }
     this.db
       .prepare(
-        `
-        INSERT INTO metrics (metric_key, metric_value, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(metric_key) DO UPDATE SET
-          metric_value = excluded.metric_value,
-          updated_at = excluded.updated_at
-      `,
+        `INSERT INTO metrics (
+           guild_id, metric_key, metric_value, updated_at
+         ) VALUES (?, ?, ?, ?)
+         ON CONFLICT(guild_id, metric_key) DO UPDATE SET
+           metric_value = excluded.metric_value,
+           updated_at = excluded.updated_at`,
       )
-      .run(key, String(value), isoNow(this.config.timezoneName));
+      .run(this.guildId, metricKey, String(value), this.nowIso());
   }
 
   public metricsGet(key: string, defaultValue: string): string {
-    const row = this.db
-      .prepare("SELECT metric_value FROM metrics WHERE metric_key = ?")
-      .get(key) as { metric_value: string } | undefined;
-
-    if (!row) {
-      return defaultValue;
+    const exactValue = this.getStoredMetricValue(key);
+    if (exactValue !== undefined) {
+      return exactValue;
     }
-
-    return String(row.metric_value);
+    const legacyKey = legacyRoundedUserMetricKey(key);
+    return legacyKey === null
+      ? defaultValue
+      : (this.getStoredMetricValue(legacyKey) ?? defaultValue);
   }
 
   public metricsIncrement(key: string, amount = 1): number {
-    const current = coerceInt(this.metricsGet(key, "0"), 0) + amount;
-    this.metricsSet(key, String(current));
-    return current;
+    const update = this.db.transaction(() => {
+      this.seedExactUserMetricFromLegacy(key);
+      const current = coerceInt(this.metricsGet(key, "0"), 0) + amount;
+      this.metricsSet(key, current);
+      return current;
+    });
+    return update.immediate();
   }
 
   public buildUserMetricKey(
     userId: number | string,
     metricName: string,
   ): string {
-    return `${USER_METRIC_PREFIX}${Number.parseInt(String(userId), 10)}.${metricName}`;
+    const normalizedUser = String(userId).trim();
+    const normalizedMetric = metricName.trim();
+    if (!isPositiveNumericId(normalizedUser) || !normalizedMetric) {
+      throw new TypeError(
+        "User metric requires a positive numeric user ID and metric name",
+      );
+    }
+    return `${USER_METRIC_PREFIX}${normalizedUser}.${normalizedMetric}`;
   }
 
   public getUserFunMetrics(userId: number | string): Record<string, number> {
@@ -302,7 +931,6 @@ export class CourtStorage {
       "battles_played",
       "battles_won",
     ];
-
     const result: Record<string, number> = {};
     for (const key of keys) {
       result[key] = coerceInt(
@@ -310,81 +938,76 @@ export class CourtStorage {
         0,
       );
     }
-
     return result;
   }
 
   public listTopUsersForMetric(
     metricName: string,
     limit = 5,
-  ): Array<[number, number]> {
-    const metricSuffix = metricName.trim();
-    if (!metricSuffix) {
+  ): Array<[string, number]> {
+    const suffix = metricName.trim();
+    if (!suffix) {
       return [];
     }
-
     const safeLimit = coerceInt(limit, 5, 1, 25);
-    const pattern = `${USER_METRIC_PREFIX}%.${metricSuffix}`;
     const rows = this.db
       .prepare(
-        "SELECT metric_key, metric_value FROM metrics WHERE metric_key LIKE ?",
+        `SELECT metric_key, metric_value, updated_at FROM metrics
+         WHERE guild_id = ? AND metric_key LIKE ?`,
       )
-      .all(pattern) as MetricRow[];
-
-    const parsed: Array<[number, number]> = [];
-    const metricPattern = new RegExp(
-      String.raw`^${escapeRegex(USER_METRIC_PREFIX)}(\d+)\.${escapeRegex(metricSuffix)}$`,
+      .all(this.guildId, `${USER_METRIC_PREFIX}%.${suffix}`) as MetricRow[];
+    const pattern = new RegExp(
+      String.raw`^${escapeRegex(USER_METRIC_PREFIX)}(\d+)\.${escapeRegex(suffix)}$`,
     );
-
+    const parsed: Array<[string, number]> = [];
+    const userIds = new Set<string>();
     for (const row of rows) {
-      const match = metricPattern.exec(String(row.metric_key));
-      if (!match?.[1]) {
-        continue;
-      }
-
-      const userId = coerceInt(match[1], 0, 1);
+      const match = pattern.exec(row.metric_key);
       const value = coerceInt(row.metric_value, 0, 0);
-      if (userId <= 0 || value <= 0) {
-        continue;
+      if (match?.[1]) {
+        userIds.add(match[1]);
       }
-
-      parsed.push([userId, value]);
+      if (match?.[1] && value > 0) {
+        parsed.push([match[1], value]);
+      }
     }
-
-    parsed.sort((left, right) => {
-      if (right[1] !== left[1]) {
-        return right[1] - left[1];
+    const shadowedLegacyIds = new Set<string>();
+    for (const userId of userIds) {
+      const legacyUserId = legacyRoundedUserId(userId);
+      if (legacyUserId !== null && userIds.has(legacyUserId)) {
+        shadowedLegacyIds.add(legacyUserId);
       }
-      return left[0] - right[0];
-    });
-
-    return parsed.slice(0, safeLimit);
+    }
+    parsed.sort((left, right) =>
+      right[1] !== left[1]
+        ? right[1] - left[1]
+        : left[0].localeCompare(right[0]),
+    );
+    return parsed
+      .filter(([userId]) => !shadowedLegacyIds.has(userId))
+      .slice(0, safeLimit);
   }
 
   public mergeUserMetricBackfill(
-    scannedCounts: Record<number, number>,
+    scannedCounts: Record<string, number>,
     metricName: string,
   ): [number, number] {
     let usersSeen = 0;
     let updated = 0;
-
-    for (const [userIdRaw, scannedValueRaw] of Object.entries(scannedCounts)) {
-      const userId = coerceInt(userIdRaw, 0);
-      const scannedValue = coerceInt(scannedValueRaw, 0);
-      if (userId <= 0 || scannedValue <= 0) {
+    for (const [userId, scannedRaw] of Object.entries(scannedCounts)) {
+      const scanned = coerceInt(scannedRaw, 0);
+      if (!isPositiveNumericId(userId) || scanned <= 0) {
         continue;
       }
-
       usersSeen += 1;
-      const metricKey = this.buildUserMetricKey(userId, metricName);
-      const existingValue = coerceInt(this.metricsGet(metricKey, "0"), 0);
-      const mergedValue = Math.max(existingValue, scannedValue);
-      if (mergedValue > existingValue) {
-        this.metricsSet(metricKey, String(mergedValue));
+      const key = this.buildUserMetricKey(userId, metricName);
+      this.seedExactUserMetricFromLegacy(key);
+      const existing = coerceInt(this.metricsGet(key, "0"), 0);
+      if (scanned > existing) {
+        this.metricsSet(key, scanned);
         updated += 1;
       }
     }
-
     return [usersSeen, updated];
   }
 
@@ -392,52 +1015,41 @@ export class CourtStorage {
     includeClosed = true,
     limit: number | null = null,
   ): PostRecord[] {
-    let query = "SELECT * FROM posts";
-    const params: unknown[] = [];
-
+    let sql = "SELECT * FROM posts WHERE guild_id = ?";
+    const params: unknown[] = [this.guildId];
     if (!includeClosed) {
-      query += " WHERE closed = 0";
+      sql += " AND closed = 0";
     }
-
-    let shouldReverse = false;
+    let reverse = false;
     if (limit === null) {
-      query += " ORDER BY posted_at ASC";
+      sql += " ORDER BY julianday(posted_at) ASC, message_id ASC";
     } else {
-      query += " ORDER BY posted_at DESC LIMIT ?";
-      params.push(limit);
-      shouldReverse = true;
+      sql += " ORDER BY julianday(posted_at) DESC, message_id DESC LIMIT ?";
+      params.push(coerceInt(limit, POST_RECORD_LIMIT, 1));
+      reverse = true;
     }
-
-    const rows = this.db.prepare(query).all(...params) as PostRow[];
-    const parsed = rows.map(parsePostRow);
-
-    if (shouldReverse) {
-      parsed.reverse();
-    }
-
-    return parsed;
+    const result = (this.db.prepare(sql).all(...params) as PostRow[]).map(
+      parsePostRow,
+    );
+    return reverse ? result.reverse() : result;
   }
 
   public getPostRecord(messageId: number | string): PostRecord | null {
     const row = this.db
-      .prepare("SELECT * FROM posts WHERE message_id = ?")
-      .get(String(messageId)) as PostRow | undefined;
-    if (!row) {
-      return null;
-    }
-    return parsePostRow(row);
+      .prepare("SELECT * FROM posts WHERE guild_id = ? AND message_id = ?")
+      .get(this.guildId, String(messageId)) as PostRow | undefined;
+    return row ? parsePostRow(row) : null;
   }
 
   public getLatestOpenPost(): PostRecord | null {
     const row = this.db
       .prepare(
-        "SELECT * FROM posts WHERE closed = 0 ORDER BY posted_at DESC LIMIT 1",
+        `SELECT * FROM posts
+         WHERE guild_id = ? AND closed = 0
+         ORDER BY julianday(posted_at) DESC, message_id DESC LIMIT 1`,
       )
-      .get() as PostRow | undefined;
-    if (!row) {
-      return null;
-    }
-    return parsePostRow(row);
+      .get(this.guildId) as PostRow | undefined;
+    return row ? parsePostRow(row) : null;
   }
 
   public updatePostThreadId(
@@ -445,24 +1057,20 @@ export class CourtStorage {
     threadId: number | string,
   ): void {
     const record = this.getPostRecord(messageId);
-    if (!record) {
-      return;
+    if (record) {
+      record.thread_id = String(threadId);
+      this.upsertPostRow(record);
     }
-
-    record.thread_id = String(threadId);
-    this.upsertPostRow(record);
   }
 
   public markPostClosed(messageId: number | string, reason: string): void {
     const record = this.getPostRecord(messageId);
-    if (!record) {
-      return;
+    if (record) {
+      record.closed = true;
+      record.closed_at = this.nowIso();
+      record.close_reason = reason;
+      this.upsertPostRow(record);
     }
-
-    record.closed = true;
-    record.closed_at = isoNow(this.config.timezoneName);
-    record.close_reason = reason;
-    this.upsertPostRow(record);
   }
 
   public markPostOpen(
@@ -473,7 +1081,6 @@ export class CourtStorage {
     if (!record) {
       return null;
     }
-
     record.closed = false;
     record.closed_at = null;
     record.close_reason = null;
@@ -484,7 +1091,6 @@ export class CourtStorage {
         1,
       );
     }
-
     this.upsertPostRow(record);
     return record;
   }
@@ -497,7 +1103,6 @@ export class CourtStorage {
     if (!record) {
       return null;
     }
-
     record.close_after_hours = coerceInt(
       closeAfterHours,
       THREAD_CLOSE_HOURS,
@@ -508,33 +1113,33 @@ export class CourtStorage {
   }
 
   public countAnswersForQuestion(questionMessageId: number | string): number {
-    const row = this.db
-      .prepare(
-        "SELECT COUNT(*) AS c FROM answers WHERE question_message_id = ?",
-      )
-      .get(String(questionMessageId)) as CountRow | undefined;
-
-    return row?.c ?? 0;
+    return this.readCount(
+      "SELECT COUNT(*) AS count FROM answers WHERE guild_id = ? AND question_message_id = ?",
+      this.guildId,
+      String(questionMessageId),
+    );
   }
 
   public countAllAnswerRecords(): number {
-    const row = this.db.prepare("SELECT COUNT(*) AS c FROM answers").get() as
-      | CountRow
-      | undefined;
-    return row?.c ?? 0;
+    return this.readCount(
+      "SELECT COUNT(*) AS count FROM answers WHERE guild_id = ?",
+      this.guildId,
+    );
   }
 
   public hasUserAnswered(
     questionMessageId: number | string,
     userId: number | string,
   ): boolean {
-    const row = this.db
-      .prepare(
-        "SELECT COUNT(*) AS c FROM answers WHERE question_message_id = ? AND user_id = ?",
-      )
-      .get(String(questionMessageId), String(userId)) as CountRow | undefined;
-
-    return (row?.c ?? 0) > 0;
+    return (
+      this.readCount(
+        `SELECT COUNT(*) AS count FROM answers
+         WHERE guild_id = ? AND question_message_id = ? AND user_id = ?`,
+        this.guildId,
+        String(questionMessageId),
+        String(userId),
+      ) > 0
+    );
   }
 
   public nextAnswerNumber(questionMessageId: number | string): number {
@@ -546,51 +1151,47 @@ export class CourtStorage {
     userId: number | string,
     answerMessageId: number | string,
   ): void {
-    const nowIso = isoNow(this.config.timezoneName);
-
-    this.db
-      .prepare(
-        `
-        INSERT INTO answers (question_message_id, user_id, answer_message_id, created_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(question_message_id, user_id) DO UPDATE SET
-          answer_message_id = excluded.answer_message_id,
-          created_at = excluded.created_at
-      `,
-      )
-      .run(
-        String(questionMessageId),
-        String(userId),
-        String(answerMessageId),
-        nowIso,
+    const now = this.nowIso();
+    const mark = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO answers (
+             guild_id, question_message_id, user_id, answer_message_id, created_at
+           ) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(guild_id, question_message_id, user_id) DO UPDATE SET
+             answer_message_id = excluded.answer_message_id,
+             created_at = excluded.created_at`,
+        )
+        .run(
+          this.guildId,
+          String(questionMessageId),
+          String(userId),
+          String(answerMessageId),
+          now,
+        );
+      this.db
+        .prepare(
+          `INSERT INTO anon_cooldowns (guild_id, user_id, last_answer_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(guild_id, user_id) DO UPDATE SET
+             last_answer_at = excluded.last_answer_at`,
+        )
+        .run(this.guildId, String(userId), now);
+      this.metricsIncrement(
+        this.buildUserMetricKey(userId, "anonymous_answers_sent"),
       );
-
-    this.db
-      .prepare(
-        `
-        INSERT INTO anon_cooldowns (user_id, last_answer_at)
-        VALUES (?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-          last_answer_at = excluded.last_answer_at
-      `,
-      )
-      .run(String(userId), nowIso);
-
-    this.metricsIncrement(
-      this.buildUserMetricKey(userId, "anonymous_answers_sent"),
-    );
+    });
+    mark.immediate();
   }
 
   public getLastAnswerTimeForUser(userId: number | string): string | null {
     const row = this.db
-      .prepare("SELECT last_answer_at FROM anon_cooldowns WHERE user_id = ?")
-      .get(String(userId)) as CooldownRow | undefined;
-
-    if (!row) {
-      return null;
-    }
-
-    return String(row.last_answer_at);
+      .prepare(
+        `SELECT user_id, last_answer_at FROM anon_cooldowns
+         WHERE guild_id = ? AND user_id = ?`,
+      )
+      .get(this.guildId, String(userId)) as CooldownRow | undefined;
+    return row ? String(row.last_answer_at) : null;
   }
 
   public recordAnswerMetric(): void {
@@ -598,40 +1199,36 @@ export class CourtStorage {
   }
 
   public purgeExpiredAnswers(retentionDays: number): number {
-    const effectiveDays = Math.max(1, coerceInt(retentionDays, 90, 1));
-    const cutoff = DateTime.fromISO(isoNow(this.config.timezoneName))
-      .minus({ days: effectiveDays })
-      .toISO();
+    const days = Math.max(1, coerceInt(retentionDays, 90, 1));
+    const cutoff = DateTime.fromISO(this.nowIso()).minus({ days }).toISO();
     if (!cutoff) {
       return 0;
     }
-
-    const row = this.db
-      .prepare("SELECT COUNT(*) AS c FROM answers WHERE created_at < ?")
-      .get(cutoff) as CountRow | undefined;
-    const removed = row?.c ?? 0;
-    if (removed > 0) {
-      this.db.prepare("DELETE FROM answers WHERE created_at < ?").run(cutoff);
-    }
-
-    return removed;
+    const result = this.db
+      .prepare(
+        `DELETE FROM answers
+         WHERE guild_id = ?
+           AND julianday(created_at) < julianday(?)`,
+      )
+      .run(this.guildId, cutoff);
+    return Number(result.changes);
   }
 
   public findAnswerRecord(answerMessageId: string): AnswerRecordRow | null {
     const row = this.db
       .prepare(
-        "SELECT question_message_id, user_id FROM answers WHERE answer_message_id = ?",
+        `SELECT question_message_id, user_id FROM answers
+         WHERE guild_id = ? AND answer_message_id = ?`,
       )
-      .get(String(answerMessageId)) as AnswerRecordRow | undefined;
-
-    if (!row) {
-      return null;
-    }
-
-    return {
-      question_message_id: String(row.question_message_id),
-      user_id: String(row.user_id),
-    };
+      .get(this.guildId, String(answerMessageId)) as
+      | AnswerRecordRow
+      | undefined;
+    return row
+      ? {
+          question_message_id: String(row.question_message_id),
+          user_id: String(row.user_id),
+        }
+      : null;
   }
 
   public removeAnswerRecord(answerMessageId: string): AnswerRecordRow | null {
@@ -639,10 +1236,11 @@ export class CourtStorage {
     if (!match) {
       return null;
     }
-
     this.db
-      .prepare("DELETE FROM answers WHERE answer_message_id = ?")
-      .run(String(answerMessageId));
+      .prepare(
+        "DELETE FROM answers WHERE guild_id = ? AND answer_message_id = ?",
+      )
+      .run(this.guildId, String(answerMessageId));
     return match;
   }
 
@@ -659,22 +1257,14 @@ export class CourtStorage {
   ): void {
     this.metricsIncrement(`posts_by_category.${category}`);
     this.metricsIncrement("posts_total");
-
     if (source === "auto") {
       this.metricsIncrement("posts_auto");
-      this.metricsSet(
-        "last_successful_auto_post",
-        isoNow(this.config.timezoneName),
-      );
-      return;
-    }
-
-    if (source === "manual") {
+      this.metricsSet("last_successful_auto_post", this.nowIso());
+    } else if (source === "manual") {
       this.metricsIncrement("posts_manual");
-      return;
+    } else {
+      this.metricsIncrement("custom_posts");
     }
-
-    this.metricsIncrement("custom_posts");
   }
 
   public registerUsedQuestion(question: string): void {
@@ -693,11 +1283,9 @@ export class CourtStorage {
   ): [string, string] {
     const questions = this.getQuestions();
     const state = this.getState();
-
     const recent = new Set(state.history.slice(-HISTORY_LIMIT));
     const used = new Set(state.used_questions);
     const pool: Array<[string, string]> = [];
-
     if (category) {
       for (const question of questions[category] ?? []) {
         pool.push([category, question]);
@@ -709,41 +1297,34 @@ export class CourtStorage {
         }
       }
     }
-
     if (pool.length === 0) {
-      throw new Error("No questions found in data/bootstrap/questions.json");
+      throw new Error("No questions are configured for this guild");
     }
-
     let unused = pool.filter((entry) => !used.has(entry[1]));
     if (unused.length === 0) {
       state.used_questions = [];
       this.saveState(state);
       unused = [...pool];
     }
-
-    const filtered = unused.filter((entry) => !recent.has(entry[1]));
-    const finalPool = filtered.length > 0 ? filtered : unused;
-
+    const withoutRecent = unused.filter((entry) => !recent.has(entry[1]));
+    const finalPool = withoutRecent.length > 0 ? withoutRecent : unused;
     const selectedIndex = randomize ? randomInt(finalPool.length) : 0;
     const selected = finalPool[selectedIndex] ?? finalPool[0];
     if (!selected) {
-      throw new Error("No questions found in data/bootstrap/questions.json");
+      throw new Error("No questions are configured for this guild");
     }
-
     return selected;
   }
 
   public upsertPostRow(record: Partial<PostRecord>): void {
-    const messageId = String(record.message_id ?? "").trim();
-    const channelId = String(record.channel_id ?? "").trim();
-    if (!/^\d+$/.test(messageId) || !/^\d+$/.test(channelId)) {
+    const messageId = numericId(record.message_id);
+    const channelId = numericId(record.channel_id);
+    if (!messageId || !channelId) {
       return;
     }
-
-    const threadIdRaw = String(record.thread_id ?? "").trim();
-    const threadId = /^\d+$/.test(threadIdRaw) ? threadIdRaw : null;
-
+    const threadId = numericId(record.thread_id);
     const values = {
+      guild_id: this.guildId,
       message_id: messageId,
       thread_id: threadId,
       channel_id: channelId,
@@ -751,219 +1332,370 @@ export class CourtStorage {
       question:
         String(record.question ?? "Unknown question").trim() ||
         "Unknown question",
-      posted_at:
-        String(record.posted_at ?? isoNow(this.config.timezoneName)).trim() ||
-        isoNow(this.config.timezoneName),
+      posted_at: String(record.posted_at ?? this.nowIso()).trim() || this.nowIso(),
       close_after_hours: coerceInt(
         record.close_after_hours,
         THREAD_CLOSE_HOURS,
         1,
       ),
       closed: record.closed ? 1 : 0,
-      closed_at: record.closed_at ? String(record.closed_at) : null,
-      close_reason: record.close_reason ? String(record.close_reason) : null,
+      closed_at: optionalString(record.closed_at),
+      close_reason: optionalString(record.close_reason),
     };
-
     this.db
       .prepare(
-        `
-        INSERT INTO posts (
-          message_id, thread_id, channel_id, category, question, posted_at,
-          close_after_hours, closed, closed_at, close_reason
-        ) VALUES (@message_id, @thread_id, @channel_id, @category, @question, @posted_at,
-                  @close_after_hours, @closed, @closed_at, @close_reason)
-        ON CONFLICT(message_id) DO UPDATE SET
-          thread_id = excluded.thread_id,
-          channel_id = excluded.channel_id,
-          category = excluded.category,
-          question = excluded.question,
-          posted_at = excluded.posted_at,
-          close_after_hours = excluded.close_after_hours,
-          closed = excluded.closed,
-          closed_at = excluded.closed_at,
-          close_reason = excluded.close_reason
-      `,
+        `INSERT INTO posts (
+           guild_id, message_id, thread_id, channel_id, category, question,
+           posted_at, close_after_hours, closed, closed_at, close_reason
+         ) VALUES (
+           @guild_id, @message_id, @thread_id, @channel_id, @category, @question,
+           @posted_at, @close_after_hours, @closed, @closed_at, @close_reason
+         )
+         ON CONFLICT(guild_id, message_id) DO UPDATE SET
+           thread_id = excluded.thread_id,
+           channel_id = excluded.channel_id,
+           category = excluded.category,
+           question = excluded.question,
+           posted_at = excluded.posted_at,
+           close_after_hours = excluded.close_after_hours,
+           closed = excluded.closed,
+           closed_at = excluded.closed_at,
+           close_reason = excluded.close_reason`,
       )
       .run(values);
+  }
+
+  public exportData(): GuildDataExport {
+    const metadata = this.root.getGuild(this.guildId);
+    if (!metadata) {
+      throw new Error(`Guild ${this.guildId} is not configured`);
+    }
+    const state = this.getState();
+    const questions = this.getQuestions();
+    const kv = this.db
+      .prepare(
+        `SELECT key, value, updated_at FROM kv
+         WHERE guild_id = ? ORDER BY key`,
+      )
+      .all(this.guildId) as Array<{
+      key: string;
+      value: string;
+      updated_at: string;
+    }>;
+    const answers = this.db
+      .prepare(
+        `SELECT question_message_id, user_id, answer_message_id, created_at
+         FROM answers WHERE guild_id = ?
+         ORDER BY question_message_id, user_id`,
+      )
+      .all(this.guildId) as AnswerRow[];
+    const metrics = this.db
+      .prepare(
+        `SELECT metric_key, metric_value, updated_at FROM metrics
+         WHERE guild_id = ? ORDER BY metric_key`,
+      )
+      .all(this.guildId) as MetricRow[];
+    const cooldowns = this.db
+      .prepare(
+        `SELECT user_id, last_answer_at FROM anon_cooldowns
+         WHERE guild_id = ? ORDER BY user_id`,
+      )
+      .all(this.guildId) as CooldownRow[];
+    return {
+      formatVersion: 1,
+      guildId: this.guildId,
+      exportedAt: utcNow(),
+      metadata,
+      settings: this.getSettings(),
+      state,
+      questions,
+      kv: kv.map(
+        (row): GuildKvExport => ({
+          key: String(row.key),
+          value: String(row.value),
+          updatedAt: String(row.updated_at),
+        }),
+      ),
+      posts: this.listPostRecords(),
+      answers: answers.map(
+        (row): GuildAnswerExport => ({
+          questionMessageId: String(row.question_message_id),
+          userId: String(row.user_id),
+          answerMessageId: String(row.answer_message_id),
+          createdAt: String(row.created_at),
+        }),
+      ),
+      metrics: metrics.map(
+        (row): GuildMetricExport => ({
+          key: String(row.metric_key),
+          value: String(row.metric_value),
+          updatedAt: String(row.updated_at),
+        }),
+      ),
+      cooldowns: cooldowns.map(
+        (row): GuildCooldownExport => ({
+          userId: String(row.user_id),
+          lastAnswerAt: String(row.last_answer_at),
+        }),
+      ),
+    };
+  }
+
+  public importData(payload: unknown): void {
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      (payload as Partial<GuildDataExport>).formatVersion !== 1 ||
+      (payload as Partial<GuildDataExport>).guildId !== this.guildId
+    ) {
+      throw new Error("Guild import payload does not belong to this guild");
+    }
+    const rawCandidate = payload as Partial<GuildDataExport>;
+    if (
+      !rawCandidate.settings ||
+      !rawCandidate.state ||
+      !rawCandidate.questions ||
+      !rawCandidate.metadata ||
+      !Array.isArray(rawCandidate.kv) ||
+      !Array.isArray(rawCandidate.posts) ||
+      !Array.isArray(rawCandidate.answers) ||
+      !Array.isArray(rawCandidate.metrics) ||
+      !Array.isArray(rawCandidate.cooldowns)
+    ) {
+      throw new TypeError("Guild import payload is incomplete");
+    }
+
+    // Check untrusted identifier values before parsing the rest of the payload
+    // so a JSON number can never be coerced into a rounded snowflake string.
+    for (const post of rawCandidate.posts) {
+      if (!post || typeof post !== "object") {
+        throw new TypeError("Imported post must be an object");
+      }
+      assertNumericRowId(post.message_id, "post message ID");
+      assertNumericRowId(post.channel_id, "post channel ID");
+      if (post.thread_id !== null) {
+        assertNumericRowId(post.thread_id, "post thread ID");
+      }
+    }
+    for (const answer of rawCandidate.answers) {
+      if (!answer || typeof answer !== "object") {
+        throw new TypeError("Imported answer must be an object");
+      }
+      assertNumericRowId(answer.questionMessageId, "question message ID");
+      assertNumericRowId(answer.userId, "answer user ID");
+      assertNumericRowId(answer.answerMessageId, "answer message ID");
+    }
+    for (const cooldown of rawCandidate.cooldowns) {
+      if (!cooldown || typeof cooldown !== "object") {
+        throw new TypeError("Imported cooldown must be an object");
+      }
+      assertNumericRowId(cooldown.userId, "cooldown user ID");
+    }
+
+    const candidate = GUILD_DATA_IMPORT_SCHEMA.parse(payload);
+    if (!isDeepStrictEqual(candidate.settings, rawCandidate.settings)) {
+      throw new TypeError(
+        "Guild import settings must already be normalized without coercion",
+      );
+    }
+    if (candidate.metadata.guildId !== this.guildId) {
+      throw new Error("Guild import metadata does not belong to this guild");
+    }
+    if (candidate.metadata.enabled !== candidate.settings.enabled) {
+      throw new TypeError("Guild import enabled metadata is inconsistent");
+    }
+    validateUniqueImportRows(candidate);
+    validateSpecialKvSnapshots(candidate);
+
+    const settings = candidate.settings;
+    // An export can contain bindings which have since been deleted or moved.
+    // Keep restores inert until an administrator validates the imported
+    // configuration against the current Discord guild and enables it again.
+    settings.enabled = false;
+
+    const applyImport = this.db.transaction(() => {
+      // Disable inside the same transaction before replacing configuration.
+      // Ordinary configuration writes intentionally preserve the current
+      // enabled state, while imports must always restore into an inert guild.
+      this.root.setGuildEnabled(this.guildId, false);
+      for (const table of [
+        "kv",
+        "posts",
+        "answers",
+        "metrics",
+        "anon_cooldowns",
+      ]) {
+        this.db
+          .prepare(`DELETE FROM ${quoteIdentifier(table)} WHERE guild_id = ?`)
+          .run(this.guildId);
+      }
+      this.root.saveGuildSettings(this.guildId, settings);
+      const insertKv = this.db.prepare(
+        `INSERT INTO kv (guild_id, key, value, updated_at)
+         VALUES (?, ?, ?, ?)`,
+      );
+      for (const row of candidate.kv) {
+        insertKv.run(
+          this.guildId,
+          row.key,
+          row.value,
+          row.updatedAt,
+        );
+      }
+
+      // kv.state and kv.questions are restored byte-for-byte above. The
+      // top-level state/questions fields are validated semantic snapshots,
+      // while kv remains authoritative for persistence and initialization.
+      const insertPost = this.db.prepare(
+        `INSERT INTO posts (
+           guild_id, message_id, thread_id, channel_id, category, question,
+           posted_at, close_after_hours, closed, closed_at, close_reason
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const post of candidate.posts) {
+        insertPost.run(
+          this.guildId,
+          post.message_id,
+          post.thread_id,
+          post.channel_id,
+          post.category,
+          post.question,
+          post.posted_at,
+          post.close_after_hours,
+          post.closed ? 1 : 0,
+          post.closed_at,
+          post.close_reason,
+        );
+      }
+      const insertAnswer = this.db.prepare(
+        `INSERT INTO answers (
+           guild_id, question_message_id, user_id, answer_message_id, created_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      );
+      for (const answer of candidate.answers) {
+        insertAnswer.run(
+          this.guildId,
+          answer.questionMessageId,
+          answer.userId,
+          answer.answerMessageId,
+          answer.createdAt,
+        );
+      }
+      const insertMetric = this.db.prepare(
+        `INSERT INTO metrics (
+           guild_id, metric_key, metric_value, updated_at
+         ) VALUES (?, ?, ?, ?)`,
+      );
+      for (const metric of candidate.metrics) {
+        insertMetric.run(
+          this.guildId,
+          metric.key,
+          metric.value,
+          metric.updatedAt,
+        );
+      }
+      const insertCooldown = this.db.prepare(
+        `INSERT INTO anon_cooldowns (guild_id, user_id, last_answer_at)
+         VALUES (?, ?, ?)`,
+      );
+      for (const cooldown of candidate.cooldowns) {
+        insertCooldown.run(
+          this.guildId,
+          cooldown.userId,
+          cooldown.lastAnswerAt,
+        );
+      }
+    });
+    applyImport.immediate();
   }
 
   private metricsGetPrefixed(prefix: string): Record<string, number> {
     const rows = this.db
       .prepare(
-        "SELECT metric_key, metric_value FROM metrics WHERE metric_key LIKE ?",
+        `SELECT metric_key, metric_value, updated_at FROM metrics
+         WHERE guild_id = ? AND substr(metric_key, 1, ?) = ?`,
       )
-      .all(`${prefix}%`) as MetricRow[];
-
+      .all(this.guildId, prefix.length, prefix) as MetricRow[];
     const result: Record<string, number> = {};
     for (const row of rows) {
       const suffix = row.metric_key.slice(prefix.length);
-      if (!suffix) {
-        continue;
+      if (suffix) {
+        result[suffix] = coerceInt(row.metric_value, 0, 0);
       }
-      result[suffix] = coerceInt(row.metric_value, 0, 0);
     }
     return result;
   }
 
+  private getStoredMetricValue(key: string): string | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT metric_value FROM metrics WHERE guild_id = ? AND metric_key = ?",
+      )
+      .get(this.guildId, key) as { metric_value: string } | undefined;
+    return row ? String(row.metric_value) : undefined;
+  }
+
+  private seedExactUserMetricFromLegacy(key: string): void {
+    const legacyKey = legacyRoundedUserMetricKey(key);
+    if (legacyKey === null) {
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO metrics (
+           guild_id, metric_key, metric_value, updated_at
+         )
+         SELECT guild_id, ?, metric_value, updated_at
+         FROM metrics
+         WHERE guild_id = ? AND metric_key = ?`,
+      )
+      .run(key, this.guildId, legacyKey);
+  }
+
   private dbHasKey(key: string): boolean {
     const row = this.db
-      .prepare("SELECT 1 AS one FROM kv WHERE key = ?")
-      .get(key) as { one: number } | undefined;
+      .prepare("SELECT 1 AS found FROM kv WHERE guild_id = ? AND key = ?")
+      .get(this.guildId, key) as { found: number } | undefined;
     return Boolean(row);
   }
 
   private dbGetJson(key: string, defaultValue: unknown): unknown {
     const row = this.db
-      .prepare("SELECT value FROM kv WHERE key = ?")
-      .get(key) as JsonRow | undefined;
+      .prepare("SELECT value FROM kv WHERE guild_id = ? AND key = ?")
+      .get(this.guildId, key) as JsonRow | undefined;
     if (!row) {
-      this.dbSetJson(key, defaultValue);
       return defaultValue;
     }
-
     try {
       return JSON.parse(row.value);
-    } catch {
-      this.dbSetJson(key, defaultValue);
-      return defaultValue;
+    } catch (error) {
+      throw new TypeError(
+        `Guild ${this.guildId} ${key} contains invalid JSON`,
+        { cause: error },
+      );
     }
   }
 
   private dbSetJson(key: string, data: unknown): void {
-    const payload = JSON.stringify(data, null, 2);
-
     this.db
       .prepare(
-        `
-        INSERT INTO kv (key, value, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET
-          value = excluded.value,
-          updated_at = excluded.updated_at
-      `,
+        `INSERT INTO kv (guild_id, key, value, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(guild_id, key) DO UPDATE SET
+           value = excluded.value,
+           updated_at = excluded.updated_at`,
       )
-      .run(key, payload, isoNow(this.config.timezoneName));
+      .run(this.guildId, key, JSON.stringify(data), this.nowIso());
   }
 
-  private maybeMigrateJsonFiles(): void {
-    for (const [fileName, key] of Object.entries(STORAGE_JSON_KEYS)) {
-      if (this.dbHasKey(key)) {
-        continue;
-      }
-
-      const filePath = path.join(this.repoRoot, fileName);
-      if (!fs.existsSync(filePath)) {
-        continue;
-      }
-
-      try {
-        const raw = fs.readFileSync(filePath, "utf-8");
-        const parsed = JSON.parse(raw);
-        if (typeof parsed === "object" && parsed !== null) {
-          this.dbSetJson(key, parsed);
-        }
-      } catch {
-        continue;
-      }
-    }
-  }
-
-  private migrateStructuredTables(): void {
-    const postsCount = this.readCount("SELECT COUNT(*) AS c FROM posts");
-    const answersCount = this.readCount("SELECT COUNT(*) AS c FROM answers");
-    const metricsCount = this.readCount("SELECT COUNT(*) AS c FROM metrics");
-
-    const state = this.dbGetJson("state", {}) as Record<string, unknown>;
-
-    if (postsCount === 0) {
-      const posts = Array.isArray(state.posts) ? state.posts : [];
-      for (const post of posts) {
-        if (typeof post === "object" && post !== null) {
-          this.upsertPostRow(post as Partial<PostRecord>);
-        }
-      }
-    }
-
-    const legacyAnswers = this.dbGetJson("answers", {});
-    if (
-      answersCount === 0 &&
-      typeof legacyAnswers === "object" &&
-      legacyAnswers !== null
-    ) {
-      this.migrateAnswersFromLegacyBlob(
-        legacyAnswers as Record<string, unknown>,
-      );
-    }
-
-    if (metricsCount === 0) {
-      const flattened = flattenMetricsForStorage(state.metrics ?? {});
-      for (const [metricKey, metricValue] of Object.entries(flattened)) {
-        this.metricsSet(metricKey, metricValue);
-      }
-    }
-  }
-
-  private migrateAnswersFromLegacyBlob(
-    legacyAnswers: Record<string, unknown>,
-  ): void {
-    const upsert = this.db.prepare(
-      `
-      INSERT INTO answers (question_message_id, user_id, answer_message_id, created_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(question_message_id, user_id) DO UPDATE SET
-        answer_message_id = excluded.answer_message_id,
-        created_at = excluded.created_at
-    `,
-    );
-
-    for (const [questionMessageId, bucketRaw] of Object.entries(
-      legacyAnswers,
-    )) {
-      if (typeof bucketRaw !== "object" || bucketRaw === null) {
-        continue;
-      }
-      const usersRaw = (bucketRaw as Record<string, unknown>).users;
-      if (typeof usersRaw !== "object" || usersRaw === null) {
-        continue;
-      }
-
-      for (const [userId, answerRaw] of Object.entries(
-        usersRaw as Record<string, unknown>,
-      )) {
-        if (typeof answerRaw !== "object" || answerRaw === null) {
-          continue;
-        }
-
-        const answer = answerRaw as Record<string, unknown>;
-        const answerMessageId =
-          toOptionalScalarString(answer.answer_message_id) ?? "";
-        const createdAt =
-          toOptionalScalarString(answer.created_at) ??
-          isoNow(this.config.timezoneName);
-        upsert.run(
-          String(questionMessageId),
-          String(userId),
-          answerMessageId,
-          createdAt,
-        );
-      }
-    }
-  }
-
-  private readCount(sql: string): number {
-    const row = this.db.prepare(sql).get() as CountRow | undefined;
-    return row?.c ?? 0;
+  private readCount(sql: string, ...params: unknown[]): number {
+    const row = this.db.prepare(sql).get(...params) as CountRow;
+    return Number(row.count);
   }
 
   private defaultStatePayload(): CourtState {
     return {
-      mode: "manual",
-      hour: 20,
-      minute: 0,
-      channel_id: this.config.courtChannelId,
-      log_channel_id: this.config.logChannelId,
       last_posted_date: null,
-      dry_run_auto_post: false,
       last_dry_run_date: null,
       last_weekly_digest_week: null,
       history: [],
@@ -974,6 +1706,22 @@ export class CourtStorage {
       metrics: ensureMetricsShape({}),
     };
   }
+
+  private nowIso(): string {
+    return isoNow(this.getSettings().timezone);
+  }
+}
+
+function parseGuildRow(row: GuildRow): GuildRecord {
+  return {
+    guildId: String(row.guild_id),
+    enabled: Boolean(row.enabled),
+    name: row.name === null ? null : String(row.name),
+    joinedAt: row.joined_at === null ? null : String(row.joined_at),
+    leftAt: row.left_at === null ? null : String(row.left_at),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
 }
 
 function parsePostRow(row: PostRow): PostRecord {
@@ -991,35 +1739,253 @@ function parsePostRow(row: PostRow): PostRecord {
   };
 }
 
-function dedupeStrings(values: string[]): string[] {
-  const deduped: string[] = [];
-  const seen = new Set<string>();
+function defaultQuestions(): Record<string, string[]> {
+  return {
+    general: [],
+    gaming: [],
+    music: [],
+    "hot-take": [],
+    chaos: [],
+  };
+}
 
+function normalizeGuildName(name: string | null): string | null {
+  if (name === null) {
+    return null;
+  }
+  const normalized = String(name).trim();
+  return normalized ? normalized.slice(0, 100) : null;
+}
+
+function normalizeObservedTimestamp(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  const normalized = String(value).trim();
+  const timestamp = Date.parse(normalized);
+  if (!normalized || !Number.isFinite(timestamp)) {
+    throw new TypeError("Observed guild join time must be a valid timestamp");
+  }
+  return new Date(timestamp).toISOString();
+}
+
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function dedupeStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function numericId(value: unknown): string | null {
+  const normalized = String(value ?? "").trim();
+  return /^\d+$/.test(normalized) ? normalized : null;
+}
+
+function isPositiveNumericId(value: string): boolean {
+  return /^\d+$/.test(value) && !/^0+$/.test(value);
+}
+
+function legacyRoundedUserId(userId: string): string | null {
+  if (!DISCORD_SNOWFLAKE_PATTERN.test(userId)) {
+    return null;
+  }
+  const parsed = Number.parseInt(userId, 10);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  const rounded = String(parsed);
+  return rounded === userId ? null : rounded;
+}
+
+function legacyRoundedUserMetricKey(key: string): string | null {
+  const pattern = new RegExp(
+    String.raw`^${escapeRegex(USER_METRIC_PREFIX)}(\d+)\.(.+)$`,
+  );
+  const match = pattern.exec(key);
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+  const legacyUserId = legacyRoundedUserId(match[1]);
+  return legacyUserId === null
+    ? null
+    : `${USER_METRIC_PREFIX}${legacyUserId}.${match[2]}`;
+}
+
+function assertNumericRowId(value: unknown, label: string): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    !DISCORD_SNOWFLAKE_PATTERN.test(value)
+  ) {
+    throw new TypeError(`${label} must be a Discord snowflake string`);
+  }
+}
+
+function validateUniqueImportRows(candidate: GuildDataExport): void {
+  assertUniqueImportKeys(
+    candidate.kv.map((row) => row.key),
+    "kv key",
+  );
+  assertUniqueImportKeys(
+    candidate.posts.map((post) => post.message_id),
+    "post message ID",
+  );
+  assertUniqueImportKeys(
+    candidate.answers.map((answer) =>
+      JSON.stringify([answer.questionMessageId, answer.userId]),
+    ),
+    "answer question/user key",
+  );
+  assertUniqueImportKeys(
+    candidate.metrics.map((metric) => metric.key),
+    "metric key",
+  );
+  assertUniqueImportKeys(
+    candidate.cooldowns.map((cooldown) => cooldown.userId),
+    "cooldown user ID",
+  );
+}
+
+function assertUniqueImportKeys(values: string[], label: string): void {
+  const seen = new Set<string>();
   for (const value of values) {
     if (seen.has(value)) {
-      continue;
+      throw new TypeError(`Imported ${label} must be unique`);
     }
     seen.add(value);
-    deduped.push(value);
+  }
+}
+
+function validateSpecialKvSnapshots(candidate: GuildDataExport): void {
+  const stateRow = candidate.kv.find((row) => row.key === "state");
+  const rawState = stateRow
+    ? parseImportJsonObject(stateRow.value, "kv.state")
+    : {};
+  const expectedMutableState = {
+    last_posted_date: optionalString(rawState.last_posted_date),
+    last_dry_run_date: optionalString(rawState.last_dry_run_date),
+    last_weekly_digest_week: optionalString(rawState.last_weekly_digest_week),
+    history: stringArray(rawState.history).slice(-HISTORY_LIMIT),
+    used_questions: dedupeStrings(stringArray(rawState.used_questions)),
+    royal_presence: ensureRoyalPresenceShape(rawState.royal_presence),
+    royal_afk: ensureRoyalAfkShape(rawState.royal_afk),
+  };
+  const importedMutableState = {
+    last_posted_date: candidate.state.last_posted_date,
+    last_dry_run_date: candidate.state.last_dry_run_date,
+    last_weekly_digest_week: candidate.state.last_weekly_digest_week,
+    history: candidate.state.history,
+    used_questions: candidate.state.used_questions,
+    royal_presence: candidate.state.royal_presence,
+    royal_afk: candidate.state.royal_afk,
+  };
+  if (!isDeepStrictEqual(importedMutableState, expectedMutableState)) {
+    throw new TypeError("Guild import state snapshot does not match kv.state");
   }
 
-  return deduped;
+  const questionsRow = candidate.kv.find((row) => row.key === "questions");
+  const expectedQuestions = defaultQuestions();
+  if (questionsRow) {
+    const rawQuestions = parseImportJsonObject(
+      questionsRow.value,
+      "kv.questions",
+    );
+    for (const [category, items] of Object.entries(rawQuestions)) {
+      if (
+        !Array.isArray(items) ||
+        items.some((item) => typeof item !== "string")
+      ) {
+        throw new TypeError(
+          `Guild import kv.questions category ${category} must be an array of strings`,
+        );
+      }
+      expectedQuestions[category] = [...items];
+    }
+  }
+  if (!isDeepStrictEqual(candidate.questions, expectedQuestions)) {
+    throw new TypeError(
+      "Guild import questions snapshot does not match kv.questions",
+    );
+  }
+
+  const expectedPosts = candidate.posts.slice(-POST_RECORD_LIMIT);
+  if (!isDeepStrictEqual(candidate.state.posts, expectedPosts)) {
+    throw new TypeError(
+      "Guild import state posts snapshot does not match posts",
+    );
+  }
+
+  const expectedMetrics = metricsSnapshotFromImportRows(candidate.metrics);
+  if (!isDeepStrictEqual(candidate.state.metrics, expectedMetrics)) {
+    throw new TypeError(
+      "Guild import state metrics snapshot does not match metrics",
+    );
+  }
+}
+
+function metricsSnapshotFromImportRows(
+  rows: GuildMetricExport[],
+): MetricsShape {
+  const values = new Map(rows.map((row) => [row.key, row.value]));
+  const prefixed = (prefix: string): Record<string, number> => {
+    const result: Record<string, number> = {};
+    for (const row of rows) {
+      if (!row.key.startsWith(prefix)) {
+        continue;
+      }
+      const suffix = row.key.slice(prefix.length);
+      if (suffix) {
+        result[suffix] = coerceInt(row.value, 0, 0);
+      }
+    }
+    return result;
+  };
+  return ensureMetricsShape({
+    command_usage: prefixed("command_usage."),
+    command_failures: prefixed("command_failures."),
+    posts_by_category: prefixed("posts_by_category."),
+    posts_total: values.get("posts_total") ?? "0",
+    posts_auto: values.get("posts_auto") ?? "0",
+    posts_manual: values.get("posts_manual") ?? "0",
+    custom_posts: values.get("custom_posts") ?? "0",
+    answers_total: values.get("answers_total") ?? "0",
+    last_successful_auto_post:
+      values.get("last_successful_auto_post") || null,
+  });
+}
+
+function parseImportJsonObject(
+  raw: string,
+  label: string,
+): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new TypeError(`Guild import ${label} contains invalid JSON`, {
+      cause: error,
+    });
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new TypeError(`Guild import ${label} must contain a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function escapeRegex(value: string): string {
   return value.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 }
 
-function toOptionalScalarString(value: unknown): string | null {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (
-    typeof value === "number" ||
-    typeof value === "boolean" ||
-    typeof value === "bigint"
-  ) {
-    return String(value);
-  }
-  return null;
+function quoteIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function utcNow(): string {
+  return new Date().toISOString();
 }

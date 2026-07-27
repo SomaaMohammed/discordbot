@@ -27,8 +27,10 @@ coverage/
 
 # SQLite runtime data, backups, and logs
 court.db
+court.db-*
 *.db-wal
 *.db-shm
+*.db-journal
 backups/
 *.log
 ci_logs_extract/

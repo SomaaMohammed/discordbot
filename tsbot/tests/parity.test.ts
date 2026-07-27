@@ -30,13 +30,7 @@ import type { CourtState } from "../src/types.js";
 
 function baseState(): CourtState {
   return {
-    mode: "manual",
-    hour: 20,
-    minute: 0,
-    channel_id: 123,
-    log_channel_id: 456,
     last_posted_date: null,
-    dry_run_auto_post: false,
     last_dry_run_date: null,
     last_weekly_digest_week: null,
     history: [],
@@ -71,14 +65,26 @@ describe("parity helpers", () => {
   });
 
   it("extracts role panel ids from single and multi footer", () => {
-    expect(extractRolePanelRoleId(["RolePanelTarget:123456789"])).toBe(
-      123456789,
+    expect(
+      extractRolePanelRoleId(["RolePanelTarget:123456789012345678"]),
+    ).toBe(
+      "123456789012345678",
     );
     expect(
-      extractRolePanelRoleIdForSlot(["RolePanelTargets:1=111,2=222,3=333"], 2),
-    ).toBe(222);
+      extractRolePanelRoleIdForSlot(
+        [
+          "RolePanelTargets:1=111111111111111111,2=222222222222222222,3=333333333333333333",
+        ],
+        2,
+      ),
+    ).toBe("222222222222222222");
     expect(
-      extractRolePanelRoleIdForSlot(["RolePanelTargets:1=111,2=222,3=333"], 4),
+      extractRolePanelRoleIdForSlot(
+        [
+          "RolePanelTargets:1=111111111111111111,2=222222222222222222,3=333333333333333333",
+        ],
+        4,
+      ),
     ).toBeNull();
   });
 
@@ -91,13 +97,17 @@ describe("parity helpers", () => {
   });
 
   it("builds and parses role panel custom IDs with role metadata", () => {
-    const customId = buildRolePanelButtonCustomId("123456789");
+    const customId = buildRolePanelButtonCustomId("123456789012345678");
 
-    expect(customId).toBe("court:role_panel_claim:role:123456789");
+    expect(customId).toBe(
+      "court:role_panel_claim:role:123456789012345678",
+    );
     expect(buildRolePanelButtonCustomId("bad-role-id")).toBe(
       "court:role_panel_claim",
     );
-    expect(extractRolePanelRoleIdFromCustomId(customId)).toBe("123456789");
+    expect(extractRolePanelRoleIdFromCustomId(customId)).toBe(
+      "123456789012345678",
+    );
     expect(
       extractRolePanelRoleIdFromCustomId("court:role_panel_claim:2"),
     ).toBeNull();
@@ -208,12 +218,9 @@ describe("parity helpers", () => {
       123,
     );
 
-    expect(merged.mode).toBe("manual");
-    expect(merged.hour).toBe(23);
-    expect(merged.minute).toBe(0);
-    expect(merged.channel_id).toBe(123);
-    expect(merged.log_channel_id).toBe(456);
-    expect(merged.dry_run_auto_post).toBe(true);
+    expect(merged).not.toHaveProperty("mode");
+    expect(merged).not.toHaveProperty("channel_id");
+    expect(merged).not.toHaveProperty("dry_run_auto_post");
     expect(merged.history).toEqual(["first", "second"]);
     expect(merged.used_questions).toEqual(["same", "other"]);
     expect(merged.posts).toHaveLength(1);
@@ -226,8 +233,12 @@ describe("parity helpers", () => {
 
   it("matches lock and mention phrases", () => {
     expect(isEmperorLockTrigger("The Emperor is here")).toBe(true);
+    expect(isEmperorLockTrigger("The Sun King has arrived", "Sun King")).toBe(
+      true,
+    );
     expect(isSilenceLockTrigger("order in the court.")).toBe(true);
-    expect(hasEmperorMention("where is sammy")).toBe(true);
+    expect(hasEmperorMention("where is sammy")).toBe(false);
+    expect(hasEmperorMention("where is the sun king", "Sun King")).toBe(true);
     expect(hasEmpressMention("Her Majesty will arrive shortly")).toBe(true);
     expect(parseRoyalMentions("The Emperor and Empress have entered")).toEqual([
       "Emperor",
@@ -240,6 +251,14 @@ describe("parity helpers", () => {
       "@user being loud",
     );
     expect(parseReplyMuteMessage("hello there")).toBeNull();
+    expect(
+      parseReplyMuteMessage("court oracle: mute @user too loud", [
+        "court oracle",
+      ]),
+    ).toBe("@user too loud");
+    expect(
+      parseReplyMuteMessage("oracle.v2+: mute @user", ["oracle.v2+"]),
+    ).toBe("@user");
   });
 
   it("parses privileged invictus chat intents", () => {
@@ -270,6 +289,11 @@ describe("parity helpers", () => {
     );
     expect(parsePrivilegedInvictusChatIntent("invictus mute @user")).toBeNull();
     expect(parsePrivilegedInvictusChatIntent("hello there")).toBeNull();
+    expect(
+      parsePrivilegedInvictusChatIntent("court oracle, status report", [
+        "court oracle",
+      ]),
+    ).toBe("status");
   });
 
   it("marks public versus privileged invictus intents", () => {

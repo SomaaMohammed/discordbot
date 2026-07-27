@@ -1,12 +1,15 @@
 {
   "name": "imperial-court-bot",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "Active TypeScript runtime for Imperial Court Bot",
   "main": "dist/src/index.js",
   "scripts": {
     "check": "npm run typecheck && npm test && npm run build",
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
+    "config:check": "tsx src/config-check-cli.ts",
+    "db:check": "tsx src/storage/check-cli.ts",
+    "migrate": "tsx src/storage/migrate-cli.ts",
     "start": "node dist/src/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",

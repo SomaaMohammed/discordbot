@@ -3,6 +3,7 @@ import {
   AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   ComponentType,
   EmbedBuilder,
   ModalBuilder,
@@ -14,6 +15,7 @@ import {
   TextInputStyle,
   ThreadAutoArchiveDuration,
   type AnyThreadChannel,
+  type AutocompleteInteraction,
   type ButtonInteraction,
   type Channel,
   type ChatInputCommandInteraction,
@@ -21,21 +23,19 @@ import {
   type Message,
   type ModalSubmitInteraction,
   type SlashCommandSubcommandBuilder,
+  type SlashCommandSubcommandsOnlyBuilder,
   Role,
 } from "discord.js";
-import { existsSync, statSync } from "node:fs";
 import { DateTime, Duration } from "luxon";
 import {
   CATEGORY_DESCRIPTIONS,
   IMPERIAL_OMENS,
   POST_RECORD_LIMIT,
-  RIO_USER_ID,
   ROLE_PANEL_BUTTON_CUSTOM_ID,
   ROLE_PANEL_BUTTON_LABEL_MAX_LENGTH,
   ROLE_PANEL_DEFAULT_BUTTON_LABEL,
   ROLE_COLOR,
   ROLE_PANEL_MAX_BUTTONS,
-  TAYLOR_USER_ID,
   THREAD_CLOSE_HOURS,
   USER_FUN_METRIC_FIELDS,
   URL_PATTERN,
@@ -54,14 +54,29 @@ import {
   markBackfillFinished,
   markBackfillStarted,
   getPostCloseDeadline,
-  mergeImportedState,
   normalizeQuestionText,
   randomImperialTitle,
   randomImperialVerdict,
 } from "../parity.js";
 import { formatDuration, isoNow, parseIso } from "../time.js";
-import type { BotMode, PostRecord, RoyalTitle } from "../types.js";
-import type { BotRuntime } from "../runtime.js";
+import type {
+  BotMode,
+  GuildDataExport,
+  GuildSettings,
+  PostRecord,
+  RoyalTitle,
+} from "../types.js";
+import type {
+  BotRuntime as ProcessBotRuntime,
+  GuildRuntime,
+} from "../runtime.js";
+import {
+  buildSetupCommandDefinition,
+  handleSetupCommand,
+  requireSetupAdmin,
+} from "./setup.js";
+
+type BotRuntime = GuildRuntime;
 
 const COURT_COMMANDS = [
   "status",
@@ -120,8 +135,6 @@ const FUN_COMMANDS = [
   "title",
   "fate",
 ] as const;
-const GREETINGS_COMMANDS = ["rio", "taylor"] as const;
-
 const CATEGORY_CHOICES = Object.keys(CATEGORY_DESCRIPTIONS).map((category) => ({
   name: category,
   value: category,
@@ -133,11 +146,12 @@ const MSG_VERIFY_ROLES = "Could not verify your roles.";
 const MSG_BOT_CONTEXT_ERROR =
   "Could not verify bot permissions in this server.";
 const MSG_CONFIRM_REQUIRED = "Confirmation failed. Type `CONFIRM` exactly.";
+const MSG_RUNTIME_CANCELLED =
+  "Action cancelled because this server was disabled, removed, purged, or its configuration changed.";
 const PREVIEW_ISSUES_PREFIX = "\n\nPreview issues:\n";
 const MSG_QUESTION_EMPTY = "Question cannot be empty.";
 const MSG_INQUIRY_CLOSED = "This court inquiry is already closed.";
 const MSG_UNKNOWN_QUESTION = "Unknown question";
-const MSG_ROYAL_ONLY = "Only the Emperor or Empress can use this command.";
 const ANON_ANSWER_BUTTON_ID = "court:anonymous_answer";
 const ANON_MODAL_PREFIX = "court:anonymous_answer_modal:";
 const ANON_MODAL_INPUT_ID = "answer";
@@ -171,6 +185,16 @@ const NOT_MIGRATED_MESSAGE =
   "This command is not wired in the current TypeScript runtime build yet.";
 
 const STAFF_REQUIRED_COMMANDS = new Set<string>(["court", "questions"]);
+const COURT_ADMIN_SUBCOMMANDS = new Set<string>([
+  "dryrun",
+  "exportstate",
+  "importstate",
+  "mode",
+  "channel",
+  "logchannel",
+  "schedule",
+  "resethistory",
+]);
 
 type RuntimeCommandHandler = (
   interaction: ChatInputCommandInteraction,
@@ -212,6 +236,7 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<
       option
         .setName("channel")
         .setDescription("The channel to post in")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
         .setRequired(true),
     );
   },
@@ -220,6 +245,7 @@ const COURT_SUBCOMMAND_OPTION_BUILDERS: Partial<
       option
         .setName("channel")
         .setDescription("Leave empty to disable logging")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
         .setRequired(false),
     );
   },
@@ -506,16 +532,7 @@ const FUN_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
 };
 
 const GREETINGS_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
-  rio: async (interaction) => {
-    await interaction.reply({
-      content: `Hello <@${RIO_USER_ID}>. The court sends respect.`,
-    });
-  },
-  taylor: async (interaction) => {
-    await interaction.reply({
-      content: `Hello <@${TAYLOR_USER_ID}>. The court sends respect.`,
-    });
-  },
+  send: handleGreetingSend,
 };
 
 const COMMAND_DISPATCHERS: Record<
@@ -535,10 +552,13 @@ const COMMAND_DISPATCHERS: Record<
   greetings: { handlers: GREETINGS_SUBCOMMAND_HANDLERS },
 };
 
-export function buildCommandDefinitions(): SlashCommandBuilder[] {
+export function buildCommandDefinitions(): Array<
+  SlashCommandBuilder | SlashCommandSubcommandsOnlyBuilder
+> {
   const court = new SlashCommandBuilder()
     .setName("court")
-    .setDescription("Imperial Court controls");
+    .setDescription("Imperial Court controls")
+    .setDMPermission(false);
   for (const name of COURT_COMMANDS) {
     court.addSubcommand((subcommand) => {
       subcommand.setName(name).setDescription(`Court ${name} command`);
@@ -553,7 +573,8 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
 
   const questions = new SlashCommandBuilder()
     .setName("questions")
-    .setDescription("Question utilities");
+    .setDescription("Question utilities")
+    .setDMPermission(false);
   for (const name of QUESTIONS_COMMANDS) {
     questions.addSubcommand((subcommand) => {
       subcommand.setName(name).setDescription(`Question ${name} command`);
@@ -582,7 +603,8 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
 
   const invictus = new SlashCommandBuilder()
     .setName("invictus")
-    .setDescription("Server admin and moderation tools");
+    .setDescription("Server admin and moderation tools")
+    .setDMPermission(false);
   for (const name of INVICTUS_COMMANDS) {
     invictus.addSubcommand((subcommand) => {
       subcommand.setName(name).setDescription(`Invictus ${name} command`);
@@ -933,7 +955,8 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
 
   const fun = new SlashCommandBuilder()
     .setName("fun")
-    .setDescription("Fun commands for everyone");
+    .setDescription("Fun commands for everyone")
+    .setDMPermission(false);
   for (const name of FUN_COMMANDS) {
     fun.addSubcommand((subcommand) => {
       subcommand.setName(name).setDescription(`Fun ${name} command`);
@@ -993,14 +1016,29 @@ export function buildCommandDefinitions(): SlashCommandBuilder[] {
 
   const greetings = new SlashCommandBuilder()
     .setName("greetings")
-    .setDescription("Friendly greeting commands");
-  for (const name of GREETINGS_COMMANDS) {
-    greetings.addSubcommand((subcommand) =>
-      subcommand.setName(name).setDescription(`Greeting ${name} command`),
+    .setDescription("Configurable greeting profiles")
+    .setDMPermission(false)
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("send")
+        .setDescription("Send a configured greeting profile")
+        .addStringOption((option) =>
+          option
+            .setName("profile")
+            .setDescription("Configured profile name")
+            .setRequired(true)
+            .setAutocomplete(true),
+        ),
     );
-  }
 
-  return [court, questions, invictus, fun, greetings];
+  return [
+    buildSetupCommandDefinition(),
+    court,
+    questions,
+    invictus,
+    fun,
+    greetings,
+  ];
 }
 
 async function dispatchMappedCommand(
@@ -1024,6 +1062,13 @@ async function dispatchMappedCommand(
     if (!isAllowed) {
       return true;
     }
+    if (!runtime.isCurrent()) {
+      await interaction.reply({
+        content: MSG_RUNTIME_CANCELLED,
+        ephemeral: true,
+      });
+      return true;
+    }
   }
 
   await handler(interaction, runtime);
@@ -1032,23 +1077,80 @@ async function dispatchMappedCommand(
 
 export async function handleChatInputCommand(
   interaction: ChatInputCommandInteraction,
-  runtime: BotRuntime,
+  runtime: ProcessBotRuntime,
 ): Promise<void> {
+  if (!interaction.guild || !interaction.guildId) {
+    await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
+    return;
+  }
+
   const command = interaction.commandName;
   const subcommand = interaction.options.getSubcommand();
+  let guildRuntime = await runtime.forGuild(interaction.guildId);
+
+  if (command === "setup") {
+    const actor = await requireSetupAdmin(interaction);
+    if (!actor) {
+      return;
+    }
+    if (!guildRuntime) {
+      runtime.storage.ensureGuild(interaction.guildId, interaction.guild.name);
+      guildRuntime = await runtime.forGuild(interaction.guildId);
+    }
+    if (!guildRuntime) {
+      await interaction.reply({
+        content: "Could not initialize setup for this server.",
+        ephemeral: true,
+      });
+      return;
+    }
+    await handleSetupCommand(interaction, runtime, guildRuntime, actor);
+    return;
+  }
+
+  if (!guildRuntime || !guildRuntime.settings.enabled) {
+    await interaction.reply({
+      content:
+        "Imperial Court is not enabled for this server. An administrator can begin with `/setup status`.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const requiredFeature = getCommandFeature(command, subcommand);
+  if (requiredFeature && !guildRuntime.settings.features[requiredFeature]) {
+    await interaction.reply({
+      content: `The ${requiredFeature} feature is disabled in this server.`,
+      ephemeral: true,
+    });
+    return;
+  }
 
   if (STAFF_REQUIRED_COMMANDS.has(command)) {
-    const isAllowed = await requireStaff(interaction, runtime);
+    const adminRequired =
+      command === "court" && COURT_ADMIN_SUBCOMMANDS.has(subcommand);
+    const isAllowed = adminRequired
+      ? await requireAdmin(interaction)
+      : await requireStaff(interaction, guildRuntime);
     if (!isAllowed) {
       return;
     }
+  }
+
+  if (!guildRuntime.isCurrent()) {
+    await interaction.reply({
+      content:
+        "This server's configuration changed while the command was starting. Please try again.",
+      ephemeral: true,
+    });
+    return;
   }
 
   const handled = await dispatchMappedCommand(
     command,
     subcommand,
     interaction,
-    runtime,
+    guildRuntime,
   );
   if (handled) {
     return;
@@ -1060,27 +1162,135 @@ export async function handleChatInputCommand(
   });
 }
 
+export async function handleAutocompleteInteraction(
+  interaction: AutocompleteInteraction,
+  runtime: ProcessBotRuntime,
+): Promise<void> {
+  if (
+    interaction.commandName !== "greetings" ||
+    !interaction.guildId ||
+    !interaction.guild
+  ) {
+    await interaction.respond([]);
+    return;
+  }
+  const guildRuntime = await runtime.forGuild(interaction.guildId);
+  if (
+    !guildRuntime?.settings.enabled ||
+    !guildRuntime.isCurrent() ||
+    !guildRuntime.settings.features.greetings
+  ) {
+    await interaction.respond([]);
+    return;
+  }
+  const focused = String(interaction.options.getFocused() ?? "").toLowerCase();
+  const choices = guildRuntime.settings.greetings
+    .filter((profile) => profile.name.toLowerCase().includes(focused))
+    .slice(0, 25)
+    .map((profile) => ({ name: profile.name, value: profile.name }));
+  await interaction.respond(choices);
+}
+
+function getCommandFeature(
+  command: string,
+  subcommand: string,
+): keyof GuildSettings["features"] | null {
+  if (command === "court" || command === "questions") {
+    return "court";
+  }
+  if (command === "greetings") {
+    return "greetings";
+  }
+  if (command === "invictus") {
+    if (subcommand === "afk" || subcommand === "afkstatus") {
+      return "royalAfk";
+    }
+    if (subcommand === "resetroyaltimer") {
+      return "royalPresence";
+    }
+  }
+  return null;
+}
+
+async function resolveEnabledComponentRuntime(
+  interaction: ButtonInteraction | ModalSubmitInteraction,
+  runtime: ProcessBotRuntime,
+): Promise<GuildRuntime | null> {
+  if (!interaction.guild || !interaction.guildId) {
+    await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
+    return null;
+  }
+  if (
+    interaction.message &&
+    interaction.message.guildId !== interaction.guildId
+  ) {
+    await interaction.reply({
+      content: "This component does not belong to this server.",
+      ephemeral: true,
+    });
+    return null;
+  }
+  const guildRuntime = await runtime.forGuild(interaction.guildId);
+  if (!guildRuntime?.settings.enabled || !guildRuntime.isCurrent()) {
+    await interaction.reply({
+      content:
+        "Imperial Court is disabled here. Ask an administrator to review `/setup status`.",
+      ephemeral: true,
+    });
+    return null;
+  }
+  return guildRuntime;
+}
+
 export async function handleButtonInteraction(
   interaction: ButtonInteraction,
-  runtime: BotRuntime,
+  runtime: ProcessBotRuntime,
 ): Promise<void> {
+  const guildRuntime = await resolveEnabledComponentRuntime(interaction, runtime);
+  if (!guildRuntime) {
+    return;
+  }
+
   const rolePanelRoleId = extractRolePanelRoleIdFromCustomId(
     interaction.customId,
   );
-  if (rolePanelRoleId !== null) {
-    await handleRolePanelButtonInteraction(interaction, 1, rolePanelRoleId);
-    return;
-  }
-
   const rolePanelSlot = extractRolePanelButtonSlot(interaction.customId);
-  if (rolePanelSlot !== null) {
-    await handleRolePanelButtonInteraction(interaction, rolePanelSlot);
-    return;
-  }
-
   const invictusDmPanelTargetUserId = parseInvictusDmPanelButtonTargetUserId(
     interaction.customId,
   );
+  const isKnownBotComponent =
+    rolePanelRoleId !== null ||
+    rolePanelSlot !== null ||
+    Boolean(invictusDmPanelTargetUserId) ||
+    interaction.customId === INVICTUS_DM_PANEL_BUTTON_ID ||
+    interaction.customId === ANON_ANSWER_BUTTON_ID;
+  if (isKnownBotComponent && !isBotAuthoredInteractionMessage(interaction)) {
+    await interaction.reply({
+      content: "This component was not created by this bot.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (rolePanelRoleId !== null) {
+    await handleRolePanelButtonInteraction(
+      interaction,
+      guildRuntime,
+      1,
+      rolePanelRoleId,
+    );
+    return;
+  }
+
+  if (rolePanelSlot !== null) {
+    await handleRolePanelButtonInteraction(
+      interaction,
+      guildRuntime,
+      rolePanelSlot,
+    );
+    return;
+  }
+
   if (
     invictusDmPanelTargetUserId ||
     interaction.customId === INVICTUS_DM_PANEL_BUTTON_ID
@@ -1096,13 +1306,34 @@ export async function handleButtonInteraction(
     return;
   }
 
+  if (
+    !guildRuntime.settings.features.court ||
+    !guildRuntime.settings.features.anonymousAnswers
+  ) {
+    await interaction.reply({
+      content: "Anonymous court answers are disabled in this server.",
+      ephemeral: true,
+    });
+    return;
+  }
+
   if (!interaction.guild || !interaction.message) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
     return;
   }
 
-  const postRecord = runtime.storage.getPostRecord(interaction.message.id);
-  if (postRecord?.closed) {
+  const postRecord = guildRuntime.storage.getPostRecord(interaction.message.id);
+  if (
+    !postRecord ||
+    postRecord.channel_id !== interaction.channelId
+  ) {
+    await interaction.reply({
+      content: "This button is not attached to a current court post in this server.",
+      ephemeral: true,
+    });
+    return;
+  }
+  if (postRecord.closed) {
     await interaction.reply({ content: MSG_INQUIRY_CLOSED, ephemeral: true });
     return;
   }
@@ -1114,13 +1345,28 @@ export async function handleButtonInteraction(
 
 export async function handleModalSubmitInteraction(
   interaction: ModalSubmitInteraction,
-  runtime: BotRuntime,
+  runtime: ProcessBotRuntime,
 ): Promise<void> {
+  const guildRuntime = await resolveEnabledComponentRuntime(interaction, runtime);
+  if (!guildRuntime) {
+    return;
+  }
+
   const adminSayContext = extractAdminSayContextFromModal(interaction.customId);
   if (adminSayContext) {
+    if (!(await requireAdmin(interaction))) {
+      return;
+    }
+    if (!guildRuntime.isCurrent()) {
+      await interaction.reply({
+        content: MSG_RUNTIME_CANCELLED,
+        ephemeral: true,
+      });
+      return;
+    }
     await handleAdminSayModalSubmit(
       interaction,
-      runtime,
+      guildRuntime,
       adminSayContext.channelId,
       adminSayContext.mentionEveryone,
     );
@@ -1133,7 +1379,7 @@ export async function handleModalSubmitInteraction(
   if (invictusDmPanelTargetUserId) {
     await handleInvictusDmPanelModalSubmit(
       interaction,
-      runtime,
+      guildRuntime,
       invictusDmPanelTargetUserId,
     );
     return;
@@ -1141,6 +1387,17 @@ export async function handleModalSubmitInteraction(
 
   const questionMessageId = parseAnonymousAnswerMessageId(interaction.customId);
   if (!questionMessageId) {
+    return;
+  }
+
+  if (
+    !guildRuntime.settings.features.court ||
+    !guildRuntime.settings.features.anonymousAnswers
+  ) {
+    await interaction.reply({
+      content: "Anonymous court answers are disabled in this server.",
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1152,13 +1409,20 @@ export async function handleModalSubmitInteraction(
   const member = await interaction.guild.members
     .fetch(interaction.user.id)
     .catch(() => null);
-  if (!member) {
+  if (!member || !guildRuntime.isCurrent()) {
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return;
   }
 
-  const postRecord = runtime.storage.getPostRecord(questionMessageId);
-  if (postRecord?.closed) {
+  const postRecord = guildRuntime.storage.getPostRecord(questionMessageId);
+  if (!postRecord) {
+    await interaction.reply({
+      content: "Could not find the original court post for this server.",
+      ephemeral: true,
+    });
+    return;
+  }
+  if (postRecord.closed) {
     await interaction.reply({ content: MSG_INQUIRY_CLOSED, ephemeral: true });
     return;
   }
@@ -1171,6 +1435,13 @@ export async function handleModalSubmitInteraction(
   if (!sourceMessage) {
     await interaction.reply({
       content: "Could not find the original court post.",
+      ephemeral: true,
+    });
+    return;
+  }
+  if (!guildRuntime.isCurrent()) {
+    await interaction.reply({
+      content: "This answer was cancelled because this server's configuration changed.",
       ephemeral: true,
     });
     return;
@@ -1190,14 +1461,14 @@ export async function handleModalSubmitInteraction(
   const validationError = validateAnonymousAnswerSubmission(
     member,
     answerText,
-    runtime,
+    guildRuntime,
   );
   if (validationError) {
     await interaction.reply({ content: validationError, ephemeral: true });
     return;
   }
 
-  if (runtime.storage.hasUserAnswered(questionMessageId, member.id)) {
+  if (guildRuntime.storage.hasUserAnswered(questionMessageId, member.id)) {
     await interaction.reply({
       content: "You already answered this court inquiry.",
       ephemeral: true,
@@ -1209,7 +1480,7 @@ export async function handleModalSubmitInteraction(
   const thread = await getOrCreateAnswerThread(
     sourceMessage,
     question,
-    runtime,
+    guildRuntime,
   );
   if (!thread) {
     await interaction.reply({
@@ -1220,17 +1491,25 @@ export async function handleModalSubmitInteraction(
     return;
   }
 
+  if (!guildRuntime.isCurrent()) {
+    await interaction.reply({
+      content: "This answer was cancelled because this server's configuration changed.",
+      ephemeral: true,
+    });
+    return;
+  }
+
   if (thread.locked) {
     await interaction.reply({ content: MSG_INQUIRY_CLOSED, ephemeral: true });
     return;
   }
 
-  const answerNumber = runtime.storage.nextAnswerNumber(questionMessageId);
+  const answerNumber = guildRuntime.storage.nextAnswerNumber(questionMessageId);
   const embed = new EmbedBuilder()
     .setTitle(`Anonymous Answer #${answerNumber}`)
     .setDescription(answerText)
     .setColor(ROLE_COLOR)
-    .setTimestamp(runtime.now().toJSDate())
+    .setTimestamp(guildRuntime.now().toJSDate())
     .setFooter({ text: "Submitted anonymously" });
 
   const sent = await thread.send({ embeds: [embed] }).catch(() => null);
@@ -1242,8 +1521,16 @@ export async function handleModalSubmitInteraction(
     return;
   }
 
-  runtime.storage.markUserAnswered(questionMessageId, member.id, sent.id);
-  runtime.storage.recordAnswerMetric();
+  if (!guildRuntime.isCurrent()) {
+    await interaction.reply({
+      content: "This answer was cancelled because this server's configuration changed.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  guildRuntime.storage.markUserAnswered(questionMessageId, member.id, sent.id);
+  guildRuntime.storage.recordAnswerMetric();
 
   await interaction.reply({
     content: `Your anonymous answer has been posted in ${thread.toString()}.`,
@@ -1257,17 +1544,20 @@ async function handleCourtStatus(
 ): Promise<void> {
   const state = runtime.storage.getState();
   const openPosts = runtime.storage.listPostRecords(false).length;
-  const channelMention =
-    state.channel_id > 0 ? `<#${state.channel_id}>` : "Not set";
-  const logChannelMention =
-    state.log_channel_id > 0 ? `<#${state.log_channel_id}>` : "Disabled";
+  const schedule = runtime.settings.courtSchedule;
+  const channelMention = runtime.settings.channels.court
+    ? `<#${runtime.settings.channels.court}>`
+    : "Not set";
+  const logChannelMention = runtime.settings.channels.log
+    ? `<#${runtime.settings.channels.log}>`
+    : "Disabled";
 
   const statusText = [
-    `**Version:** \`${runtime.config.botVersion}\``,
-    `**Mode:** \`${state.mode}\``,
+    `**Version:** \`${runtime.botVersion}\``,
+    `**Mode:** \`${schedule.mode}\``,
     `**Channel:** ${channelMention}`,
     `**Log Channel:** ${logChannelMention}`,
-    `**Auto Time:** \`${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}\``,
+    `**Auto Time:** \`${String(schedule.hour).padStart(2, "0")}:${String(schedule.minute).padStart(2, "0")}\``,
     `**Last Posted:** \`${state.last_posted_date ?? "Never"}\``,
     `**Recent Memory Size:** \`${state.history.length}\``,
     `**Used Pool Size:** \`${state.used_questions.length}\``,
@@ -1278,23 +1568,11 @@ async function handleCourtStatus(
   await interaction.reply({ content: statusText, ephemeral: true });
 }
 
-function getDbHealthSummary(dbFile: string): {
-  status: "present" | "missing";
-  sizeKb: string;
-} {
-  const dbExists = existsSync(dbFile);
-  const dbSizeBytes = dbExists ? statSync(dbFile).size : 0;
-  return {
-    status: dbExists ? "present" : "missing",
-    sizeKb: (dbSizeBytes / 1024).toFixed(1),
-  };
-}
-
 function getLogChannelHealthText(
-  logChannelId: number,
+  logChannelId: string | null,
   logChannel: Channel | null,
 ): string {
-  if (logChannelId === 0) {
+  if (!logChannelId) {
     return "Disabled";
   }
   if (logChannel) {
@@ -1320,27 +1598,38 @@ async function handleCourtHealth(
 
   const [openPosts, overduePosts] = countOpenAndOverduePosts(posts, now);
   const targetChannel = await getTargetChannel(interaction, runtime);
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   const logChannel = await getLogChannel(interaction, runtime);
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
 
   const me =
     interaction.guild.members.me ??
     (await interaction.guild.members.fetchMe().catch(() => null));
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   const missingPermissions = findMissingChannelPermissions(targetChannel, me);
 
   const nextRunText = buildNextRunText(
-    state.mode,
-    state.hour,
-    state.minute,
+    runtime.settings.courtSchedule.mode,
+    runtime.settings.courtSchedule.hour,
+    runtime.settings.courtSchedule.minute,
     now,
   );
   const totalQuestions = Object.values(questions).reduce(
     (sum, values) => sum + values.length,
     0,
   );
-  const dbSummary = getDbHealthSummary(runtime.config.dbFile);
   const channelText = targetChannel ? targetChannel.toString() : "Not found";
   const logChannelText = getLogChannelHealthText(
-    state.log_channel_id,
+    runtime.settings.channels.log,
     logChannel,
   );
 
@@ -1348,7 +1637,7 @@ async function handleCourtHealth(
   if (!targetChannel) {
     warnings.push("Court channel is not reachable");
   }
-  if (state.log_channel_id && !logChannel) {
+  if (runtime.settings.channels.log && !logChannel) {
     warnings.push("Log channel is configured but not reachable");
   }
   if (missingPermissions.length > 0) {
@@ -1372,9 +1661,9 @@ async function handleCourtHealth(
       {
         name: "Scheduling",
         value:
-          `**Mode:** \`${state.mode}\`\n` +
-          `**Dry Run:** \`${state.dry_run_auto_post ? "enabled" : "disabled"}\`\n` +
-          `**Auto Time:** \`${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}\`\n` +
+          `**Mode:** \`${runtime.settings.courtSchedule.mode}\`\n` +
+          `**Dry Run:** \`${runtime.settings.courtSchedule.dryRun ? "enabled" : "disabled"}\`\n` +
+          `**Auto Time:** \`${String(runtime.settings.courtSchedule.hour).padStart(2, "0")}:${String(runtime.settings.courtSchedule.minute).padStart(2, "0")}\`\n` +
           `**Next Auto-Post:** ${nextRunText}\n` +
           `**Last Posted Date:** \`${state.last_posted_date ?? "Never"}\`\n` +
           `**Last Successful Auto-Post:** \`${metrics.last_successful_auto_post ? "Recorded" : "Never"}\``,
@@ -1402,7 +1691,7 @@ async function handleCourtHealth(
           `**Questions:** \`${totalQuestions}\`\n` +
           `**Used Pool:** \`${state.used_questions.length}\`\n` +
           `**Open Posts:** \`${openPosts}\`\n` +
-          `**DB:** \`${dbSummary.status}\` (${dbSummary.sizeKb} KB)`,
+          "**Tenant Storage:** `available`",
         inline: true,
       },
       {
@@ -1507,8 +1796,14 @@ async function handleCourtDryRun(
   runtime: BotRuntime,
 ): Promise<void> {
   const enabled = interaction.options.getBoolean("enabled", true);
+  const settings = structuredClone(runtime.settings);
+  settings.courtSchedule.dryRun = enabled;
+  await runtime.saveSettings(settings);
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   runtime.storage.updateStateAtomic((state) => {
-    state.dry_run_auto_post = enabled;
     if (!enabled) {
       state.last_dry_run_date = null;
     }
@@ -1525,7 +1820,7 @@ async function handleCourtExportState(
   interaction: ChatInputCommandInteraction,
   runtime: BotRuntime,
 ): Promise<void> {
-  const payload = JSON.stringify(runtime.storage.getState(), null, 2);
+  const payload = JSON.stringify(runtime.storage.exportData(), null, 2);
   const attachment = new AttachmentBuilder(Buffer.from(payload, "utf-8"), {
     name: "court_state_export.json",
   });
@@ -1574,16 +1869,33 @@ async function handleCourtImportState(
     return;
   }
 
-  const merged = mergeImportedState(
-    imported,
-    runtime.storage.getState(),
-    runtime.config.courtChannelId,
-  );
-  runtime.storage.saveState(merged);
+  if (!runtime.isCurrent()) {
+    await interaction.reply({
+      content:
+        "State import cancelled because this server's configuration changed.",
+      ephemeral: true,
+    });
+    return;
+  }
 
-  runtime.storage.recordCommandMetric("court.importstate");
+  try {
+    runtime.storage.importData(imported as GuildDataExport);
+    await runtime.refreshSettings();
+    runtime.invalidate();
+  } catch (error) {
+    await interaction.reply({
+      content:
+        error instanceof Error
+          ? `State import rejected: ${error.message}`
+          : "State import rejected.",
+      ephemeral: true,
+    });
+    return;
+  }
+
   await interaction.reply({
-    content: "State imported successfully.",
+    content:
+      "State imported successfully. The restored configuration is disabled; run `/setup validate` and `/setup enable` after reviewing it.",
     ephemeral: true,
   });
 }
@@ -1593,17 +1905,28 @@ async function handleCourtChannel(
   runtime: BotRuntime,
 ): Promise<void> {
   const channel = interaction.options.getChannel("channel", true);
-  if (!isDmPanelTargetChannel(channel)) {
+  if (!isPersistentGuildChannel(channel)) {
     await interaction.reply({
-      content: "Channel must support messages.",
+      content: "Channel must be a text or announcement channel.",
+      ephemeral: true,
+    });
+    return;
+  }
+  if (!interaction.guild || channel.guildId !== interaction.guild.id) {
+    await interaction.reply({
+      content: "Choose a channel from this server.",
       ephemeral: true,
     });
     return;
   }
 
-  runtime.storage.updateStateAtomic((state) => {
-    state.channel_id = Number.parseInt(channel.id, 10);
-  });
+  const settings = structuredClone(runtime.settings);
+  settings.channels.court = channel.id;
+  await runtime.saveSettings(settings);
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
 
   runtime.storage.recordCommandMetric("court.channel");
   await interaction.reply({
@@ -1624,17 +1947,28 @@ async function handleCourtLogChannel(
   runtime: BotRuntime,
 ): Promise<void> {
   const channel = interaction.options.getChannel("channel");
-  if (channel && !isDmPanelTargetChannel(channel)) {
+  if (channel && !isPersistentGuildChannel(channel)) {
     await interaction.reply({
-      content: "Log channel must support messages.",
+      content: "Log channel must be a text or announcement channel.",
+      ephemeral: true,
+    });
+    return;
+  }
+  if (channel && (!interaction.guild || channel.guildId !== interaction.guild.id)) {
+    await interaction.reply({
+      content: "Choose a channel from this server.",
       ephemeral: true,
     });
     return;
   }
 
-  runtime.storage.updateStateAtomic((state) => {
-    state.log_channel_id = channel ? Number.parseInt(channel.id, 10) : 0;
-  });
+  const settings = structuredClone(runtime.settings);
+  settings.channels.log = channel?.id ?? null;
+  await runtime.saveSettings(settings);
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
 
   runtime.storage.recordCommandMetric("court.logchannel");
   if (!channel) {
@@ -1948,9 +2282,8 @@ async function handleCourtMode(
   const requestedMode = interaction.options.getString("mode");
 
   if (!requestedMode) {
-    const state = runtime.storage.getState();
     await interaction.reply({
-      content: `Current mode is ${state.mode}.`,
+      content: `Current mode is ${runtime.settings.courtSchedule.mode}.`,
       ephemeral: true,
     });
     return;
@@ -1964,9 +2297,13 @@ async function handleCourtMode(
     return;
   }
 
-  runtime.storage.updateStateAtomic((state) => {
-    state.mode = requestedMode as BotMode;
-  });
+  const settings = structuredClone(runtime.settings);
+  settings.courtSchedule.mode = requestedMode as BotMode;
+  await runtime.saveSettings(settings);
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
 
   await interaction.reply({
     content: `Mode updated to ${requestedMode}.`,
@@ -1982,9 +2319,8 @@ async function handleCourtSchedule(
   const minute = interaction.options.getInteger("minute");
 
   if (hour === null && minute === null) {
-    const state = runtime.storage.getState();
     await interaction.reply({
-      content: `Current schedule is ${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}.`,
+      content: `Current schedule is ${String(runtime.settings.courtSchedule.hour).padStart(2, "0")}:${String(runtime.settings.courtSchedule.minute).padStart(2, "0")}.`,
       ephemeral: true,
     });
     return;
@@ -2006,18 +2342,20 @@ async function handleCourtSchedule(
     return;
   }
 
-  runtime.storage.updateStateAtomic((state) => {
-    if (hour !== null) {
-      state.hour = hour;
-    }
-    if (minute !== null) {
-      state.minute = minute;
-    }
-  });
-
-  const state = runtime.storage.getState();
+  const settings = structuredClone(runtime.settings);
+  if (hour !== null) {
+    settings.courtSchedule.hour = hour;
+  }
+  if (minute !== null) {
+    settings.courtSchedule.minute = minute;
+  }
+  await runtime.saveSettings(settings);
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   await interaction.reply({
-    content: `Schedule updated to ${String(state.hour).padStart(2, "0")}:${String(state.minute).padStart(2, "0")}.`,
+    content: `Schedule updated to ${String(settings.courtSchedule.hour).padStart(2, "0")}:${String(settings.courtSchedule.minute).padStart(2, "0")}.`,
     ephemeral: true,
   });
 }
@@ -2203,6 +2541,59 @@ async function handleFate(
   await interaction.reply({ embeds: [embed] });
 }
 
+async function handleGreetingSend(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
+  if (!interaction.guild) {
+    await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
+    return;
+  }
+  const requestedName = interaction.options.getString("profile", true).trim();
+  const profile = runtime.settings.greetings.find(
+    (candidate) =>
+      candidate.name.toLowerCase() === requestedName.toLowerCase(),
+  );
+  if (!profile) {
+    await interaction.reply({
+      content: "Greeting profile not found. Choose a configured profile.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  let userMention = "";
+  if (profile.userId) {
+    const member = await interaction.guild.members
+      .fetch(profile.userId)
+      .catch(() => null);
+    if (!member) {
+      await interaction.reply({
+        content: "That greeting profile refers to a user who is not in this server.",
+        ephemeral: true,
+      });
+      return;
+    }
+    userMention = member.toString();
+  }
+  if (!runtime.isCurrent()) {
+    await interaction.reply({
+      content:
+        "Greeting cancelled because this server's configuration changed.",
+      ephemeral: true,
+    });
+    return;
+  }
+  const content = profile.message.replaceAll("{user}", userMention).trim();
+  runtime.storage.recordCommandMetric("greetings.send");
+  await interaction.reply({
+    content,
+    allowedMentions: profile.userId
+      ? { users: [profile.userId], parse: [] }
+      : { parse: [] },
+  });
+}
+
 async function handleInvictusSay(
   interaction: ChatInputCommandInteraction,
   runtime: BotRuntime,
@@ -2213,9 +2604,9 @@ async function handleInvictusSay(
   }
 
   const targetChannelOption = interaction.options.getChannel("channel", true);
-  if (!isDmPanelTargetChannel(targetChannelOption)) {
+  if (!isCurrentGuildTargetChannel(interaction, targetChannelOption)) {
     await interaction.reply({
-      content: "Target channel must support messages.",
+      content: "Target channel must be a message channel in this server.",
       ephemeral: true,
     });
     return;
@@ -2241,6 +2632,10 @@ async function handleInvictusSay(
   }
 
   await interaction.deferReply({ ephemeral: true });
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
   const fileContent = await fetchAdminSayAttachmentText(messageFile.url);
   if (fileContent === null) {
     await interaction.editReply({
@@ -2257,6 +2652,11 @@ async function handleInvictusSay(
   );
   if (!deliveryResult.ok) {
     await interaction.editReply({ content: deliveryResult.error });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
     return;
   }
 
@@ -2325,6 +2725,10 @@ async function deliverAdminSayAnnouncement(
       });
     }
 
+    if (!runtime.isCurrent()) {
+      return { ok: false, error: MSG_RUNTIME_CANCELLED };
+    }
+
     const sent = await channel
       .send({
         ...(index === 0 && mentionPayload.content !== null
@@ -2338,6 +2742,9 @@ async function deliverAdminSayAnnouncement(
       .catch(() => null);
     if (!sent) {
       return { ok: false, error: "Failed to send the message." };
+    }
+    if (!runtime.isCurrent()) {
+      return { ok: false, error: MSG_RUNTIME_CANCELLED };
     }
   }
 
@@ -2382,7 +2789,9 @@ async function handleInvictusDmPanel(
 
   const requestedChannel = interaction.options.getChannel("channel");
   const targetChannel =
-    (isDmPanelTargetChannel(requestedChannel) ? requestedChannel : null) ??
+    (isCurrentGuildTargetChannel(interaction, requestedChannel)
+      ? requestedChannel
+      : null) ??
     getDmPanelTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
@@ -2435,6 +2844,11 @@ async function handleInvictusDmPanel(
     interaction.options.getBoolean("mention_everyone") ?? false;
   const mentionPayload = buildAnnouncementMentions(mentionEveryone);
 
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
+
   const sent = await targetChannel
     .send({
       ...(mentionPayload.content === null
@@ -2450,6 +2864,11 @@ async function handleInvictusDmPanel(
       content: "Failed to create the DM panel in that channel.",
       ephemeral: true,
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
     return;
   }
 
@@ -2489,7 +2908,7 @@ async function handleAdminSayModalSubmit(
   const channel =
     interaction.guild.channels.cache.get(channelId) ??
     (await interaction.guild.channels.fetch(channelId).catch(() => null));
-  if (!isDmPanelTargetChannel(channel)) {
+  if (!isDmPanelTargetChannel(channel) || channel.guildId !== interaction.guild.id) {
     await interaction.reply({
       content: "Target channel no longer exists or cannot receive messages.",
       ephemeral: true,
@@ -2533,6 +2952,10 @@ async function handleAdminSayModalSubmit(
     });
     return;
   }
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
 
   runtime.storage.recordCommandMetric("invictus.say");
   await interaction.reply({
@@ -2572,16 +2995,17 @@ async function handleInvictusDmPanelModalSubmit(
     return;
   }
 
-  const recipient = await interaction.client.users
+  const recipientMember = await interaction.guild.members
     .fetch(targetUserId)
     .catch(() => null);
-  if (!recipient) {
+  if (!recipientMember) {
     await interaction.reply({
-      content: "Could not find the configured DM recipient.",
+      content: "The configured DM recipient is not in this server.",
       ephemeral: true,
     });
     return;
   }
+  const recipient = recipientMember.user;
 
   const sourceChannel = interaction.channel?.isTextBased()
     ? interaction.channel.toString()
@@ -2605,6 +3029,11 @@ async function handleInvictusDmPanelModalSubmit(
       { name: "Channel", value: sourceChannel, inline: false },
     );
 
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
+
   const delivered = await recipient
     .send({ embeds: [dmEmbed] })
     .then(() => true)
@@ -2615,6 +3044,11 @@ async function handleInvictusDmPanelModalSubmit(
         "Failed to deliver your message. The recipient may have DMs disabled.",
       ephemeral: true,
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
     return;
   }
 
@@ -2646,7 +3080,7 @@ async function handleInvictusResetRoyalTimer(
   runtime.storage.recordCommandMetric("invictus.resetroyaltimer");
   await interaction.reply({
     content:
-      "Royal timer reset. The next message from the Emperor or the Empress can trigger the H1 announcement immediately.",
+      `Royal timer reset. The next message from the ${runtime.settings.labels.emperor} or the ${runtime.settings.labels.empress} can trigger the H1 announcement immediately.`,
     ephemeral: true,
   });
 
@@ -2666,6 +3100,10 @@ async function handleInvictusAfk(
   if (!royalContext) {
     return;
   }
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
 
   const { actor, titles } = royalContext;
   const cleanReason = normalizeQuestionText(
@@ -2673,7 +3111,7 @@ async function handleInvictusAfk(
   );
 
   if (cleanReason) {
-    const nowIso = isoNow(runtime.config.timezoneName);
+    const nowIso = isoNow(runtime.settings.timezone);
     runtime.storage.updateStateAtomic((state) => {
       for (const title of titles) {
         state.royal_afk.by_title[title] = {
@@ -2686,7 +3124,9 @@ async function handleInvictusAfk(
     });
 
     runtime.storage.recordCommandMetric("invictus.afk");
-    const joinedTitles = titles.join(", ");
+    const joinedTitles = titles
+      .map((title) => getRoyalDisplayLabel(runtime, title))
+      .join(", ");
     await interaction.reply({
       content: `AFK enabled for ${joinedTitles}.`,
       ephemeral: true,
@@ -2720,7 +3160,9 @@ async function handleInvictusAfk(
 
   runtime.storage.recordCommandMetric("invictus.afk");
   if (cleared.length > 0) {
-    const joinedTitles = cleared.join(", ");
+    const joinedTitles = cleared
+      .map((title) => getRoyalDisplayLabel(runtime, title))
+      .join(", ");
     await interaction.reply({
       content: `AFK cleared for ${joinedTitles}.`,
       ephemeral: true,
@@ -2748,6 +3190,7 @@ async function handleInvictusAfkStatus(
   const report = buildRoyalAfkStatusReport(
     runtime.storage.getState().royal_afk,
     runtime.now(),
+    runtime.settings.labels,
   );
   runtime.storage.recordCommandMetric("invictus.afkstatus");
   await interaction.reply({
@@ -2781,7 +3224,7 @@ async function handleInvictusBackfillStats(
     runtime.backfillStatus,
     interaction.user.id,
     lookbackDays,
-    isoNow(runtime.config.timezoneName),
+    isoNow(runtime.settings.timezone),
   );
   runtime.storage.recordCommandMetric("invictus.backfillstats");
 
@@ -2809,12 +3252,33 @@ async function runUserActivityBackfill(
   const startedAt = runtime.now();
   const lookbackText = backfillLookbackText(lookbackDays);
 
+  if (!runtime.isCurrent()) {
+    markBackfillFinished(
+      runtime.backfillStatus,
+      "cancelled",
+      isoNow(runtime.settings.timezone),
+      null,
+      "Guild was disabled or became inactive before the backfill started.",
+    );
+    return;
+  }
+
   await sendLog(
     interaction,
     runtime,
     "User Stats Backfill Started",
     `**By:** ${interaction.user.toString()}\n**Lookback:** ${lookbackText}\n**Status:** \`running\``,
   );
+  if (!runtime.isCurrent()) {
+    markBackfillFinished(
+      runtime.backfillStatus,
+      "cancelled",
+      isoNow(runtime.settings.timezone),
+      null,
+      "Guild was disabled or became inactive before the backfill scan started.",
+    );
+    return;
+  }
 
   try {
     const result = await backfillUserActivityMetrics(
@@ -2822,6 +3286,7 @@ async function runUserActivityBackfill(
       runtime,
       lookbackDays,
     );
+    assertBackfillIsCurrent(runtime);
     const elapsed = formatDuration(runtime.now().diff(startedAt));
 
     const summary =
@@ -2831,7 +3296,7 @@ async function runUserActivityBackfill(
     markBackfillFinished(
       runtime.backfillStatus,
       "completed",
-      isoNow(runtime.config.timezoneName),
+      isoNow(runtime.settings.timezone),
       summary,
       null,
     );
@@ -2856,14 +3321,18 @@ async function runUserActivityBackfill(
       error instanceof Error
         ? `${error.name}: ${error.message}`
         : String(error);
+    const cancelled = !runtime.isCurrent();
     markBackfillFinished(
       runtime.backfillStatus,
-      "failed",
-      isoNow(runtime.config.timezoneName),
+      cancelled ? "cancelled" : "failed",
+      isoNow(runtime.settings.timezone),
       null,
       errorText.slice(0, 400),
     );
 
+    if (cancelled) {
+      return;
+    }
     await sendLog(
       interaction,
       runtime,
@@ -2894,17 +3363,20 @@ async function backfillUserActivityMetrics(
       ? runtime.now().minus({ days: lookbackDays }).toMillis()
       : null;
 
-  const messageCounts: Record<number, number> = {};
-  const reactionsSentCounts: Record<number, number> = {};
-  const reactionsReceivedCounts: Record<number, number> = {};
+  const messageCounts: Record<string, number> = {};
+  const reactionsSentCounts: Record<string, number> = {};
+  const reactionsReceivedCounts: Record<string, number> = {};
 
   let scannedChannels = 0;
   let skippedChannels = 0;
   let scannedMessages = 0;
   let scannedReactions = 0;
 
+  assertBackfillIsCurrent(runtime);
   const targets = await getBackfillHistoryTargets(guild);
+  assertBackfillIsCurrent(runtime);
   for (const target of targets) {
+    assertBackfillIsCurrent(runtime);
     scannedChannels += 1;
     try {
       const [channelMessages, channelReactions] =
@@ -2914,6 +3386,7 @@ async function backfillUserActivityMetrics(
           messageCounts,
           reactionsSentCounts,
           reactionsReceivedCounts,
+          () => runtime.isCurrent(),
         );
       scannedMessages += channelMessages;
       scannedReactions += channelReactions;
@@ -2921,6 +3394,8 @@ async function backfillUserActivityMetrics(
       skippedChannels += 1;
     }
   }
+
+  assertBackfillIsCurrent(runtime);
 
   const [messageUsersSeen, messageUpdates] =
     runtime.storage.mergeUserMetricBackfill(messageCounts, "messages_sent");
@@ -2985,19 +3460,26 @@ async function getBackfillHistoryTargets(
 async function scanBackfillHistoryTarget(
   target: TextChannel | AnyThreadChannel,
   afterTimestamp: number | null,
-  messageCounts: Record<number, number>,
-  reactionsSentCounts: Record<number, number>,
-  reactionsReceivedCounts: Record<number, number>,
+  messageCounts: Record<string, number>,
+  reactionsSentCounts: Record<string, number>,
+  reactionsReceivedCounts: Record<string, number>,
+  shouldContinue: () => boolean = () => true,
 ): Promise<[number, number]> {
   let scannedMessages = 0;
   let scannedReactions = 0;
   let before: string | undefined;
 
   while (true) {
+    if (!shouldContinue()) {
+      throw new Error("Backfill cancelled because the guild is no longer active.");
+    }
     const batch = await target.messages.fetch({
       limit: 100,
       ...(before ? { before } : {}),
     });
+    if (!shouldContinue()) {
+      throw new Error("Backfill cancelled because the guild is no longer active.");
+    }
     if (batch.size === 0) {
       break;
     }
@@ -3008,7 +3490,11 @@ async function scanBackfillHistoryTarget(
       messageCounts,
       reactionsSentCounts,
       reactionsReceivedCounts,
+      shouldContinue,
     );
+    if (!shouldContinue()) {
+      throw new Error("Backfill cancelled because the guild is no longer active.");
+    }
     scannedMessages += batchResult.scannedMessages;
     scannedReactions += batchResult.scannedReactions;
 
@@ -3032,9 +3518,10 @@ async function scanBackfillHistoryTarget(
 async function scanBackfillMessageBatch(
   messages: Iterable<Message>,
   afterTimestamp: number | null,
-  messageCounts: Record<number, number>,
-  reactionsSentCounts: Record<number, number>,
-  reactionsReceivedCounts: Record<number, number>,
+  messageCounts: Record<string, number>,
+  reactionsSentCounts: Record<string, number>,
+  reactionsReceivedCounts: Record<string, number>,
+  shouldContinue: () => boolean,
 ): Promise<{
   scannedMessages: number;
   scannedReactions: number;
@@ -3045,13 +3532,16 @@ async function scanBackfillMessageBatch(
   let reachedLookback = false;
 
   for (const message of messages) {
+    if (!shouldContinue()) {
+      throw new Error("Backfill cancelled because the guild is no longer active.");
+    }
     if (afterTimestamp !== null && message.createdTimestamp < afterTimestamp) {
       reachedLookback = true;
       continue;
     }
 
     scannedMessages += 1;
-    const messageAuthorId = getNonBotUserIdAsNumber(message.author);
+    const messageAuthorId = getNonBotUserId(message.author);
     if (messageAuthorId !== null) {
       incrementCount(messageCounts, messageAuthorId, 1);
     }
@@ -3060,7 +3550,11 @@ async function scanBackfillMessageBatch(
       message,
       reactionsSentCounts,
       reactionsReceivedCounts,
+      shouldContinue,
     );
+    if (!shouldContinue()) {
+      throw new Error("Backfill cancelled because the guild is no longer active.");
+    }
   }
 
   return { scannedMessages, scannedReactions, reachedLookback };
@@ -3068,21 +3562,28 @@ async function scanBackfillMessageBatch(
 
 async function tallyReactionCountsForMessage(
   message: Message,
-  reactionsSentCounts: Record<number, number>,
-  reactionsReceivedCounts: Record<number, number>,
+  reactionsSentCounts: Record<string, number>,
+  reactionsReceivedCounts: Record<string, number>,
+  shouldContinue: () => boolean,
 ): Promise<number> {
   let scannedReactions = 0;
-  const recipientId = getNonBotUserIdAsNumber(message.author);
+  const recipientId = getNonBotUserId(message.author);
 
   for (const reaction of message.reactions.cache.values()) {
+    if (!shouldContinue()) {
+      throw new Error("Backfill cancelled because the guild is no longer active.");
+    }
     const reactors = await reaction.users.fetch().catch(() => null);
+    if (!shouldContinue()) {
+      throw new Error("Backfill cancelled because the guild is no longer active.");
+    }
     if (!reactors) {
       continue;
     }
 
     let nonBotReactors = 0;
     for (const reactor of reactors.values()) {
-      const reactorId = getNonBotUserIdAsNumber(reactor);
+      const reactorId = getNonBotUserId(reactor);
       if (reactorId === null) {
         continue;
       }
@@ -3100,24 +3601,24 @@ async function tallyReactionCountsForMessage(
   return scannedReactions;
 }
 
-function getNonBotUserIdAsNumber(
+function getNonBotUserId(
   user: { id: string; bot?: boolean } | null | undefined,
-): number | null {
+): string | null {
   if (!user || user.bot) {
     return null;
   }
 
-  const parsedId = Number.parseInt(user.id, 10);
-  if (!Number.isFinite(parsedId) || parsedId <= 0) {
+  const userId = user.id.trim();
+  if (!/^\d{17,20}$/.test(userId) || /^0+$/.test(userId)) {
     return null;
   }
 
-  return parsedId;
+  return userId;
 }
 
 function incrementCount(
-  store: Record<number, number>,
-  key: number,
+  store: Record<string, number>,
+  key: string,
   amount = 1,
 ): void {
   store[key] = (store[key] ?? 0) + amount;
@@ -3205,7 +3706,7 @@ async function handleInvictusHelp(
     "`/fun battle`, `/fun stats`, `/fun leaderboard`, `/fun verdict`, `/fun title`, `/fun fate`",
     "",
     "**Greetings**",
-    "`/greetings rio`, `/greetings taylor`",
+    "`/greetings send profile:<name>` (profiles are configured per server with `/setup greeting`)",
   ].join("\n");
 
   const embed = new EmbedBuilder()
@@ -3232,6 +3733,10 @@ async function handleFunBattle(
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return;
   }
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
 
   const opponentUser = interaction.options.getUser("opponent", true);
   const opponent = await interaction.guild.members
@@ -3244,6 +3749,10 @@ async function handleFunBattle(
     });
     return;
   }
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
 
   if (opponent.id === challenger.id) {
     await interaction.reply({
@@ -3253,7 +3762,7 @@ async function handleFunBattle(
     return;
   }
 
-  const unbeatable = runtime.config.undefeatedUserIdText;
+  const unbeatable = runtime.settings.championUserId;
   let winner: GuildMember;
   if (challenger.id === unbeatable) {
     winner = challenger;
@@ -3338,6 +3847,10 @@ async function handleFunStats(
     await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
     return;
   }
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
 
   const stats = runtime.storage.getUserFunMetrics(target.id);
   const embed = new EmbedBuilder()
@@ -3395,6 +3908,10 @@ async function handleFunLeaderboard(
     const member =
       interaction.guild.members.cache.get(String(userId)) ??
       (await interaction.guild.members.fetch(String(userId)).catch(() => null));
+    if (!runtime.isCurrent()) {
+      await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+      return;
+    }
     const display = member ? member.toString() : `<@${userId}>`;
     lines.push(`${index + 1}. ${display} - \`${value}\``);
   }
@@ -3423,12 +3940,22 @@ async function handleInvictusPurge(
   const amount = interaction.options.getInteger("amount", true);
   await interaction.deferReply({ ephemeral: true });
 
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
+
   const deleted = await channel.bulkDelete(amount, true).catch(() => null);
   if (!deleted) {
     await interaction.editReply({
       content:
         "Could not purge messages in this channel. Check my Manage Messages permission and try again.",
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
     return;
   }
 
@@ -3482,11 +4009,20 @@ async function handleInvictusPurgeUser(
   const targetMessages = recentMessages.filter(
     (message) => message.author.id === member.id,
   );
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
   const deleted =
     targetMessages.size > 0
       ? await channel.bulkDelete(targetMessages, true).catch(() => null)
       : null;
   const deletedCount = deleted?.size ?? 0;
+
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
 
   runtime.storage.recordCommandMetric("invictus.purgeuser");
   await interaction.editReply({
@@ -3520,6 +4056,10 @@ async function handleInvictusLock(
     interaction.options.getString("reason") ??
     "Channel locked via /invictus lock";
   const everyone = interaction.guild.roles.everyone;
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   const success = await channel.permissionOverwrites
     .edit(everyone, { SendMessages: false }, { reason })
     .then(() => true)
@@ -3530,6 +4070,11 @@ async function handleInvictusLock(
         "Could not lock this channel. Check my Manage Channels permission and role hierarchy.",
       ephemeral: true,
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
     return;
   }
 
@@ -3566,6 +4111,10 @@ async function handleInvictusUnlock(
     interaction.options.getString("reason") ??
     "Channel unlocked via /invictus unlock";
   const everyone = interaction.guild.roles.everyone;
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   const success = await channel.permissionOverwrites
     .edit(everyone, { SendMessages: true }, { reason })
     .then(() => true)
@@ -3576,6 +4125,11 @@ async function handleInvictusUnlock(
         "Could not unlock this channel. Check my Manage Channels permission and role hierarchy.",
       ephemeral: true,
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
     return;
   }
 
@@ -3604,6 +4158,10 @@ async function handleInvictusSlowMode(
   }
 
   const seconds = interaction.options.getInteger("seconds", true);
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   const success = await channel
     .setRateLimitPerUser(seconds, `Updated by ${interaction.user.tag}`)
     .then(() => true)
@@ -3613,6 +4171,11 @@ async function handleInvictusSlowMode(
       content: "Could not update slowmode in this channel.",
       ephemeral: true,
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
     return;
   }
 
@@ -3666,6 +4229,10 @@ async function handleInvictusTimeout(
 
   const modReason = buildTimeoutReason("Muted", actor, reason);
   const durationMs = minutes * 60_000;
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   const success = await member
     .timeout(durationMs, modReason)
     .then(() => true)
@@ -3675,6 +4242,11 @@ async function handleInvictusTimeout(
       content: `Could not apply timeout to ${member.toString()}.`,
       ephemeral: true,
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
     return;
   }
 
@@ -3733,6 +4305,10 @@ async function handleInvictusUntimeout(
   }
 
   const modReason = buildTimeoutReason("Unmuted", actor, reason);
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   const success = await member
     .timeout(null, modReason)
     .then(() => true)
@@ -3742,6 +4318,11 @@ async function handleInvictusUntimeout(
       content: `Could not remove timeout from ${member.toString()}.`,
       ephemeral: true,
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
     return;
   }
 
@@ -3792,8 +4373,12 @@ async function handleInvictusMuteMany(
   await interaction.deferReply({ ephemeral: true });
 
   const [targets, missingIds] = await resolveMembers(guild, memberIds);
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
   const preview = previewTimeoutTargets(actor, me, targets);
-  const cap = runtime.config.muteallTargetCap;
+  const cap = runtime.settings.limits.muteallTargetCap;
   if (cap > 0 && preview.eligible > cap) {
     await interaction.editReply({
       content: buildTargetCapMessage(preview.eligible, cap),
@@ -3820,7 +4405,15 @@ async function handleInvictusMuteMany(
     targets,
     muteUntilMs,
     modReason,
+    runtime,
   );
+
+  if (result.cancelled) {
+    await interaction.editReply({
+      content: `${MSG_RUNTIME_CANCELLED} Applied before cancellation: \`${result.applied}\`.`,
+    });
+    return;
+  }
 
   let summary =
     `Timeout batch complete: applied \`${result.applied}\` member(s) for \`${minutes}\` minute(s).\n` +
@@ -3870,8 +4463,12 @@ async function handleInvictusUnmuteMany(
   await interaction.deferReply({ ephemeral: true });
 
   const [targets, missingIds] = await resolveMembers(guild, memberIds);
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
   const preview = previewTimeoutTargets(actor, me, targets, true);
-  const cap = runtime.config.muteallTargetCap;
+  const cap = runtime.settings.limits.muteallTargetCap;
   if (cap > 0 && preview.eligible > cap) {
     await interaction.editReply({
       content: buildTargetCapMessage(preview.eligible, cap),
@@ -3897,8 +4494,16 @@ async function handleInvictusUnmuteMany(
     targets,
     null,
     modReason,
+    runtime,
     true,
   );
+
+  if (result.cancelled) {
+    await interaction.editReply({
+      content: `${MSG_RUNTIME_CANCELLED} Updated before cancellation: \`${result.applied}\`.`,
+    });
+    return;
+  }
 
   let summary =
     `Timeout removal batch complete: updated \`${result.applied}\` member(s).\n` +
@@ -3945,9 +4550,14 @@ async function handleInvictusMuteAll(
   await interaction.deferReply({ ephemeral: true });
   await guild.members.fetch().catch(() => null);
 
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
+
   const targets = [...guild.members.cache.values()];
   const preview = previewTimeoutTargets(actor, me, targets);
-  const cap = runtime.config.muteallTargetCap;
+  const cap = runtime.settings.limits.muteallTargetCap;
   if (cap > 0 && preview.eligible > cap) {
     await interaction.editReply({
       content: buildTargetCapMessage(preview.eligible, cap),
@@ -3974,7 +4584,15 @@ async function handleInvictusMuteAll(
     targets,
     muteUntilMs,
     modReason,
+    runtime,
   );
+
+  if (result.cancelled) {
+    await interaction.editReply({
+      content: `${MSG_RUNTIME_CANCELLED} Applied before cancellation: \`${result.applied}\`.`,
+    });
+    return;
+  }
 
   runtime.storage.recordCommandMetric("invictus.muteall");
   await interaction.editReply({
@@ -4017,9 +4635,14 @@ async function handleInvictusUnmuteAll(
   await interaction.deferReply({ ephemeral: true });
   await guild.members.fetch().catch(() => null);
 
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
+
   const targets = [...guild.members.cache.values()];
   const preview = previewTimeoutTargets(actor, me, targets, true);
-  const cap = runtime.config.muteallTargetCap;
+  const cap = runtime.settings.limits.muteallTargetCap;
   if (cap > 0 && preview.eligible > cap) {
     await interaction.editReply({
       content: buildTargetCapMessage(preview.eligible, cap),
@@ -4045,8 +4668,16 @@ async function handleInvictusUnmuteAll(
     targets,
     null,
     modReason,
+    runtime,
     true,
   );
+
+  if (result.cancelled) {
+    await interaction.editReply({
+      content: `${MSG_RUNTIME_CANCELLED} Updated before cancellation: \`${result.applied}\`.`,
+    });
+    return;
+  }
 
   runtime.storage.recordCommandMetric("invictus.unmuteall");
   await interaction.editReply({
@@ -4198,12 +4829,14 @@ async function applyTimeoutToTargets(
   targets: GuildMember[],
   untilMs: number | null,
   reason: string,
+  runtime: BotRuntime,
   onlyIfTimedOut = false,
 ): Promise<{
   applied: number;
   skipped: number;
   failed: number;
   details: string[];
+  cancelled: boolean;
 }> {
   let applied = 0;
   let skipped = 0;
@@ -4211,6 +4844,10 @@ async function applyTimeoutToTargets(
   const details: string[] = [];
 
   for (const target of targets) {
+    if (!runtime.isCurrent()) {
+      return { applied, skipped, failed, details, cancelled: true };
+    }
+
     const [allowed, whyNot] = canTimeoutTarget(actor, me, target);
     if (!allowed) {
       skipped += 1;
@@ -4223,26 +4860,32 @@ async function applyTimeoutToTargets(
       continue;
     }
 
+    if (!runtime.isCurrent()) {
+      return { applied, skipped, failed, details, cancelled: true };
+    }
     const success = await target
       .timeout(untilMs, reason)
       .then(() => true)
       .catch(() => false);
     if (success) {
       applied += 1;
-      continue;
+    } else {
+      failed += 1;
+      details.push(`${target.toString()} (discord API error)`);
     }
 
-    failed += 1;
-    details.push(`${target.toString()} (discord API error)`);
+    if (!runtime.isCurrent()) {
+      return { applied, skipped, failed, details, cancelled: true };
+    }
   }
 
-  return { applied, skipped, failed, details };
+  return { applied, skipped, failed, details, cancelled: false };
 }
 
 function buildTargetCapMessage(eligibleTargets: number, cap: number): string {
   return (
     `Safety cap blocked this action: eligible targets \`${eligibleTargets}\` exceed cap \`${cap}\`. ` +
-    "Set `MUTEALL_TARGET_CAP=0` or raise the cap in config for larger actions."
+    "Use `/setup limits` to set `mute_target_cap` to 0 or raise it for larger actions."
   );
 }
 
@@ -4288,7 +4931,9 @@ async function handleInvictusRolePanel(
 
   const requestedChannel = interaction.options.getChannel("channel");
   const targetChannel =
-    (isDmPanelTargetChannel(requestedChannel) ? requestedChannel : null) ??
+    (isCurrentGuildTargetChannel(interaction, requestedChannel)
+      ? requestedChannel
+      : null) ??
     getDmPanelTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
@@ -4355,6 +5000,10 @@ async function handleInvictusRolePanel(
     interaction.options.getBoolean("mention_everyone") ?? false;
   const mentionPayload = buildAnnouncementMentions(mentionEveryone);
 
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   const sent = await targetChannel
     .send({
       ...(mentionPayload.content === null
@@ -4370,6 +5019,11 @@ async function handleInvictusRolePanel(
       content: "Failed to create the role panel in that channel.",
       ephemeral: true,
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
     return;
   }
 
@@ -4406,7 +5060,9 @@ async function handleInvictusRolePanelMulti(
 
   const requestedChannel = interaction.options.getChannel("channel");
   const targetChannel =
-    (isDmPanelTargetChannel(requestedChannel) ? requestedChannel : null) ??
+    (isCurrentGuildTargetChannel(interaction, requestedChannel)
+      ? requestedChannel
+      : null) ??
     getDmPanelTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
@@ -4482,6 +5138,10 @@ async function handleInvictusRolePanelMulti(
     interaction.options.getBoolean("mention_everyone") ?? false;
   const mentionPayload = buildAnnouncementMentions(mentionEveryone);
 
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    return;
+  }
   const sent = await targetChannel
     .send({
       ...(mentionPayload.content === null
@@ -4497,6 +5157,11 @@ async function handleInvictusRolePanelMulti(
       content: "Failed to create the multi-role panel in that channel.",
       ephemeral: true,
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
     return;
   }
 
@@ -4520,7 +5185,11 @@ async function handleInvictusRolePanelMulti(
 function getManageTargetChannel(
   interaction: ChatInputCommandInteraction,
 ): TextChannel | null {
-  if (interaction.channel instanceof TextChannel) {
+  if (
+    interaction.channel instanceof TextChannel &&
+    interaction.guild &&
+    interaction.channel.guildId === interaction.guild.id
+  ) {
     return interaction.channel;
   }
 
@@ -4530,7 +5199,7 @@ function getManageTargetChannel(
 function getDmPanelTargetChannel(
   interaction: ChatInputCommandInteraction,
 ): DmPanelTargetChannel | null {
-  if (isDmPanelTargetChannel(interaction.channel)) {
+  if (isCurrentGuildTargetChannel(interaction, interaction.channel)) {
     return interaction.channel;
   }
 
@@ -4552,6 +5221,23 @@ function isDmPanelTargetChannel(
   return (
     typeof maybeThreadChannel.isThread === "function" &&
     maybeThreadChannel.isThread()
+  );
+}
+
+function isPersistentGuildChannel(
+  channel: unknown,
+): channel is TextChannel | NewsChannel {
+  if (channel instanceof TextChannel || channel instanceof NewsChannel) {
+    return true;
+  }
+  if (!channel || typeof channel !== "object") {
+    return false;
+  }
+  const candidate = channel as { type?: ChannelType; send?: unknown };
+  return (
+    (candidate.type === ChannelType.GuildText ||
+      candidate.type === ChannelType.GuildAnnouncement) &&
+    typeof candidate.send === "function"
   );
 }
 
@@ -4800,7 +5486,7 @@ async function requireStaff(
   }
 
   const isStaff = member.roles.cache.some((role) =>
-    runtime.config.staffRoleIdsText.has(role.id),
+    runtime.settings.roles.staff.includes(role.id),
   );
   if (!isStaff) {
     await interaction.reply({
@@ -4814,7 +5500,7 @@ async function requireStaff(
 }
 
 async function requireAdmin(
-  interaction: ChatInputCommandInteraction,
+  interaction: ChatInputCommandInteraction | ModalSubmitInteraction,
 ): Promise<boolean> {
   if (!interaction.guild) {
     await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
@@ -4866,7 +5552,10 @@ async function requireRoyal(
 
   const titles = getMemberRoyalTitles(actor, runtime);
   if (titles.length === 0) {
-    await interaction.reply({ content: MSG_ROYAL_ONLY, ephemeral: true });
+    await interaction.reply({
+      content: `Only the ${runtime.settings.labels.emperor} or ${runtime.settings.labels.empress} can use this command.`,
+      ephemeral: true,
+    });
     return null;
   }
 
@@ -4884,19 +5573,45 @@ function getMemberRoyalTitles(
   const titles: RoyalTitle[] = [];
 
   if (
-    runtime.config.emperorRoleIdText &&
-    member.roles.cache.has(runtime.config.emperorRoleIdText)
+    runtime.settings.roles.emperor &&
+    member.roles.cache.has(runtime.settings.roles.emperor)
   ) {
     titles.push("Emperor");
   }
   if (
-    runtime.config.empressRoleIdText &&
-    member.roles.cache.has(runtime.config.empressRoleIdText)
+    runtime.settings.roles.empress &&
+    member.roles.cache.has(runtime.settings.roles.empress)
   ) {
     titles.push("Empress");
   }
 
   return titles;
+}
+
+function assertBackfillIsCurrent(runtime: BotRuntime): void {
+  if (!runtime.isCurrent()) {
+    throw new Error("Backfill cancelled because the guild is no longer active.");
+  }
+}
+
+function isCurrentGuildTargetChannel(
+  interaction: Pick<ChatInputCommandInteraction, "guild">,
+  channel: unknown,
+): channel is DmPanelTargetChannel {
+  return (
+    Boolean(interaction.guild) &&
+    isDmPanelTargetChannel(channel) &&
+    channel.guildId === interaction.guild?.id
+  );
+}
+
+function getRoyalDisplayLabel(
+  runtime: BotRuntime,
+  title: RoyalTitle,
+): string {
+  return title === "Emperor"
+    ? runtime.settings.labels.emperor
+    : runtime.settings.labels.empress;
 }
 
 function isConfirmed(value: string): boolean {
@@ -4913,6 +5628,10 @@ async function handleCourtPost(
   }
 
   await interaction.deferReply({ ephemeral: true });
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
 
   const channel = await getTargetChannel(interaction, runtime);
   if (!channel) {
@@ -4930,6 +5649,10 @@ async function handleCourtPost(
       source: "manual",
       mentionEveryone: true,
     });
+    if (!runtime.isCurrent()) {
+      await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+      return;
+    }
 
     runtime.storage.recordCommandMetric("court.post");
 
@@ -4960,6 +5683,10 @@ async function handleCourtCustom(
   }
 
   await interaction.deferReply({ ephemeral: true });
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
 
   const cleanQuestion = normalizeQuestionText(
     interaction.options.getString("question", true),
@@ -4977,28 +5704,52 @@ async function handleCourtCustom(
 
   const embed = buildCourtEmbed("custom", cleanQuestion, runtime);
   const mentionPayload = buildAnnouncementMentions(false);
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({
+      content: "Court post was cancelled because this server's configuration changed.",
+    });
+    return;
+  }
+
   const sent = await channel.send({
     ...(mentionPayload.content === null
       ? {}
       : { content: mentionPayload.content }),
     embeds: [embed],
-    components: buildAnonymousAnswerComponents(),
+    components: runtime.settings.features.anonymousAnswers
+      ? buildAnonymousAnswerComponents()
+      : [],
     allowedMentions: mentionPayload.allowedMentions,
   });
 
-  const thread = await getOrCreateAnswerThread(
-    sent,
-    cleanQuestion,
-    runtime,
-    interaction,
-  );
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({
+      content: "Court post was cancelled because this server's configuration changed.",
+    });
+    return;
+  }
+
+  const thread = runtime.settings.features.anonymousAnswers
+    ? await getOrCreateAnswerThread(
+        sent,
+        cleanQuestion,
+        runtime,
+        interaction,
+      )
+    : null;
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({
+      content: "Court post was cancelled because this server's configuration changed.",
+    });
+    return;
+  }
   runtime.storage.upsertPostRow({
     message_id: String(sent.id),
     thread_id: thread?.id ?? null,
     channel_id: String(channel.id),
     category: "custom",
     question: cleanQuestion,
-    posted_at: isoNow(runtime.config.timezoneName),
+    posted_at: isoNow(runtime.settings.timezone),
     close_after_hours: THREAD_CLOSE_HOURS,
     closed: false,
     closed_at: null,
@@ -5033,6 +5784,10 @@ async function handleCourtClose(
   }
 
   await interaction.deferReply({ ephemeral: true });
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
 
   const messageId = interaction.options.getString("message_id");
   const record = messageId
@@ -5051,7 +5806,9 @@ async function handleCourtClose(
     interaction,
     runtime,
   );
-  runtime.storage.recordCommandMetric("court.close");
+  if (runtime.isCurrent()) {
+    runtime.storage.recordCommandMetric("court.close");
+  }
 
   await interaction.editReply({ content: message });
 
@@ -5154,6 +5911,10 @@ async function handleCourtReopen(
   }
 
   await interaction.deferReply({ ephemeral: true });
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
 
   const messageId = interaction.options.getString("message_id", true);
   const closeAfterHours =
@@ -5171,7 +5932,9 @@ async function handleCourtReopen(
     interaction,
     runtime,
   );
-  runtime.storage.recordCommandMetric("court.reopen");
+  if (runtime.isCurrent()) {
+    runtime.storage.recordCommandMetric("court.reopen");
+  }
 
   await interaction.editReply({ content: message });
 
@@ -5195,6 +5958,10 @@ async function handleCourtRemoveAnswer(
   }
 
   await interaction.deferReply({ ephemeral: true });
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
 
   const messageId = interaction.options.getString("message_id", true);
   const recordMatch = runtime.storage.findAnswerRecord(messageId);
@@ -5233,6 +6000,10 @@ async function handleCourtRemoveAnswer(
     return;
   }
 
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
   const deleted = await answerMessage
     .delete()
     .then(() => true)
@@ -5241,6 +6012,11 @@ async function handleCourtRemoveAnswer(
     await interaction.editReply({
       content: "Failed to delete that answer message.",
     });
+    return;
+  }
+
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
     return;
   }
 
@@ -5261,20 +6037,58 @@ async function closeCourtPost(
   interaction: ChatInputCommandInteraction,
   runtime: BotRuntime,
 ): Promise<[boolean, string]> {
+  if (!runtime.isCurrent()) {
+    return [false, "Court close was cancelled because this server's configuration changed."];
+  }
   if (record.closed) {
     return [false, MSG_INQUIRY_CLOSED];
   }
 
   const thread = await fetchThreadById(interaction, record.thread_id);
-  if (thread) {
-    await thread.edit({ archived: true, locked: true }).catch(() => null);
+  if (record.thread_id && !thread) {
+    return [false, "Could not verify the stored court thread in this server."];
   }
 
-  const message = await getPostMessage(interaction.client, record);
-  if (message) {
-    await message
-      .edit({ components: buildClosedAnswerComponents() })
-      .catch(() => null);
+  const message = interaction.guild
+    ? await getPostMessage(interaction.guild, record)
+    : null;
+  if (!message) {
+    return [false, "Could not verify the stored court message in this server."];
+  }
+
+  if (thread) {
+    if (!runtime.isCurrent()) {
+      return [false, MSG_RUNTIME_CANCELLED];
+    }
+    const threadUpdated = await thread
+      .edit({ archived: true, locked: true })
+      .then(() => true)
+      .catch(() => false);
+    if (!threadUpdated) {
+      return [false, "Failed to archive and lock the stored court thread."];
+    }
+    if (!runtime.isCurrent()) {
+      return [false, MSG_RUNTIME_CANCELLED];
+    }
+  }
+
+  if (!runtime.isCurrent()) {
+    return [false, MSG_RUNTIME_CANCELLED];
+  }
+  const messageUpdated = await message
+    .edit({
+      components: runtime.settings.features.anonymousAnswers
+        ? buildClosedAnswerComponents()
+        : [],
+    })
+    .then(() => true)
+    .catch(() => false);
+  if (!messageUpdated) {
+    return [false, "Failed to update the stored court message."];
+  }
+
+  if (!runtime.isCurrent()) {
+    return [false, "Court close was cancelled because this server's configuration changed."];
   }
 
   runtime.storage.markPostClosed(record.message_id, reason);
@@ -5287,26 +6101,62 @@ async function reopenCourtPost(
   interaction: ChatInputCommandInteraction,
   runtime: BotRuntime,
 ): Promise<[boolean, string]> {
+  if (!runtime.isCurrent()) {
+    return [false, "Court reopen was cancelled because this server's configuration changed."];
+  }
   if (!record.closed) {
     return [false, "This court inquiry is already open."];
   }
 
   const thread = await fetchThreadById(interaction, record.thread_id);
+  if (record.thread_id && !thread) {
+    return [false, "Could not verify the stored court thread in this server."];
+  }
+
+  const message = interaction.guild
+    ? await getPostMessage(interaction.guild, record)
+    : null;
+  if (!message) {
+    return [false, "Could not verify the stored court message in this server."];
+  }
+
   if (thread) {
-    await thread
+    if (!runtime.isCurrent()) {
+      return [false, MSG_RUNTIME_CANCELLED];
+    }
+    const threadUpdated = await thread
       .edit({
         archived: false,
         locked: false,
         autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
       })
-      .catch(() => null);
+      .then(() => true)
+      .catch(() => false);
+    if (!threadUpdated) {
+      return [false, "Failed to unlock the stored court thread."];
+    }
+    if (!runtime.isCurrent()) {
+      return [false, MSG_RUNTIME_CANCELLED];
+    }
   }
 
-  const message = await getPostMessage(interaction.client, record);
-  if (message) {
-    await message
-      .edit({ components: buildAnonymousAnswerComponents() })
-      .catch(() => null);
+  if (!runtime.isCurrent()) {
+    return [false, MSG_RUNTIME_CANCELLED];
+  }
+  const messageUpdated = await message
+    .edit({
+      components: runtime.settings.features.anonymousAnswers
+        ? buildAnonymousAnswerComponents()
+        : [],
+    })
+    .then(() => true)
+    .catch(() => false);
+  if (!messageUpdated) {
+    return [false, "Failed to update the stored court message."];
+  }
+
+  if (!runtime.isCurrent()) {
+    return [false, "Court reopen was cancelled because this server's configuration changed."];
   }
 
   const reopened = runtime.storage.markPostOpen(
@@ -5330,6 +6180,9 @@ async function postQuestion(
     mentionEveryone: boolean;
   },
 ): Promise<[string, string]> {
+  if (!runtime.isCurrent()) {
+    throw new Error("Court post cancelled because this server's configuration changed.");
+  }
   const [chosenCategory, question] = runtime.storage.pickQuestion(
     options.category,
     options.randomize,
@@ -5343,18 +6196,29 @@ async function postQuestion(
       ? {}
       : { content: mentionPayload.content }),
     embeds: [embed],
-    components: buildAnonymousAnswerComponents(),
+    components: runtime.settings.features.anonymousAnswers
+      ? buildAnonymousAnswerComponents()
+      : [],
     allowedMentions: mentionPayload.allowedMentions,
   });
 
-  const thread = await getOrCreateAnswerThread(sent, question, runtime);
+  if (!runtime.isCurrent()) {
+    throw new Error("Court post cancelled because this server's configuration changed.");
+  }
+
+  const thread = runtime.settings.features.anonymousAnswers
+    ? await getOrCreateAnswerThread(sent, question, runtime)
+    : null;
+  if (!runtime.isCurrent()) {
+    throw new Error("Court post cancelled because this server's configuration changed.");
+  }
   runtime.storage.upsertPostRow({
     message_id: String(sent.id),
     thread_id: thread?.id ?? null,
     channel_id: String(channel.id),
     category: chosenCategory,
     question,
-    posted_at: isoNow(runtime.config.timezoneName),
+    posted_at: isoNow(runtime.settings.timezone),
     close_after_hours: THREAD_CLOSE_HOURS,
     closed: false,
     closed_at: null,
@@ -5629,7 +6493,7 @@ function remainingAnonymousCooldownSeconds(
   userId: string,
   runtime: BotRuntime,
 ): number {
-  if (runtime.config.anonCooldownSeconds <= 0) {
+  if (runtime.settings.limits.anonCooldownSeconds <= 0) {
     return 0;
   }
 
@@ -5643,7 +6507,10 @@ function remainingAnonymousCooldownSeconds(
   const elapsedSeconds = Math.floor(
     DateTime.utc().diff(lastAnswerAt.toUTC()).as("seconds"),
   );
-  return Math.max(runtime.config.anonCooldownSeconds - elapsedSeconds, 0);
+  return Math.max(
+    runtime.settings.limits.anonCooldownSeconds - elapsedSeconds,
+    0,
+  );
 }
 
 function validateAnonymousAnswerSubmission(
@@ -5651,7 +6518,7 @@ function validateAnonymousAnswerSubmission(
   answerText: string,
   runtime: BotRuntime,
 ): string | null {
-  const requiredRoleId = runtime.config.anonRequiredRoleIdText;
+  const requiredRoleId = runtime.settings.roles.anonymousRequired;
   if (requiredRoleId && !member.roles.cache.has(requiredRoleId)) {
     return "You are not eligible to submit anonymous court answers yet.";
   }
@@ -5661,7 +6528,7 @@ function validateAnonymousAnswerSubmission(
   const accountAgeError = minimumAgeRequirementError(
     nowUtc,
     member.user.createdAt,
-    runtime.config.anonMinAccountAgeMinutes,
+    runtime.settings.limits.anonMinAccountAgeMinutes,
     "Your account is too new to use anonymous answers. ",
   );
   if (accountAgeError) {
@@ -5671,7 +6538,7 @@ function validateAnonymousAnswerSubmission(
   const memberAgeError = minimumAgeRequirementError(
     nowUtc,
     member.joinedAt,
-    runtime.config.anonMinMemberAgeMinutes,
+    runtime.settings.limits.anonMinMemberAgeMinutes,
     "You need more time in this server before using anonymous answers. ",
   );
   if (memberAgeError) {
@@ -5689,7 +6556,7 @@ function validateAnonymousAnswerSubmission(
     return `You are on cooldown for anonymous answers. Try again in \`${formatDuration(remaining)}\`.`;
   }
 
-  if (!runtime.config.anonAllowLinks && URL_PATTERN.test(answerText)) {
+  if (!runtime.settings.limits.anonAllowLinks && URL_PATTERN.test(answerText)) {
     return "Links are currently disabled for anonymous answers.";
   }
 
@@ -5698,6 +6565,7 @@ function validateAnonymousAnswerSubmission(
 
 async function handleRolePanelButtonInteraction(
   interaction: ButtonInteraction,
+  runtime: BotRuntime,
   buttonSlot: number,
   roleIdFromCustomId: string | null = null,
 ): Promise<void> {
@@ -5722,7 +6590,7 @@ async function handleRolePanelButtonInteraction(
     buttonSlot,
   );
   const roleIdText =
-    roleIdFromCustomId ?? (roleIdFromFooter ? String(roleIdFromFooter) : null);
+    roleIdFromCustomId ?? roleIdFromFooter;
   if (!roleIdText) {
     await interaction.reply({
       content: "This role panel is missing role metadata.",
@@ -5755,6 +6623,7 @@ async function handleRolePanelButtonInteraction(
     member,
     role,
     interaction.message.id,
+    runtime,
   );
   if (errorMessage) {
     await interaction.reply({ content: errorMessage, ephemeral: true });
@@ -5834,8 +6703,13 @@ async function toggleRoleForMember(
   member: GuildMember,
   role: Role,
   messageId: string,
+  runtime: BotRuntime,
 ): Promise<[string | null, string | null]> {
   const hasRole = member.roles.cache.has(role.id);
+
+  if (!runtime.isCurrent()) {
+    return [null, MSG_RUNTIME_CANCELLED];
+  }
 
   if (hasRole) {
     try {
@@ -5847,13 +6721,24 @@ async function toggleRoleForMember(
       return [null, "I do not have permission to remove this role."];
     }
 
+    if (!runtime.isCurrent()) {
+      return [null, MSG_RUNTIME_CANCELLED];
+    }
+
     return [`Removed ${role.toString()}.`, null];
   }
 
+  if (!runtime.isCurrent()) {
+    return [null, MSG_RUNTIME_CANCELLED];
+  }
   try {
     await member.roles.add(role, `Self-assigned via role panel (${messageId})`);
   } catch {
     return [null, "I do not have permission to grant this role."];
+  }
+
+  if (!runtime.isCurrent()) {
+    return [null, MSG_RUNTIME_CANCELLED];
   }
 
   return [`You now have ${role.toString()}.`, null];
@@ -5864,15 +6749,44 @@ async function resolveCourtPostMessageForModal(
   postRecord: PostRecord | null,
   questionMessageId: string,
 ): Promise<Message | null> {
-  if (interaction.message?.id === questionMessageId) {
-    return interaction.message;
-  }
-
   if (!postRecord) {
     return null;
   }
 
-  return getPostMessage(interaction.client, postRecord);
+  if (
+    interaction.message?.id === questionMessageId &&
+    interaction.message.channelId === postRecord.channel_id &&
+    isBotAuthoredInteractionMessage(interaction)
+  ) {
+    return interaction.message;
+  }
+
+  if (!interaction.guild) {
+    return null;
+  }
+  const message = await getPostMessage(interaction.guild, postRecord);
+  return message && isMessageAuthoredByClient(message, interaction.client.user?.id)
+    ? message
+    : null;
+}
+
+function isBotAuthoredInteractionMessage(
+  interaction: ButtonInteraction | ModalSubmitInteraction,
+): boolean {
+  return Boolean(
+    interaction.message &&
+      isMessageAuthoredByClient(
+        interaction.message,
+        interaction.client.user?.id,
+      ),
+  );
+}
+
+function isMessageAuthoredByClient(
+  message: Message,
+  clientUserId: string | undefined,
+): boolean {
+  return Boolean(clientUserId && message.author?.id === clientUserId);
 }
 
 function makeThreadName(question: string): string {
@@ -5892,7 +6806,7 @@ async function getOrCreateAnswerThread(
   runtime: BotRuntime,
   interaction?: ChatInputCommandInteraction,
 ): Promise<AnyThreadChannel | null> {
-  if (!message.guild) {
+  if (!message.guild || !runtime.isCurrent()) {
     return null;
   }
 
@@ -5905,40 +6819,49 @@ async function getOrCreateAnswerThread(
   const existingRecord = runtime.storage.getPostRecord(message.id);
   if (existingRecord?.thread_id) {
     const fetched = await fetchChannelById(
-      message.client,
+      message.guild,
       existingRecord.thread_id,
     );
-    if (fetched?.isThread()) {
+    if (fetched?.isThread() && runtime.isCurrent()) {
       runtime.storage.updatePostThreadId(message.id, fetched.id);
       return fetched;
     }
   }
 
-  const fetchedByMessageId = await fetchChannelById(message.client, message.id);
-  if (fetchedByMessageId?.isThread()) {
+  const fetchedByMessageId = await fetchChannelById(message.guild, message.id);
+  if (fetchedByMessageId?.isThread() && runtime.isCurrent()) {
     runtime.storage.updatePostThreadId(message.id, fetchedByMessageId.id);
     return fetchedByMessageId;
   }
 
+  if (!runtime.isCurrent()) {
+    return null;
+  }
   const thread = await message
     .startThread({
       name: makeThreadName(question || MSG_UNKNOWN_QUESTION),
       autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
     })
-    .catch(async () =>
-      message
+    .catch(async () => {
+      if (!runtime.isCurrent()) {
+        return null;
+      }
+      return message
         .startThread({
           name: makeThreadName(question || MSG_UNKNOWN_QUESTION),
         })
-        .catch(() => null),
-    );
+        .catch(() => null);
+    });
 
-  if (!thread) {
+  if (!thread || !runtime.isCurrent()) {
     return null;
   }
 
   runtime.storage.updatePostThreadId(message.id, thread.id);
 
+  if (!runtime.isCurrent()) {
+    return null;
+  }
   await thread
     .send(
       "**Anonymous Court Replies**\n" +
@@ -5969,12 +6892,7 @@ async function getTargetChannel(
     return null;
   }
 
-  const state = runtime.storage.getState();
-  const candidates = [
-    runtime.config.courtChannelIdText,
-    String(state.channel_id ?? "").trim(),
-    String(runtime.config.courtChannelId ?? "").trim(),
-  ];
+  const candidates = [runtime.settings.channels.court ?? ""];
 
   for (const candidate of candidates) {
     if (!/^\d+$/.test(candidate) || candidate === "0") {
@@ -6001,12 +6919,7 @@ async function getLogChannel(
     return null;
   }
 
-  const state = runtime.storage.getState();
-  const candidates = [
-    runtime.config.logChannelIdText,
-    String(state.log_channel_id ?? "").trim(),
-    String(runtime.config.logChannelId ?? "").trim(),
-  ];
+  const candidates = [runtime.settings.channels.log ?? ""];
 
   for (const candidate of candidates) {
     if (!/^\d+$/.test(candidate) || candidate === "0") {
@@ -6031,16 +6944,11 @@ async function sendLog(
   title: string,
   description: string,
 ): Promise<void> {
-  if (!interaction.guild) {
+  if (!interaction.guild || !runtime.isCurrent()) {
     return;
   }
 
-  const state = runtime.storage.getState();
-  const logChannelCandidates = [
-    runtime.config.logChannelIdText,
-    String(state.log_channel_id ?? "").trim(),
-    String(runtime.config.logChannelId ?? "").trim(),
-  ];
+  const logChannelCandidates = [runtime.settings.channels.log ?? ""];
 
   let destination: DmPanelTargetChannel | null = null;
   for (const candidate of logChannelCandidates) {
@@ -6048,14 +6956,14 @@ async function sendLog(
       continue;
     }
 
-    const fetched = await fetchChannelById(interaction.client, candidate);
+    const fetched = await fetchChannelById(interaction.guild, candidate);
     if (isDmPanelTargetChannel(fetched)) {
       destination = fetched;
       break;
     }
   }
 
-  if (!destination) {
+  if (!destination || !runtime.isCurrent()) {
     return;
   }
 
@@ -6069,19 +6977,20 @@ async function sendLog(
 }
 
 async function fetchChannelById(
-  client: ChatInputCommandInteraction["client"],
+  guild: NonNullable<ChatInputCommandInteraction["guild"]>,
   channelId: string,
 ): Promise<Channel | null> {
   if (!/^\d+$/.test(channelId)) {
     return null;
   }
 
-  const cached = client.channels.cache.get(channelId);
+  const cached = guild.channels.cache.get(channelId);
   if (cached) {
-    return cached;
+    return cached.guildId === guild.id ? cached : null;
   }
 
-  return client.channels.fetch(channelId).catch(() => null);
+  const fetched = await guild.channels.fetch(channelId).catch(() => null);
+  return fetched?.guildId === guild.id ? fetched : null;
 }
 
 async function fetchThreadById(
@@ -6092,7 +7001,10 @@ async function fetchThreadById(
     return null;
   }
 
-  const fetched = await fetchChannelById(interaction.client, threadId);
+  if (!interaction.guild) {
+    return null;
+  }
+  const fetched = await fetchChannelById(interaction.guild, threadId);
   if (fetched?.isThread()) {
     return fetched;
   }
@@ -6101,16 +7013,19 @@ async function fetchThreadById(
 }
 
 async function getPostMessage(
-  client: ChatInputCommandInteraction["client"],
+  guild: NonNullable<ChatInputCommandInteraction["guild"]>,
   record: PostRecord,
 ): Promise<Message | null> {
-  const channel = await fetchChannelById(client, record.channel_id);
+  const channel = await fetchChannelById(guild, record.channel_id);
   if (!channel?.isTextBased()) {
     return null;
   }
 
   const textTarget = channel as DmPanelTargetChannel;
-  return textTarget.messages.fetch(record.message_id).catch(() => null);
+  const message = await textTarget.messages
+    .fetch(record.message_id)
+    .catch(() => null);
+  return message?.guildId === guild.id ? message : null;
 }
 
 async function getOrFetchSendableGuildChannel(
@@ -6118,20 +7033,23 @@ async function getOrFetchSendableGuildChannel(
   channelId: string,
 ): Promise<DmPanelTargetChannel | null> {
   const cached = guild.channels.cache.get(channelId);
-  if (isDmPanelTargetChannel(cached)) {
+  if (isDmPanelTargetChannel(cached) && cached.guildId === guild.id) {
     return cached;
   }
 
   const fetched = await guild.channels.fetch(channelId).catch(() => null);
-  return isDmPanelTargetChannel(fetched) ? fetched : null;
+  return isDmPanelTargetChannel(fetched) && fetched.guildId === guild.id
+    ? fetched
+    : null;
 }
 
 export async function __scanBackfillHistoryTargetForTests(
   target: unknown,
   afterTimestamp: number | null,
-  messageCounts: Record<number, number>,
-  reactionsSentCounts: Record<number, number>,
-  reactionsReceivedCounts: Record<number, number>,
+  messageCounts: Record<string, number>,
+  reactionsSentCounts: Record<string, number>,
+  reactionsReceivedCounts: Record<string, number>,
+  shouldContinue: () => boolean = () => true,
 ): Promise<[number, number]> {
   return scanBackfillHistoryTarget(
     target as TextChannel | AnyThreadChannel,
@@ -6139,5 +7057,6 @@ export async function __scanBackfillHistoryTargetForTests(
     messageCounts,
     reactionsSentCounts,
     reactionsReceivedCounts,
+    shouldContinue,
   );
 }

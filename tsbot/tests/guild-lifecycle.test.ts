@@ -1,0 +1,135 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  recordGuildAvailable,
+  recordGuildUnavailable,
+} from "../src/discord/bot.js";
+import type { BotRuntime } from "../src/runtime.js";
+import type { GuildRecord } from "../src/types.js";
+
+const GUILD_ID = "111111111111111111";
+
+function record(enabled: boolean, leftAt: string | null): GuildRecord {
+  return {
+    guildId: GUILD_ID,
+    enabled,
+    name: "Guild",
+    joinedAt: "2026-07-01T00:00:00.000Z",
+    leftAt,
+    createdAt: "2026-07-01T00:00:00.000Z",
+    updatedAt: "2026-07-01T00:00:00.000Z",
+  };
+}
+
+function runtimeWith(existing: GuildRecord | null): {
+  runtime: BotRuntime;
+  ensureGuild: ReturnType<typeof vi.fn>;
+  reactivateGuild: ReturnType<typeof vi.fn>;
+  invalidateGuild: ReturnType<typeof vi.fn>;
+} {
+  const ensureGuild = vi.fn(() => existing ?? record(false, null));
+  const reactivateGuild = vi.fn(() => record(false, null));
+  const invalidateGuild = vi.fn();
+  return {
+    runtime: {
+      storage: {
+        getGuild: vi.fn(() => existing),
+        ensureGuild,
+        reactivateGuild,
+      },
+      invalidateGuild,
+    } as unknown as BotRuntime,
+    ensureGuild,
+    reactivateGuild,
+    invalidateGuild,
+  };
+}
+
+describe("guild lifecycle", () => {
+  it("preserves an active guild during startup discovery when its join is unchanged", () => {
+    const fixture = runtimeWith(record(true, null));
+
+    const result = recordGuildAvailable(fixture.runtime, GUILD_ID, "Guild", {
+      startupDiscovery: true,
+      observedJoinedAt: "2026-07-01T00:00:00.000Z",
+    });
+
+    expect(result.rejoined).toBe(false);
+    expect(result.record.enabled).toBe(true);
+    expect(fixture.ensureGuild).toHaveBeenCalledWith(
+      GUILD_ID,
+      "Guild",
+      "2026-07-01T00:00:00.000Z",
+    );
+    expect(fixture.reactivateGuild).not.toHaveBeenCalled();
+    expect(fixture.invalidateGuild).toHaveBeenCalledWith(GUILD_ID);
+  });
+
+  it("treats an online guildCreate as a rejoin and leaves retained data disabled", () => {
+    const fixture = runtimeWith(record(true, null));
+
+    const result = recordGuildAvailable(fixture.runtime, GUILD_ID, "Guild", {
+      observedJoinedAt: "2026-07-01T00:00:00.000Z",
+    });
+
+    expect(result.rejoined).toBe(true);
+    expect(result.record.enabled).toBe(false);
+    expect(fixture.reactivateGuild).toHaveBeenCalledWith(
+      GUILD_ID,
+      "Guild",
+      "2026-07-01T00:00:00.000Z",
+    );
+    expect(fixture.ensureGuild).not.toHaveBeenCalled();
+  });
+
+  it("detects an offline leave/rejoin from a changed startup join timestamp", () => {
+    const fixture = runtimeWith(record(true, null));
+
+    const result = recordGuildAvailable(fixture.runtime, GUILD_ID, "Guild", {
+      startupDiscovery: true,
+      observedJoinedAt: "2026-07-20T00:00:00.000Z",
+    });
+
+    expect(result.rejoined).toBe(true);
+    expect(result.record.enabled).toBe(false);
+    expect(fixture.reactivateGuild).toHaveBeenCalledWith(
+      GUILD_ID,
+      "Guild",
+      "2026-07-20T00:00:00.000Z",
+    );
+    expect(fixture.ensureGuild).not.toHaveBeenCalled();
+  });
+
+  it("reactivates a guild previously marked left during startup discovery", () => {
+    const fixture = runtimeWith(record(true, "2026-07-20T00:00:00.000Z"));
+
+    const result = recordGuildAvailable(fixture.runtime, GUILD_ID, "Guild", {
+      startupDiscovery: true,
+      observedJoinedAt: "2026-07-25T00:00:00.000Z",
+    });
+
+    expect(result.rejoined).toBe(true);
+    expect(result.record.enabled).toBe(false);
+    expect(fixture.reactivateGuild).toHaveBeenCalledWith(
+      GUILD_ID,
+      "Guild",
+      "2026-07-25T00:00:00.000Z",
+    );
+    expect(fixture.ensureGuild).not.toHaveBeenCalled();
+  });
+
+  it("marks a departed guild inactive without invoking purge", () => {
+    const markGuildLeft = vi.fn();
+    const purgeGuild = vi.fn();
+    const invalidateGuild = vi.fn();
+    const runtime = {
+      storage: { markGuildLeft, purgeGuild },
+      invalidateGuild,
+    } as unknown as BotRuntime;
+
+    recordGuildUnavailable(runtime, GUILD_ID);
+
+    expect(markGuildLeft).toHaveBeenCalledWith(GUILD_ID);
+    expect(invalidateGuild).toHaveBeenCalledWith(GUILD_ID);
+    expect(purgeGuild).not.toHaveBeenCalled();
+  });
+});

@@ -3,8 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { __scanBackfillHistoryTargetForTests } from "../src/discord/commands.js";
-import { CourtStorage } from "../src/storage/db.js";
-import type { RuntimeConfig } from "../src/types.js";
+import { CourtStorage, type GuildStorage } from "../src/storage/db.js";
 
 type FakeUser = { id: string; bot?: boolean };
 
@@ -88,39 +87,39 @@ function createScanTarget(batches: FakeMessage[][]): {
   };
 }
 
-function createStorageForBackfillTests(): CourtStorage {
+function createStorageForBackfillTests(): GuildStorage {
   const repoRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), "courtbot-ts-backfill-"),
   );
-  const config = {
-    dbFile: ":memory:",
-    courtChannelId: 1,
-    logChannelId: 0,
-    timezoneName: "UTC",
-  } as unknown as RuntimeConfig;
+  const config = { dbFile: ":memory:" };
 
   const storage = new CourtStorage(config, repoRoot);
   storage.initStorage();
-  return storage;
+  const guildId = "123456789012345678";
+  storage.ensureGuild(guildId, "Backfill Regression");
+  return storage.forGuild(guildId);
 }
 
 describe("backfill scanning regression", () => {
   it("respects lookback cutoff and tallies non-bot users", async () => {
-    const m1 = createMessage("m1", 1300, { id: "10" }, [
-      createReaction([{ id: "20" }, { id: "21", bot: true }]),
+    const m1 = createMessage("m1", 1300, { id: "100000000000000010" }, [
+      createReaction([
+        { id: "100000000000000020" },
+        { id: "100000000000000021", bot: true },
+      ]),
     ]);
-    const m2 = createMessage("m2", 1100, { id: "11", bot: true }, [
-      createReaction([{ id: "22" }]),
+    const m2 = createMessage("m2", 1100, { id: "100000000000000011", bot: true }, [
+      createReaction([{ id: "100000000000000022" }]),
     ]);
-    const m3 = createMessage("m3", 900, { id: "12" }, [
-      createReaction([{ id: "23" }]),
+    const m3 = createMessage("m3", 900, { id: "100000000000000012" }, [
+      createReaction([{ id: "100000000000000023" }]),
     ]);
 
     const { target, fetchMock } = createScanTarget([[m1, m2, m3]]);
 
-    const messageCounts: Record<number, number> = {};
-    const reactionsSentCounts: Record<number, number> = {};
-    const reactionsReceivedCounts: Record<number, number> = {};
+    const messageCounts: Record<string, number> = {};
+    const reactionsSentCounts: Record<string, number> = {};
+    const reactionsReceivedCounts: Record<string, number> = {};
 
     const [scannedMessages, scannedReactions] =
       await __scanBackfillHistoryTargetForTests(
@@ -134,9 +133,56 @@ describe("backfill scanning regression", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(scannedMessages).toBe(2);
     expect(scannedReactions).toBe(2);
-    expect(messageCounts).toEqual({ 10: 1 });
-    expect(reactionsSentCounts).toEqual({ 20: 1, 22: 1 });
-    expect(reactionsReceivedCounts).toEqual({ 10: 1 });
+    expect(messageCounts).toEqual({ "100000000000000010": 1 });
+    expect(reactionsSentCounts).toEqual({
+      "100000000000000020": 1,
+      "100000000000000022": 1,
+    });
+    expect(reactionsReceivedCounts).toEqual({
+      "100000000000000010": 1,
+    });
+  });
+
+  it("stops reaction scans when the guild invalidates during a fetch", async () => {
+    let current = true;
+    const firstFetch = vi.fn(async () => {
+      current = false;
+      return new Map([
+        ["100000000000000020", { id: "100000000000000020" }],
+      ]);
+    });
+    const secondFetch = vi.fn(async () => new Map());
+    const message = createMessage(
+      "m1",
+      1300,
+      { id: "100000000000000010" },
+      [
+        { users: { fetch: firstFetch } },
+        { users: { fetch: secondFetch } },
+      ],
+    );
+    const { target, fetchMock } = createScanTarget([[message]]);
+
+    const messageCounts: Record<string, number> = {};
+    const reactionsSentCounts: Record<string, number> = {};
+    const reactionsReceivedCounts: Record<string, number> = {};
+
+    await expect(
+      __scanBackfillHistoryTargetForTests(
+        target,
+        null,
+        messageCounts,
+        reactionsSentCounts,
+        reactionsReceivedCounts,
+        () => current,
+      ),
+    ).rejects.toThrow("Backfill cancelled");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(firstFetch).toHaveBeenCalledTimes(1);
+    expect(secondFetch).not.toHaveBeenCalled();
+    expect(reactionsSentCounts).toEqual({});
+    expect(reactionsReceivedCounts).toEqual({});
   });
 });
 
@@ -179,9 +225,9 @@ describe("backfill merge regression", () => {
 
     const top = storage.listTopUsersForMetric("messages_sent", 3);
     expect(top).toEqual([
-      [10, 9],
-      [30, 9],
-      [20, 7],
+      ["10", 9],
+      ["30", 9],
+      ["20", 7],
     ]);
   });
 });

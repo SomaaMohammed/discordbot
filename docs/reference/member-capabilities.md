@@ -1,88 +1,60 @@
 # Invictus Member Capabilities
 
-This reference lists what members can do with the current Invictus runtime, grouped by access level.
+Capabilities are scoped to the current guild. The guild must be active, configured, and enabled, and the relevant feature flag must be on. A role or channel configured in one guild never grants access or receives output in another.
 
-## 1. Any Member (No Admin Required)
+## Before Guild Enablement
 
-### Invictus Chat Phrases in Normal Server Messages
+New and rejoined guilds are disabled. They do not receive message-trigger replies, moderation actions, metrics, scheduled posts, digests, retention work, or backfills.
 
-- Messages must be sent in a server, not a DM, and include the word `invictus`.
-- Public intents available to everyone:
-  - Greeting: hi, hello, hey, yo, sup, good morning, good afternoon, good evening
-  - Help: help, commands, options, what can you do
-  - Coin flip: flip a coin, flip coin, coin flip, heads or tails
-  - Time: what time is it, time now, current time
-  - Thanks: thanks, thank you, ty
-  - Farewell: goodnight, good night, sleep well
+The guild owner and members with Administrator permission can use the `/setup` family to inspect and configure the guild. Other command families return a setup-required response until `/setup validate` succeeds and an administrator runs `/setup enable`.
 
-### Role Panel Button Usage
+## Any Member
 
-- Members can click buttons created by Invictus role-panel commands.
-- A click self-assigns or removes the configured role.
-- The bot must have Manage Roles, and its role must be above the target role.
-- Managed roles and `@everyone` cannot be self-assigned from a panel.
+When their feature is enabled, ordinary members can use:
 
-### Invictus DM Panel Button Usage
+- Public Invictus chat intents in normal guild messages containing the configured invocation keyword or an alias.
+- Court threads and anonymous-answer flows, subject to the guild's required role, account/member age, cooldown, and link policy.
+- Role-panel buttons for configured self-assignable roles. The bot still needs Manage Roles and sufficient hierarchy; managed roles and `@everyone` cannot be self-assigned.
+- DM-panel buttons created by an administrator. DM forwarding can fail if the recipient blocks DMs.
+- `/greetings send profile:<name>` for a greeting profile configured in the current guild.
+- `/fun` verdict, title, fate, battle, stats, and leaderboard commands.
+- Royal AFK mention responses in the configured royal-alert channel when the referenced title is AFK.
 
-- Members can click an Invictus DM-panel button to open a message modal.
-- The bot forwards that message as a DM to the panel's configured recipient.
-- If the recipient's DMs are closed, forwarding fails with an error message.
+Component interactions validate the message guild as well as their custom ID. DMs are rejected unless the individual feature explicitly supports them.
 
-### Royal AFK Mention Trigger
+## Configured Royal Members
 
-- In the configured royal-alert channel, members can trigger AFK responses by mentioning Emperor or Empress aliases while that royal title is AFK.
+Members with the guild's Emperor or Empress role can use `/invictus afk` to set or clear the AFK state for their bound title. Royal AFK and presence behavior also requires the guild's feature flag and royal-alert channel.
 
-## 2. Royal Members Only (Emperor/Empress Role)
+Temporary silence phrases are available only to the configured royal role and apply only to the guild's configured silence-target roles, excluding configured silence-exclude roles. There is no built-in citizen role or production role ID.
 
-### `/invictus afk`
+## Privileged Invictus Chat
 
-- `/invictus afk reason:<text>` sets AFK for the caller's royal title or titles.
-- `/invictus afk` with no reason clears AFK for the caller's royal title or titles.
+Status, counsel, and title-bestowal conversational intents require one of the current guild's configured privileged-chat roles or its configured champion user. Emperor and Empress bindings are distinct and do not grant privileged chat unless the same role is also added to `privileged-chat`. The invocation keyword and display labels can differ by guild.
 
-### Emperor Text-Triggered Temporary Silence Lock
+## Configured Staff
 
-- An Emperor-role member can post specific lock phrases in a text channel.
-- The result is a channel send-permission lock for two minutes on the configured target roles.
+Members with one of the current guild's configured staff roles can use the `/questions` reports and the non-administrative `/court` operations. Those operations include status, health, analytics, category and question maintenance, manual/custom posting, closing and reopening posts, deadline extension, open-post listing, and answer removal.
 
-## 3. Privileged Invictus Chat Intents
+Configured staff access is local to that guild. It does not grant `/setup`, process-wide authority, or the administrator-only court operations listed below. Guild owners and Discord Administrators also satisfy the staff check.
 
-Restricted conversational intents are not public:
+## Administrators and Guild Owner
 
-- `invictus status report`
-- `invictus what should i do`
-- `invictus title me`
+The following operations require the guild owner or Discord Administrator permission and remain subject to Discord bot permissions and role hierarchy:
 
-Access requires the Empress role or the server-configured privileged Invictus account.
+- all non-purge `/setup` mutations, validation, enablement, disablement, and export;
+- court dry runs, state export/import, mode, channel, log-channel, schedule, and history-reset operations;
+- Invictus announcements, DM/role panels, message purge, locks, slowmode, timeouts, and bulk moderation;
+- user-stat backfill execution/status and royal-presence timer reset;
+- Invictus administrative help and royal-AFK status inspection;
+- text-triggered reply moderation when enabled.
 
-## 4. Admin Members Only
+`/setup validate` checks channels, required bot permissions, configured role existence, silence-target hierarchy, schedules, timezone, limits, and feature dependencies. Role-panel interactions separately reject managed roles and `@everyone` and enforce assignment hierarchy when used. `/setup enable` refuses an incomplete configuration.
 
-The following `/invictus` subcommands require Administrator permission or server ownership:
+## Guild Owner Only
 
-- `/invictus say`
-- `/invictus dmpanel`
-- `/invictus rolepanel`
-- `/invictus rolepanelmulti`
-- `/invictus purge`
-- `/invictus purgeuser`
-- `/invictus lock`
-- `/invictus unlock`
-- `/invictus slowmode`
-- `/invictus timeout`
-- `/invictus untimeout`
-- `/invictus mutemany`
-- `/invictus unmutemany`
-- `/invictus muteall`
-- `/invictus unmuteall`
-- `/invictus resetroyaltimer`
-- `/invictus afkstatus`
-- `/invictus backfillstats`
-- `/invictus backfillstatus`
-- `/invictus help`
+`/setup purge` is restricted to the server owner. It displays what will be removed and requires the exact confirmation `PURGE <guildId>`. A successful purge deletes only the current guild's settings and tenant data. It never deletes the shared database file or another guild's rows.
 
-Admin text-triggered reply mute, silence, and timeout intents work only for an administrator or server owner, in a server channel, when sent as a reply.
+## Guild Lifecycle
 
-## Notes
-
-- `/invictus afk` is not admin-only, but it is royal-role-only.
-- Invictus chat triggers are case-insensitive.
-- This reference reflects current TypeScript runtime behavior.
+`/setup disable` stops guild behavior without deleting data. If the bot leaves, the guild is marked inactive and all tenant data is retained. Rejoining restores that retained record but does not auto-enable it; an administrator must validate and enable it again.

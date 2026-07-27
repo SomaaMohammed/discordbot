@@ -1,14 +1,13 @@
 import { DateTime, Duration } from "luxon";
 import {
   EMPEROR_LOCK_PHRASES,
-  EMPEROR_MENTION_PATTERN,
-  EMPRESS_MENTION_PATTERN,
   HISTORY_LIMIT,
   IMPERIAL_OMENS,
   IMPERIAL_TITLES,
   IMPERIAL_VERDICTS,
   MSG_EVERYONE_MENTION,
-  REPLY_MUTE_PATTERNS,
+  REPLY_MUTE_ACTION_PATTERN,
+  REPLY_MUTE_INTENT_PATTERN,
   ROLE_PANEL_BUTTON_CUSTOM_ID,
   ROLE_PANEL_MAX_BUTTONS,
   ROLE_PANEL_TARGETS_FOOTER_PREFIX,
@@ -19,7 +18,6 @@ import {
 import { formatDuration, parseIso } from "./time.js";
 import type {
   BackfillStatusSnapshot,
-  BotMode,
   CourtState,
   MetricsShape,
   PostRecord,
@@ -30,12 +28,6 @@ import type {
 
 const ROLE_PANEL_ROLE_ID_PATTERN = /^RolePanelTarget:(\d+)$/;
 const ROLE_PANEL_ROLE_CUSTOM_ID_PREFIX = `${ROLE_PANEL_BUTTON_CUSTOM_ID}:role:`;
-const VALID_BOT_MODES: Set<BotMode> = new Set<BotMode>([
-  "off",
-  "manual",
-  "auto",
-]);
-
 export const IMPORT_STATE_DATE_KEYS = [
   "last_posted_date",
   "last_dry_run_date",
@@ -269,15 +261,11 @@ export function ensureRoyalAfkShape(royalAfk: unknown): RoyalAfkShape {
 
 export function parseRolePanelTargetsFromFooter(
   footerText: string,
-): Record<number, number> {
+): Record<number, string> {
   const cleaned = footerText.trim();
   const singleMatch = ROLE_PANEL_ROLE_ID_PATTERN.exec(cleaned);
   if (singleMatch?.[1]) {
-    const roleId = Number.parseInt(singleMatch[1], 10);
-    if (!Number.isNaN(roleId)) {
-      return { 1: roleId };
-    }
-    return {};
+    return { 1: singleMatch[1] };
   }
 
   if (!cleaned.startsWith(ROLE_PANEL_TARGETS_FOOTER_PREFIX)) {
@@ -289,7 +277,7 @@ export function parseRolePanelTargetsFromFooter(
     return {};
   }
 
-  const targets: Record<number, number> = {};
+  const targets: Record<number, string> = {};
   for (const entry of payload.split(",")) {
     const segment = entry.trim();
     if (!segment.includes("=")) {
@@ -309,9 +297,8 @@ export function parseRolePanelTargetsFromFooter(
     }
 
     const slot = Number.parseInt(slotRaw, 10);
-    const roleId = Number.parseInt(roleIdRaw, 10);
     if (slot >= 1 && slot <= ROLE_PANEL_MAX_BUTTONS && !(slot in targets)) {
-      targets[slot] = roleId;
+      targets[slot] = roleIdRaw;
     }
   }
 
@@ -321,7 +308,7 @@ export function parseRolePanelTargetsFromFooter(
 export function extractRolePanelRoleIdForSlot(
   footerTexts: string[],
   slot: number,
-): number | null {
+): string | null {
   if (slot < 1 || slot > ROLE_PANEL_MAX_BUTTONS) {
     return null;
   }
@@ -336,7 +323,7 @@ export function extractRolePanelRoleIdForSlot(
   return null;
 }
 
-export function extractRolePanelRoleId(footerTexts: string[]): number | null {
+export function extractRolePanelRoleId(footerTexts: string[]): string | null {
   return extractRolePanelRoleIdForSlot(footerTexts, 1);
 }
 
@@ -398,8 +385,33 @@ export function normalizeTriggerPhrase(content: string): string {
   return cleaned.split(/\s+/).filter(Boolean).join(" ");
 }
 
-export function parseReplyMuteMessage(content: string): string | null {
-  for (const pattern of REPLY_MUTE_PATTERNS) {
+export function parseReplyMuteMessage(
+  content: string,
+  invocationTerms: readonly string[] = ["invictus"],
+): string | null {
+  const invocationPattern = buildInvocationPattern(invocationTerms);
+  if (!invocationPattern) {
+    return null;
+  }
+  const patterns = [
+    new RegExp(
+      String.raw`^\s*(?:hey|yo|oi)[\s,]+(?:${invocationPattern})[\s,:-]+${REPLY_MUTE_ACTION_PATTERN}\b(.*)$`,
+      "i",
+    ),
+    new RegExp(
+      String.raw`^\s*(?:${invocationPattern})[\s,:-]+${REPLY_MUTE_ACTION_PATTERN}\b(.*)$`,
+      "i",
+    ),
+    new RegExp(
+      String.raw`^\s*(?:hey|yo|oi)[\s,]+(?:${invocationPattern})[\s,:-]+${REPLY_MUTE_INTENT_PATTERN}\b(?:[\s,:-]*(.*))$`,
+      "i",
+    ),
+    new RegExp(
+      String.raw`^\s*(?:${invocationPattern})[\s,:-]+${REPLY_MUTE_INTENT_PATTERN}\b(?:[\s,:-]*(.*))$`,
+      "i",
+    ),
+  ];
+  for (const pattern of patterns) {
     const match = pattern.exec(content);
     if (match) {
       const reason = match[1] ?? "";
@@ -439,9 +451,10 @@ export function isPublicInvictusChatIntent(
 
 export function parsePrivilegedInvictusChatIntent(
   content: string,
+  invocationTerms: readonly string[] = ["invictus"],
 ): PrivilegedInvictusChatIntent | null {
   const normalized = normalizeTriggerPhrase(content);
-  if (!/\binvictus\b/.test(normalized)) {
+  if (!containsInvocation(normalized, invocationTerms)) {
     return null;
   }
 
@@ -500,37 +513,109 @@ export function isSilenceLockTrigger(content: string): boolean {
   return SILENCE_LOCK_PHRASES.has(normalizeTriggerPhrase(content));
 }
 
-export function isEmperorLockTrigger(content: string): boolean {
-  return EMPEROR_LOCK_PHRASES.has(normalizeTriggerPhrase(content));
+export function isEmperorLockTrigger(
+  content: string,
+  emperorLabel = "Emperor",
+): boolean {
+  const normalized = normalizeTriggerPhrase(content);
+  const normalizedLabel = normalizeTriggerPhrase(emperorLabel);
+  if (EMPEROR_LOCK_PHRASES.has(normalized)) {
+    return true;
+  }
+  if (!normalizedLabel || normalizedLabel === "emperor") {
+    return false;
+  }
+  return Array.from(EMPEROR_LOCK_PHRASES).some(
+    (phrase) => phrase.replaceAll("emperor", normalizedLabel) === normalized,
+  );
 }
 
-export function hasEmperorMention(content: string): boolean {
-  return EMPEROR_MENTION_PATTERN.test(content);
+export function hasEmperorMention(
+  content: string,
+  label = "Emperor",
+): boolean {
+  return containsInvocation(normalizeTriggerPhrase(content), [label, "his majesty"]);
 }
 
-export function hasEmpressMention(content: string): boolean {
-  return EMPRESS_MENTION_PATTERN.test(content);
+export function hasEmpressMention(
+  content: string,
+  label = "Empress",
+): boolean {
+  return containsInvocation(normalizeTriggerPhrase(content), [label, "her majesty"]);
 }
 
-export function parseRoyalMentions(content: string): RoyalTitle[] {
+export function parseRoyalMentions(
+  content: string,
+  labels: { emperor: string; empress: string } = {
+    emperor: "Emperor",
+    empress: "Empress",
+  },
+): RoyalTitle[] {
   const mentioned: RoyalTitle[] = [];
-  if (hasEmperorMention(content)) {
+  if (hasEmperorMention(content, labels.emperor)) {
     mentioned.push("Emperor");
   }
-  if (hasEmpressMention(content)) {
+  if (hasEmpressMention(content, labels.empress)) {
     mentioned.push("Empress");
   }
   return mentioned;
 }
 
+function buildInvocationPattern(invocationTerms: readonly string[]): string {
+  return literalInvocationTerms(invocationTerms)
+    .map((term) => escapeRegExp(term).replaceAll(/\s+/g, String.raw`\s+`))
+    .join("|");
+}
+
+function containsInvocation(
+  normalizedContent: string,
+  invocationTerms: readonly string[],
+): boolean {
+  for (const term of normalizedInvocationTerms(invocationTerms)) {
+    if (
+      normalizedContent === term ||
+      normalizedContent.startsWith(`${term} `) ||
+      normalizedContent.endsWith(` ${term}`) ||
+      normalizedContent.includes(` ${term} `)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function normalizedInvocationTerms(invocationTerms: readonly string[]): string[] {
+  return Array.from(
+    new Set(
+      invocationTerms
+        .map(normalizeTriggerPhrase)
+        .filter((term) => term.length > 0),
+    ),
+  ).sort((left, right) => right.length - left.length);
+}
+
+function literalInvocationTerms(invocationTerms: readonly string[]): string[] {
+  return Array.from(
+    new Set(
+      invocationTerms
+        .map((term) => term.trim().toLowerCase().replaceAll(/\s+/g, " "))
+        .filter((term) => term.length > 0),
+    ),
+  ).sort((left, right) => right.length - left.length);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export interface MentionedMemberLike {
-  roles?: Array<{ id: number } | number>;
+  roles?: Array<{ id: string } | string>;
 }
 
 export function parseRoyalMemberMentions(
   mentionedMembers: MentionedMemberLike[] | null | undefined,
-  emperorRoleId: number,
-  empressRoleId: number,
+  emperorRoleId: string,
+  empressRoleId: string,
 ): RoyalTitle[] {
   if (!mentionedMembers || mentionedMembers.length === 0) {
     return [];
@@ -540,7 +625,7 @@ export function parseRoyalMemberMentions(
   for (const member of mentionedMembers) {
     const roleIds = new Set(
       (member.roles ?? []).map((role) => {
-        if (typeof role === "number") {
+        if (typeof role === "string") {
           return role;
         }
         return role.id;
@@ -724,56 +809,6 @@ function createImportedStateBase(base: CourtState): CourtState {
   };
 }
 
-function applyImportedMode(
-  merged: CourtState,
-  importedObj: Record<string, unknown>,
-): void {
-  const mode = importedObj.mode;
-  if (typeof mode === "string" && VALID_BOT_MODES.has(mode as BotMode)) {
-    merged.mode = mode as BotMode;
-  }
-}
-
-function applyImportedTimingAndChannels(
-  merged: CourtState,
-  importedObj: Record<string, unknown>,
-  defaultCourtChannelId: number,
-): void {
-  if ("hour" in importedObj) {
-    merged.hour = coerceInt(
-      importedObj.hour,
-      coerceInt(merged.hour, 20),
-      0,
-      23,
-    );
-  }
-
-  if ("minute" in importedObj) {
-    merged.minute = coerceInt(
-      importedObj.minute,
-      coerceInt(merged.minute, 0),
-      0,
-      59,
-    );
-  }
-
-  if ("channel_id" in importedObj) {
-    merged.channel_id = coerceInt(
-      importedObj.channel_id,
-      coerceInt(merged.channel_id, defaultCourtChannelId, 1),
-      1,
-    );
-  }
-
-  if ("log_channel_id" in importedObj) {
-    merged.log_channel_id = coerceInt(
-      importedObj.log_channel_id,
-      coerceInt(merged.log_channel_id, 0, 0),
-      0,
-    );
-  }
-}
-
 function applyImportedDateKeys(
   merged: CourtState,
   importedObj: Record<string, unknown>,
@@ -839,7 +874,7 @@ function applyImportedStructuredShapes(
 export function mergeImportedState(
   imported: unknown,
   base: CourtState,
-  defaultCourtChannelId: number,
+  _legacyDefaultCourtChannelId = 0,
 ): CourtState {
   if (typeof imported !== "object" || imported === null) {
     return base;
@@ -848,16 +883,7 @@ export function mergeImportedState(
   const importedObj = imported as Record<string, unknown>;
   const merged = createImportedStateBase(base);
 
-  applyImportedMode(merged, importedObj);
-  applyImportedTimingAndChannels(merged, importedObj, defaultCourtChannelId);
   applyImportedDateKeys(merged, importedObj);
-
-  if ("dry_run_auto_post" in importedObj) {
-    const parsed = parseBoolish(importedObj.dry_run_auto_post);
-    if (parsed !== null) {
-      merged.dry_run_auto_post = parsed;
-    }
-  }
 
   applyImportedCollections(merged, importedObj);
   applyImportedStructuredShapes(merged, importedObj);
@@ -930,13 +956,14 @@ export function buildRoyalAfkStatusLine(
   title: RoyalTitle,
   afkEntry: RoyalAfkShape["by_title"][RoyalTitle],
   now: DateTime,
+  displayLabel: string = title,
 ): string {
   const reason = afkEntry.reason || "Away from court";
   const setAt = parseIso(afkEntry.set_at);
   if (!setAt) {
-    return `The ${title} is currently AFK: ${reason}`;
+    return `The ${displayLabel} is currently AFK: ${reason}`;
   }
-  return `The ${title} is currently AFK (${formatDuration(now.diff(setAt))}): ${reason}`;
+  return `The ${displayLabel} is currently AFK (${formatDuration(now.diff(setAt))}): ${reason}`;
 }
 
 export function getRoyalAfkResponse(
@@ -944,8 +971,12 @@ export function getRoyalAfkResponse(
   afkShape: RoyalAfkShape,
   now: DateTime,
   mentionedRoyalTitles: RoyalTitle[] = [],
+  labels: { emperor: string; empress: string } = {
+    emperor: "Emperor",
+    empress: "Empress",
+  },
 ): string | null {
-  const mentionedTitles: RoyalTitle[] = [...parseRoyalMentions(content)];
+  const mentionedTitles: RoyalTitle[] = [...parseRoyalMentions(content, labels)];
   for (const title of mentionedRoyalTitles) {
     if (!mentionedTitles.includes(title)) {
       mentionedTitles.push(title);
@@ -962,7 +993,12 @@ export function getRoyalAfkResponse(
       if (!entry.active) {
         return null;
       }
-      return buildRoyalAfkStatusLine(title, entry, now);
+      return buildRoyalAfkStatusLine(
+        title,
+        entry,
+        now,
+        title === "Emperor" ? labels.emperor : labels.empress,
+      );
     })
     .filter((line): line is string => Boolean(line));
 
@@ -976,6 +1012,10 @@ export function getRoyalAfkResponse(
 export function buildRoyalAfkStatusReport(
   afkShape: RoyalAfkShape,
   now: DateTime,
+  labels: { emperor: string; empress: string } = {
+    emperor: "Emperor",
+    empress: "Empress",
+  },
 ): string {
   const lines: string[] = [];
 
@@ -986,13 +1026,15 @@ export function buildRoyalAfkStatusReport(
     }
 
     const reason = entry.reason || "Away from court";
+    const displayLabel =
+      title === "Emperor" ? labels.emperor : labels.empress;
     const setAt = parseIso(entry.set_at);
     if (setAt) {
       lines.push(
-        `**${title}:** AFK for ${formatDuration(now.diff(setAt))} - ${reason}`,
+        `**${displayLabel}:** AFK for ${formatDuration(now.diff(setAt))} - ${reason}`,
       );
     } else {
-      lines.push(`**${title}:** AFK - ${reason}`);
+      lines.push(`**${displayLabel}:** AFK - ${reason}`);
     }
   }
 

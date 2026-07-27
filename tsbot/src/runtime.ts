@@ -1,30 +1,164 @@
 import { DateTime } from "luxon";
 import { DEFAULT_BACKFILL_STATUS } from "./parity.js";
 import { getNow } from "./time.js";
-import type { BackfillStatusSnapshot, RuntimeConfig } from "./types.js";
-import { CourtStorage } from "./storage/db.js";
+import type {
+  BackfillStatusSnapshot,
+  GuildSettings,
+  ProcessConfig,
+} from "./types.js";
+import { CourtStorage, type GuildStorage } from "./storage/db.js";
 
-export interface BotRuntime {
-  config: RuntimeConfig;
-  storage: CourtStorage;
-  backfillStatus: BackfillStatusSnapshot;
+export interface GuildRuntime {
+  readonly guildId: string;
+  readonly botVersion: string;
+  readonly storage: GuildStorage;
+  settings: GuildSettings;
+  readonly backfillStatus: BackfillStatusSnapshot;
+  readonly generation: number;
   now: () => DateTime;
   randomInt: (maxExclusive: number) => number;
+  isCurrent: () => boolean;
+  invalidate: () => void;
+  refreshSettings: () => Promise<GuildSettings>;
+  saveSettings: (settings: GuildSettings) => Promise<GuildSettings>;
+  setEnabled: (enabled: boolean) => Promise<GuildSettings>;
+}
+
+export interface BotRuntime {
+  readonly processConfig: ProcessConfig;
+  readonly storage: CourtStorage;
+  readonly randomInt: (maxExclusive: number) => number;
+  forGuild: (guildId: string) => Promise<GuildRuntime | null>;
+  invalidateGuild: (
+    guildId: string,
+    options?: { forgetBackfillStatus?: boolean },
+  ) => void;
 }
 
 export function createRuntime(
-  config: RuntimeConfig,
+  processConfig: ProcessConfig,
   repoRoot: string,
 ): BotRuntime {
-  const storage = new CourtStorage(config, repoRoot);
+  const storage = new CourtStorage(processConfig, repoRoot);
   storage.initStorage();
 
-  return {
-    config,
+  const backfillStatuses = new Map<string, BackfillStatusSnapshot>();
+  const guildGenerations = new Map<string, number>();
+  const randomInt = (maxExclusive: number): number =>
+    Math.floor(Math.random() * Math.max(maxExclusive, 1));
+
+  const runtime: BotRuntime = {
+    processConfig,
     storage,
-    backfillStatus: { ...DEFAULT_BACKFILL_STATUS },
-    now: () => getNow(config.timezoneName),
-    randomInt: (maxExclusive) =>
-      Math.floor(Math.random() * Math.max(maxExclusive, 1)),
+    randomInt,
+    async forGuild(guildId: string): Promise<GuildRuntime | null> {
+      const normalizedGuildId = String(guildId).trim();
+      if (!/^\d+$/.test(normalizedGuildId)) {
+        return null;
+      }
+
+      const initialSettings = await Promise.resolve(
+        storage.getGuildSettings(normalizedGuildId),
+      );
+      if (!initialSettings) {
+        return null;
+      }
+
+      let persistedSettings = structuredClone(initialSettings);
+      let settings = structuredClone(initialSettings);
+      const guildStorage = storage.forGuild(normalizedGuildId);
+      let generation = guildGenerations.get(normalizedGuildId) ?? 0;
+      const backfillStatus =
+        backfillStatuses.get(normalizedGuildId) ?? {
+          ...DEFAULT_BACKFILL_STATUS,
+        };
+      backfillStatuses.set(normalizedGuildId, backfillStatus);
+
+      const guildRuntime: GuildRuntime = {
+        guildId: normalizedGuildId,
+        botVersion: processConfig.botVersion,
+        storage: guildStorage,
+        settings,
+        backfillStatus,
+        get generation(): number {
+          return generation;
+        },
+        now: () => getNow(settings.timezone),
+        randomInt,
+        isCurrent(): boolean {
+          if ((guildGenerations.get(normalizedGuildId) ?? 0) !== generation) {
+            return false;
+          }
+          const record = storage.getGuild(normalizedGuildId);
+          const currentSettings = storage.getGuildSettings(normalizedGuildId);
+          return Boolean(
+            record?.enabled &&
+              record.leftAt === null &&
+              currentSettings?.enabled,
+          );
+        },
+        invalidate(): void {
+          runtime.invalidateGuild(normalizedGuildId);
+        },
+        async refreshSettings(): Promise<GuildSettings> {
+          const refreshed = storage.getGuildSettings(normalizedGuildId);
+          if (!refreshed) {
+            throw new Error(
+              `Guild ${normalizedGuildId} is no longer registered in storage`,
+            );
+          }
+          persistedSettings = structuredClone(refreshed);
+          settings = structuredClone(refreshed);
+          guildRuntime.settings = settings;
+          return settings;
+        },
+        async saveSettings(nextSettings: GuildSettings): Promise<GuildSettings> {
+          const saved = storage.saveGuildSettings(
+            normalizedGuildId,
+            nextSettings,
+            persistedSettings,
+          );
+          runtime.invalidateGuild(normalizedGuildId);
+          generation = guildGenerations.get(normalizedGuildId) ?? generation;
+          persistedSettings = structuredClone(saved);
+          settings = structuredClone(saved);
+          guildRuntime.settings = settings;
+          return settings;
+        },
+        async setEnabled(enabled: boolean): Promise<GuildSettings> {
+          // Enabling is conditional on the exact configuration the caller
+          // reviewed. Disabling is unconditional and changes only the flag, so
+          // an emergency disable cannot be defeated by a concurrent edit.
+          const saved = storage.setGuildEnabled(
+            normalizedGuildId,
+            enabled,
+            enabled ? persistedSettings : undefined,
+          );
+          runtime.invalidateGuild(normalizedGuildId);
+          generation = guildGenerations.get(normalizedGuildId) ?? generation;
+          persistedSettings = structuredClone(saved);
+          settings = structuredClone(saved);
+          guildRuntime.settings = settings;
+          return settings;
+        },
+      };
+
+      return guildRuntime;
+    },
+    invalidateGuild(
+      guildId: string,
+      options: { forgetBackfillStatus?: boolean } = {},
+    ): void {
+      const normalizedGuildId = String(guildId);
+      guildGenerations.set(
+        normalizedGuildId,
+        (guildGenerations.get(normalizedGuildId) ?? 0) + 1,
+      );
+      if (options.forgetBackfillStatus) {
+        backfillStatuses.delete(normalizedGuildId);
+      }
+    },
   };
+
+  return runtime;
 }
