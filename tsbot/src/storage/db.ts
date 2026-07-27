@@ -8,6 +8,7 @@ import {
   HISTORY_LIMIT,
   POST_RECORD_LIMIT,
   QUESTIONS_FILE,
+  SILENCE_LEASES_METRIC_KEY,
   THREAD_CLOSE_HOURS,
   USER_METRIC_PREFIX,
 } from "../constants.js";
@@ -114,6 +115,11 @@ export class GuildSettingsConflictError extends Error {
   }
 }
 
+export interface GuildEnableExpectation {
+  settings: GuildSettings;
+  lifecycleJoinedAt: string | null;
+}
+
 const TENANT_TABLES = [
   "guild_settings",
   "kv",
@@ -135,10 +141,12 @@ const OBSOLETE_OR_DERIVED_STATE_KEYS = [
 ] as const;
 
 const IMPORT_SNOWFLAKE_SCHEMA = z.string().regex(DISCORD_SNOWFLAKE_PATTERN);
-const IMPORT_ISO_TIMESTAMP_SCHEMA = z.string().refine(
-  (value) => DateTime.fromISO(value, { setZone: true }).isValid,
-  "must be a valid ISO timestamp",
-);
+const IMPORT_ISO_TIMESTAMP_SCHEMA = z
+  .string()
+  .refine(
+    (value) => DateTime.fromISO(value, { setZone: true }).isValid,
+    "must be a valid ISO timestamp",
+  );
 const IMPORT_OPTIONAL_STRING_SCHEMA = z.string().nullable();
 const IMPORT_NONNEGATIVE_INTEGER_SCHEMA = z.number().int().nonnegative();
 
@@ -318,7 +326,9 @@ export class CourtStorage {
     } else {
       const issues = validateV2Schema(this.db);
       if (issues.length > 0) {
-        throw new Error(`Database schema validation failed: ${issues.join("; ")}`);
+        throw new Error(
+          `Database schema validation failed: ${issues.join("; ")}`,
+        );
       }
     }
 
@@ -391,10 +401,16 @@ export class CourtStorage {
     const normalized = assertDiscordSnowflake(guildId);
     const now = utcNow();
     const normalizedName = normalizeGuildName(name);
-    const joinedAt = normalizeObservedTimestamp(observedJoinedAt) ?? now;
-    const priorSettings = this.getGuildSettings(normalized);
+    const observedJoin = normalizeObservedTimestamp(observedJoinedAt);
 
     const reactivate = this.db.transaction(() => {
+      const existingGuild = this.getGuild(normalized);
+      const joinedAt = nextReactivationJoinedAt(
+        existingGuild?.joinedAt ?? null,
+        observedJoin,
+        now,
+      );
+      const priorSettings = this.getGuildSettings(normalized);
       this.db
         .prepare(
           `INSERT INTO guilds (
@@ -432,7 +448,9 @@ export class CourtStorage {
       this.db
         .prepare(
           `UPDATE guilds
-           SET enabled = 0, left_at = ?, updated_at = ?
+           SET enabled = 0,
+               left_at = ?,
+               updated_at = ?
            WHERE guild_id = ?`,
         )
         .run(now, now, normalized);
@@ -504,6 +522,25 @@ export class CourtStorage {
     return settings;
   }
 
+  public getGuildEnableExpectation(
+    guildId: string,
+  ): GuildEnableExpectation | null {
+    this.assertInitialized();
+    const normalized = assertDiscordSnowflake(guildId);
+    const read = this.db.transaction(() => {
+      const settings = this.getGuildSettings(normalized);
+      const guild = this.getGuild(normalized);
+      if (!settings || !guild) {
+        return null;
+      }
+      return {
+        settings,
+        lifecycleJoinedAt: guild.joinedAt,
+      };
+    });
+    return read();
+  }
+
   public saveGuildSettings(
     guildId: string,
     input: GuildSettings,
@@ -531,9 +568,7 @@ export class CourtStorage {
       // merely because its caller started before another enable operation.
       settings.enabled = current.enabled;
       this.db
-        .prepare(
-          "UPDATE guilds SET updated_at = ? WHERE guild_id = ?",
-        )
+        .prepare("UPDATE guilds SET updated_at = ? WHERE guild_id = ?")
         .run(now, normalized);
       this.upsertSettings(normalized, settings, now);
       saved = settings;
@@ -545,7 +580,7 @@ export class CourtStorage {
   public setGuildEnabled(
     guildId: string,
     enabled: boolean,
-    expectedSettings?: GuildSettings,
+    expectation?: GuildEnableExpectation,
   ): GuildSettings {
     this.assertInitialized();
     const normalized = assertDiscordSnowflake(guildId);
@@ -557,14 +592,26 @@ export class CourtStorage {
       if (!current || !guild) {
         throw new Error(`Guild ${normalized} is not configured`);
       }
-      if (
-        expectedSettings !== undefined &&
-        !isDeepStrictEqual(current, sanitizeGuildSettings(expectedSettings))
-      ) {
-        throw new GuildSettingsConflictError(normalized);
-      }
-      if (enabled && guild.leftAt !== null) {
-        throw new Error("An inactive guild must rejoin before it can be enabled");
+      if (enabled) {
+        if (!expectation) {
+          throw new TypeError(
+            "Enabling a guild requires a reviewed settings and lifecycle snapshot",
+          );
+        }
+        if (
+          !isDeepStrictEqual(
+            current,
+            sanitizeGuildSettings(expectation.settings),
+          ) ||
+          guild.joinedAt !== expectation.lifecycleJoinedAt
+        ) {
+          throw new GuildSettingsConflictError(normalized);
+        }
+        if (guild.leftAt !== null) {
+          throw new Error(
+            "An inactive guild must rejoin before it can be enabled",
+          );
+        }
       }
 
       current.enabled = Boolean(enabled);
@@ -680,7 +727,9 @@ export class CourtStorage {
 
   private countForGuild(table: string, guildId: string): number {
     const row = this.db
-      .prepare(`SELECT COUNT(*) AS count FROM ${quoteIdentifier(table)} WHERE guild_id = ?`)
+      .prepare(
+        `SELECT COUNT(*) AS count FROM ${quoteIdentifier(table)} WHERE guild_id = ?`,
+      )
       .get(guildId) as CountRow;
     return Number(row.count);
   }
@@ -713,7 +762,11 @@ export class GuildStorage {
     const filePath = path.join(this.repoRoot, QUESTIONS_FILE);
     const raw = fs.readFileSync(filePath, "utf8");
     const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
       throw new TypeError("The bootstrap question template must be an object");
     }
     this.setQuestions(parsed as Record<string, string[]>);
@@ -773,7 +826,9 @@ export class GuildStorage {
       used_questions: dedupeStrings(stringArray(state.used_questions)),
       royal_presence: ensureRoyalPresenceShape(state.royal_presence),
       royal_afk: ensureRoyalAfkShape(state.royal_afk),
-      posts: Array.isArray(state.posts) ? state.posts.slice(-POST_RECORD_LIMIT) : [],
+      posts: Array.isArray(state.posts)
+        ? state.posts.slice(-POST_RECORD_LIMIT)
+        : [],
       metrics: ensureMetricsShape(state.metrics),
     };
 
@@ -1180,6 +1235,10 @@ export class GuildStorage {
       this.metricsIncrement(
         this.buildUserMetricKey(userId, "anonymous_answers_sent"),
       );
+      // The answer row, cooldown, per-user metric, and aggregate metric are
+      // one logical write. Keeping them in this transaction prevents a sent
+      // answer from being only partially represented after a storage error.
+      this.metricsIncrement("answers_total");
     });
     mark.immediate();
   }
@@ -1192,10 +1251,6 @@ export class GuildStorage {
       )
       .get(this.guildId, String(userId)) as CooldownRow | undefined;
     return row ? String(row.last_answer_at) : null;
-  }
-
-  public recordAnswerMetric(): void {
-    this.metricsIncrement("answers_total");
   }
 
   public purgeExpiredAnswers(retentionDays: number): number {
@@ -1221,8 +1276,7 @@ export class GuildStorage {
          WHERE guild_id = ? AND answer_message_id = ?`,
       )
       .get(this.guildId, String(answerMessageId)) as
-      | AnswerRecordRow
-      | undefined;
+      AnswerRecordRow | undefined;
     return row
       ? {
           question_message_id: String(row.question_message_id),
@@ -1332,7 +1386,8 @@ export class GuildStorage {
       question:
         String(record.question ?? "Unknown question").trim() ||
         "Unknown question",
-      posted_at: String(record.posted_at ?? this.nowIso()).trim() || this.nowIso(),
+      posted_at:
+        String(record.posted_at ?? this.nowIso()).trim() || this.nowIso(),
       close_after_hours: coerceInt(
         record.close_after_hours,
         THREAD_CLOSE_HOURS,
@@ -1392,9 +1447,9 @@ export class GuildStorage {
     const metrics = this.db
       .prepare(
         `SELECT metric_key, metric_value, updated_at FROM metrics
-         WHERE guild_id = ? ORDER BY metric_key`,
+         WHERE guild_id = ? AND metric_key <> ? ORDER BY metric_key`,
       )
-      .all(this.guildId) as MetricRow[];
+      .all(this.guildId, SILENCE_LEASES_METRIC_KEY) as MetricRow[];
     const cooldowns = this.db
       .prepare(
         `SELECT user_id, last_answer_at FROM anon_cooldowns
@@ -1409,35 +1464,27 @@ export class GuildStorage {
       settings: this.getSettings(),
       state,
       questions,
-      kv: kv.map(
-        (row): GuildKvExport => ({
-          key: String(row.key),
-          value: String(row.value),
-          updatedAt: String(row.updated_at),
-        }),
-      ),
+      kv: kv.map((row): GuildKvExport => ({
+        key: String(row.key),
+        value: String(row.value),
+        updatedAt: String(row.updated_at),
+      })),
       posts: this.listPostRecords(),
-      answers: answers.map(
-        (row): GuildAnswerExport => ({
-          questionMessageId: String(row.question_message_id),
-          userId: String(row.user_id),
-          answerMessageId: String(row.answer_message_id),
-          createdAt: String(row.created_at),
-        }),
-      ),
-      metrics: metrics.map(
-        (row): GuildMetricExport => ({
-          key: String(row.metric_key),
-          value: String(row.metric_value),
-          updatedAt: String(row.updated_at),
-        }),
-      ),
-      cooldowns: cooldowns.map(
-        (row): GuildCooldownExport => ({
-          userId: String(row.user_id),
-          lastAnswerAt: String(row.last_answer_at),
-        }),
-      ),
+      answers: answers.map((row): GuildAnswerExport => ({
+        questionMessageId: String(row.question_message_id),
+        userId: String(row.user_id),
+        answerMessageId: String(row.answer_message_id),
+        createdAt: String(row.created_at),
+      })),
+      metrics: metrics.map((row): GuildMetricExport => ({
+        key: String(row.metric_key),
+        value: String(row.metric_value),
+        updatedAt: String(row.updated_at),
+      })),
+      cooldowns: cooldowns.map((row): GuildCooldownExport => ({
+        userId: String(row.user_id),
+        lastAnswerAt: String(row.last_answer_at),
+      })),
     };
   }
 
@@ -1491,6 +1538,17 @@ export class GuildStorage {
       }
       assertNumericRowId(cooldown.userId, "cooldown user ID");
     }
+    for (const metric of rawCandidate.metrics) {
+      if (
+        metric &&
+        typeof metric === "object" &&
+        metric.key === SILENCE_LEASES_METRIC_KEY
+      ) {
+        throw new TypeError(
+          "Imported metrics must not contain reserved silence-lock runtime metadata",
+        );
+      }
+    }
 
     const candidate = GUILD_DATA_IMPORT_SCHEMA.parse(payload);
     if (!isDeepStrictEqual(candidate.settings, rawCandidate.settings)) {
@@ -1514,6 +1572,12 @@ export class GuildStorage {
     settings.enabled = false;
 
     const applyImport = this.db.transaction(() => {
+      const liveSilenceLeaseMetric = this.db
+        .prepare(
+          `SELECT metric_key, metric_value, updated_at FROM metrics
+           WHERE guild_id = ? AND metric_key = ?`,
+        )
+        .get(this.guildId, SILENCE_LEASES_METRIC_KEY) as MetricRow | undefined;
       // Disable inside the same transaction before replacing configuration.
       // Ordinary configuration writes intentionally preserve the current
       // enabled state, while imports must always restore into an inert guild.
@@ -1535,12 +1599,7 @@ export class GuildStorage {
          VALUES (?, ?, ?, ?)`,
       );
       for (const row of candidate.kv) {
-        insertKv.run(
-          this.guildId,
-          row.key,
-          row.value,
-          row.updatedAt,
-        );
+        insertKv.run(this.guildId, row.key, row.value, row.updatedAt);
       }
 
       // kv.state and kv.questions are restored byte-for-byte above. The
@@ -1592,6 +1651,14 @@ export class GuildStorage {
           metric.key,
           metric.value,
           metric.updatedAt,
+        );
+      }
+      if (liveSilenceLeaseMetric) {
+        insertMetric.run(
+          this.guildId,
+          liveSilenceLeaseMetric.metric_key,
+          liveSilenceLeaseMetric.metric_value,
+          liveSilenceLeaseMetric.updated_at,
         );
       }
       const insertCooldown = this.db.prepare(
@@ -1769,6 +1836,28 @@ function normalizeObservedTimestamp(value: string | null): string | null {
   return new Date(timestamp).toISOString();
 }
 
+function nextReactivationJoinedAt(
+  storedJoinedAt: string | null,
+  observedJoinedAt: string | null,
+  now: string,
+): string {
+  const storedTimestamp =
+    storedJoinedAt === null ? NaN : Date.parse(storedJoinedAt);
+  const observedTimestamp =
+    observedJoinedAt === null ? NaN : Date.parse(observedJoinedAt);
+  const nowTimestamp = Date.parse(now);
+  const nextTimestamp = Math.max(
+    nowTimestamp,
+    Number.isFinite(observedTimestamp)
+      ? observedTimestamp
+      : Number.NEGATIVE_INFINITY,
+    Number.isFinite(storedTimestamp)
+      ? storedTimestamp + 1
+      : Number.NEGATIVE_INFINITY,
+  );
+  return new Date(nextTimestamp).toISOString();
+}
+
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
@@ -1818,11 +1907,11 @@ function legacyRoundedUserMetricKey(key: string): string | null {
     : `${USER_METRIC_PREFIX}${legacyUserId}.${match[2]}`;
 }
 
-function assertNumericRowId(value: unknown, label: string): asserts value is string {
-  if (
-    typeof value !== "string" ||
-    !DISCORD_SNOWFLAKE_PATTERN.test(value)
-  ) {
+function assertNumericRowId(
+  value: unknown,
+  label: string,
+): asserts value is string {
+  if (typeof value !== "string" || !DISCORD_SNOWFLAKE_PATTERN.test(value)) {
     throw new TypeError(`${label} must be a Discord snowflake string`);
   }
 }
@@ -1841,6 +1930,10 @@ function validateUniqueImportRows(candidate: GuildDataExport): void {
       JSON.stringify([answer.questionMessageId, answer.userId]),
     ),
     "answer question/user key",
+  );
+  assertUniqueImportKeys(
+    candidate.answers.map((answer) => answer.answerMessageId),
+    "answer message ID",
   );
   assertUniqueImportKeys(
     candidate.metrics.map((metric) => metric.key),
@@ -1955,8 +2048,7 @@ function metricsSnapshotFromImportRows(
     posts_manual: values.get("posts_manual") ?? "0",
     custom_posts: values.get("custom_posts") ?? "0",
     answers_total: values.get("answers_total") ?? "0",
-    last_successful_auto_post:
-      values.get("last_successful_auto_post") || null,
+    last_successful_auto_post: values.get("last_successful_auto_post") || null,
   });
 }
 

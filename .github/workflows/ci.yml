@@ -13,10 +13,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate operations shell
+        run: |
+          bash -n ops.sh
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes shellcheck
+          fi
+          shellcheck ops.sh
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.12.0"
           cache: "npm"
           cache-dependency-path: tsbot/package-lock.json
 
@@ -30,6 +39,11 @@ jobs:
           node -e "JSON.parse(require('node:fs').readFileSync('data/bootstrap/questions.json','utf8'))"
           node -e "JSON.parse(require('node:fs').readFileSync('data/bootstrap/answers.json','utf8'))"
           node -e "JSON.parse(require('node:fs').readFileSync('data/bootstrap/state.json','utf8'))"
+
+      - name: Check formatting
+        run: |
+          cd tsbot
+          npm run format:check
 
       - name: Typecheck
         run: |

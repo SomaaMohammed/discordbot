@@ -105,11 +105,9 @@ export function buildLegacyGuildSettings(
     LEGACY_DEFAULTS.royalAlertChannel,
   );
 
-  settings.roles.staff = envSnowflakeList(
-    environment,
-    "STAFF_ROLE_IDS",
-    [...LEGACY_DEFAULTS.staffRoles],
-  );
+  settings.roles.staff = envSnowflakeList(environment, "STAFF_ROLE_IDS", [
+    ...LEGACY_DEFAULTS.staffRoles,
+  ]);
   settings.roles.privilegedChat = [...settings.roles.staff];
   settings.roles.emperor = envSnowflake(
     environment,
@@ -132,7 +130,9 @@ export function buildLegacyGuildSettings(
     "ANON_REQUIRED_ROLE_ID",
   );
 
-  const legacyMode = String(legacyState.mode ?? "").trim().toLowerCase();
+  const legacyMode = String(legacyState.mode ?? "")
+    .trim()
+    .toLowerCase();
   settings.courtSchedule.mode = ["off", "manual", "auto"].includes(legacyMode)
     ? (legacyMode as GuildSettings["courtSchedule"]["mode"])
     : "manual";
@@ -207,18 +207,27 @@ export function buildLegacyGuildSettings(
   return sanitizeGuildSettings(settings);
 }
 
-export function parseLegacyStateJson(raw: string | null): Record<string, unknown> {
+export function parseLegacyStateJson(
+  raw: string | null,
+): Record<string, unknown> {
   if (raw === null) {
     return {};
   }
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
       throw new TypeError("legacy kv.state must contain a JSON object");
     }
     return parsed as Record<string, unknown>;
   } catch (error) {
-    if (error instanceof TypeError && error.message.startsWith("legacy kv.state")) {
+    if (
+      error instanceof TypeError &&
+      error.message.startsWith("legacy kv.state")
+    ) {
       throw error;
     }
     throw new TypeError("legacy kv.state contains invalid JSON", {
@@ -267,8 +276,11 @@ function envSnowflake(
   defaultValue: string | null = null,
 ): string | null {
   const value = String(environment[name] ?? "").trim();
-  if (!value || value === "0") {
+  if (!value) {
     return defaultValue;
+  }
+  if (value === "0") {
+    return null;
   }
   if (!isDiscordSnowflake(value)) {
     throw new TypeError(`${name} must be a Discord snowflake for migration`);
@@ -329,7 +341,9 @@ function envBoolean(
   name: string,
   defaultValue: boolean,
 ): boolean {
-  const raw = String(environment[name] ?? "").trim().toLowerCase();
+  const raw = String(environment[name] ?? "")
+    .trim()
+    .toLowerCase();
   if (!raw) {
     return defaultValue;
   }
@@ -342,7 +356,10 @@ function envBoolean(
   throw new TypeError(`${name} must be boolean-like for migration`);
 }
 
-function stateSnowflake(value: unknown, environmentName: string): string | null {
+function stateSnowflake(
+  value: unknown,
+  environmentName: string,
+): string | null {
   if (
     value === null ||
     value === undefined ||

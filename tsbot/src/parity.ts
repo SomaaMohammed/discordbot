@@ -530,18 +530,18 @@ export function isEmperorLockTrigger(
   );
 }
 
-export function hasEmperorMention(
-  content: string,
-  label = "Emperor",
-): boolean {
-  return containsInvocation(normalizeTriggerPhrase(content), [label, "his majesty"]);
+export function hasEmperorMention(content: string, label = "Emperor"): boolean {
+  return containsInvocation(normalizeTriggerPhrase(content), [
+    label,
+    "his majesty",
+  ]);
 }
 
-export function hasEmpressMention(
-  content: string,
-  label = "Empress",
-): boolean {
-  return containsInvocation(normalizeTriggerPhrase(content), [label, "her majesty"]);
+export function hasEmpressMention(content: string, label = "Empress"): boolean {
+  return containsInvocation(normalizeTriggerPhrase(content), [
+    label,
+    "her majesty",
+  ]);
 }
 
 export function parseRoyalMentions(
@@ -584,7 +584,9 @@ function containsInvocation(
   return false;
 }
 
-function normalizedInvocationTerms(invocationTerms: readonly string[]): string[] {
+function normalizedInvocationTerms(
+  invocationTerms: readonly string[],
+): string[] {
   return Array.from(
     new Set(
       invocationTerms
@@ -976,7 +978,9 @@ export function getRoyalAfkResponse(
     empress: "Empress",
   },
 ): string | null {
-  const mentionedTitles: RoyalTitle[] = [...parseRoyalMentions(content, labels)];
+  const mentionedTitles: RoyalTitle[] = [
+    ...parseRoyalMentions(content, labels),
+  ];
   for (const title of mentionedRoyalTitles) {
     if (!mentionedTitles.includes(title)) {
       mentionedTitles.push(title);
@@ -1026,8 +1030,7 @@ export function buildRoyalAfkStatusReport(
     }
 
     const reason = entry.reason || "Away from court";
-    const displayLabel =
-      title === "Emperor" ? labels.emperor : labels.empress;
+    const displayLabel = title === "Emperor" ? labels.emperor : labels.empress;
     const setAt = parseIso(entry.set_at);
     if (setAt) {
       lines.push(

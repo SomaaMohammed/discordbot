@@ -1,5 +1,8 @@
+import type { Guild } from "discord.js";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createDiscordClient,
+  getDiscordClientWorkLifecycle,
   recordGuildAvailable,
   recordGuildUnavailable,
 } from "../src/discord/bot.js";
@@ -64,6 +67,22 @@ describe("guild lifecycle", () => {
     expect(fixture.invalidateGuild).toHaveBeenCalledWith(GUILD_ID);
   });
 
+  it("preserves enablement when the stored lifecycle token is newer than Discord's stable join time", () => {
+    const existing = record(true, null);
+    existing.joinedAt = "2026-07-01T00:00:00.001Z";
+    const fixture = runtimeWith(existing);
+
+    const result = recordGuildAvailable(fixture.runtime, GUILD_ID, "Guild", {
+      startupDiscovery: true,
+      observedJoinedAt: "2026-07-01T00:00:00.000Z",
+    });
+
+    expect(result.rejoined).toBe(false);
+    expect(result.record.enabled).toBe(true);
+    expect(fixture.ensureGuild).toHaveBeenCalled();
+    expect(fixture.reactivateGuild).not.toHaveBeenCalled();
+  });
+
   it("treats an online guildCreate as a rejoin and leaves retained data disabled", () => {
     const fixture = runtimeWith(record(true, null));
 
@@ -115,6 +134,30 @@ describe("guild lifecycle", () => {
       "2026-07-25T00:00:00.000Z",
     );
     expect(fixture.ensureGuild).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a startup-unavailable guild when guildAvailable fires", async () => {
+    const fixture = runtimeWith(record(true, "2026-07-20T00:00:00.000Z"));
+    const client = createDiscordClient(fixture.runtime);
+
+    client.emit("guildAvailable", {
+      id: GUILD_ID,
+      name: "Guild",
+      joinedAt: new Date("2026-07-25T00:00:00.000Z"),
+    } as Guild);
+    const workLifecycle = getDiscordClientWorkLifecycle(client);
+
+    expect(workLifecycle).not.toBeNull();
+    await expect(workLifecycle?.drain(1_000)).resolves.toBe(true);
+    expect(fixture.reactivateGuild).toHaveBeenCalledWith(
+      GUILD_ID,
+      "Guild",
+      "2026-07-25T00:00:00.000Z",
+    );
+    expect(fixture.ensureGuild).not.toHaveBeenCalled();
+
+    workLifecycle?.stop();
+    client.removeAllListeners();
   });
 
   it("marks a departed guild inactive without invoking purge", () => {

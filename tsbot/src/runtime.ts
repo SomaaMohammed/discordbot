@@ -57,21 +57,21 @@ export function createRuntime(
         return null;
       }
 
-      const initialSettings = await Promise.resolve(
-        storage.getGuildSettings(normalizedGuildId),
+      const initialExpectation = await Promise.resolve(
+        storage.getGuildEnableExpectation(normalizedGuildId),
       );
-      if (!initialSettings) {
+      if (!initialExpectation) {
         return null;
       }
 
-      let persistedSettings = structuredClone(initialSettings);
-      let settings = structuredClone(initialSettings);
+      let persistedSettings = structuredClone(initialExpectation.settings);
+      let persistedLifecycleJoinedAt = initialExpectation.lifecycleJoinedAt;
+      let settings = structuredClone(initialExpectation.settings);
       const guildStorage = storage.forGuild(normalizedGuildId);
       let generation = guildGenerations.get(normalizedGuildId) ?? 0;
-      const backfillStatus =
-        backfillStatuses.get(normalizedGuildId) ?? {
-          ...DEFAULT_BACKFILL_STATUS,
-        };
+      const backfillStatus = backfillStatuses.get(normalizedGuildId) ?? {
+        ...DEFAULT_BACKFILL_STATUS,
+      };
       backfillStatuses.set(normalizedGuildId, backfillStatus);
 
       const guildRuntime: GuildRuntime = {
@@ -93,26 +93,30 @@ export function createRuntime(
           const currentSettings = storage.getGuildSettings(normalizedGuildId);
           return Boolean(
             record?.enabled &&
-              record.leftAt === null &&
-              currentSettings?.enabled,
+            record.leftAt === null &&
+            currentSettings?.enabled,
           );
         },
         invalidate(): void {
           runtime.invalidateGuild(normalizedGuildId);
         },
         async refreshSettings(): Promise<GuildSettings> {
-          const refreshed = storage.getGuildSettings(normalizedGuildId);
+          const refreshed =
+            storage.getGuildEnableExpectation(normalizedGuildId);
           if (!refreshed) {
             throw new Error(
               `Guild ${normalizedGuildId} is no longer registered in storage`,
             );
           }
-          persistedSettings = structuredClone(refreshed);
-          settings = structuredClone(refreshed);
+          persistedSettings = structuredClone(refreshed.settings);
+          persistedLifecycleJoinedAt = refreshed.lifecycleJoinedAt;
+          settings = structuredClone(refreshed.settings);
           guildRuntime.settings = settings;
           return settings;
         },
-        async saveSettings(nextSettings: GuildSettings): Promise<GuildSettings> {
+        async saveSettings(
+          nextSettings: GuildSettings,
+        ): Promise<GuildSettings> {
           const saved = storage.saveGuildSettings(
             normalizedGuildId,
             nextSettings,
@@ -132,7 +136,12 @@ export function createRuntime(
           const saved = storage.setGuildEnabled(
             normalizedGuildId,
             enabled,
-            enabled ? persistedSettings : undefined,
+            enabled
+              ? {
+                  settings: persistedSettings,
+                  lifecycleJoinedAt: persistedLifecycleJoinedAt,
+                }
+              : undefined,
           );
           runtime.invalidateGuild(normalizedGuildId);
           generation = guildGenerations.get(normalizedGuildId) ?? generation;

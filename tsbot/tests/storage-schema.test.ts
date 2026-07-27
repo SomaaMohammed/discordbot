@@ -6,6 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CourtStorage } from "../src/storage/db.js";
 import { validateDatabaseFile } from "../src/storage/migration.js";
 import {
+  GUILDS_ENABLED_LEFT_AT_INDEX_SQL,
+  GUILDS_TABLE_SQL,
+  POSTS_GUILD_CLOSED_POSTED_AT_INDEX_SQL,
+  POSTS_GUILD_POSTED_AT_INDEX_SQL,
+  POSTS_TABLE_SQL,
   detectDatabaseSchema,
   validateV2Schema,
 } from "../src/storage/schema.js";
@@ -48,11 +53,7 @@ describe("v2 schema", () => {
         .filter((column) => column.pk > 0)
         .sort((left, right) => left.pk - right.pk)
         .map((column) => column.name);
-      expect(answerPk).toEqual([
-        "guild_id",
-        "question_message_id",
-        "user_id",
-      ]);
+      expect(answerPk).toEqual(["guild_id", "question_message_id", "user_id"]);
       for (const table of ["guilds", "guild_settings"]) {
         const guildIdColumn = (
           db.pragma(`table_info(${table})`) as Array<{
@@ -68,8 +69,9 @@ describe("v2 schema", () => {
           pk: 1,
         });
       }
-      const retentionIndex = db
-        .pragma("index_info(idx_answers_guild_created_at)") as Array<{
+      const retentionIndex = db.pragma(
+        "index_info(idx_answers_guild_created_at)",
+      ) as Array<{
         name: string | null;
         seqno: number;
       }>;
@@ -142,5 +144,54 @@ describe("v2 schema", () => {
     } finally {
       db.close();
     }
+  });
+
+  it("rejects v2 tables whose required defaults or checks were removed", () => {
+    const { root, dbFile } = makePaths();
+    const storage = new CourtStorage({ dbFile }, root);
+    storage.initStorage();
+    storage.close();
+
+    const db = new Database(dbFile);
+    try {
+      db.pragma("foreign_keys = OFF");
+      db.exec("DROP TABLE guilds");
+      db.exec(
+        GUILDS_TABLE_SQL.replace(
+          "enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1))",
+          "enabled INTEGER NOT NULL",
+        ),
+      );
+      db.exec(GUILDS_ENABLED_LEFT_AT_INDEX_SQL);
+      db.exec("DROP TABLE posts");
+      db.exec(
+        POSTS_TABLE_SQL.replace(
+          "closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1))",
+          "closed INTEGER NOT NULL",
+        ),
+      );
+      db.exec(POSTS_GUILD_CLOSED_POSTED_AT_INDEX_SQL);
+      db.exec(POSTS_GUILD_POSTED_AT_INDEX_SQL);
+    } finally {
+      db.close();
+    }
+
+    const reopened = new Database(dbFile, {
+      readonly: true,
+      fileMustExist: true,
+    });
+    try {
+      const issues = validateV2Schema(reopened);
+      expect(issues).toContain(
+        "guilds SQL does not match the required definition",
+      );
+      expect(issues).toContain(
+        "posts SQL does not match the required definition",
+      );
+      expect(detectDatabaseSchema(reopened)).toBe("unknown");
+    } finally {
+      reopened.close();
+    }
+    expect(() => validateDatabaseFile(dbFile)).toThrow("unknown");
   });
 });

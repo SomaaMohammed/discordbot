@@ -62,18 +62,19 @@ Background loops enumerate enabled, active guilds with bounded concurrency. Use 
 
 ## Local Commands
 
-Node.js 22 or newer is recommended.
+Node.js 22.12.0 or newer is required.
 
 ```bash
 cd tsbot
 npm ci
+npm run format:check
 npm run typecheck
 npm test
 npm run build
 node --check dist/src/index.js
 ```
 
-`npm run check` runs typecheck, tests, and build together. `npm run db:check` is a read-only database preflight. `npm run migrate` changes the selected database and therefore belongs only in a deliberate migration workflow with a validated backup.
+`npm run format` applies the repository's Prettier configuration to maintained source, tests, configuration, bootstrap data, and documentation; local secrets, databases, backups, generated output, dependencies, prompts, editor state, and lore are excluded. `npm run check` runs the formatting check, typecheck, tests, and build together. `npm run db:check` is a read-only database preflight. `npm run migrate` changes the selected database and therefore belongs only in a deliberate migration workflow with a validated backup.
 
 `npm run dev` and `npm run start` can connect to Discord and access the configured database. Do not use either as a smoke test. Never point `DB_FILE` at the root live database while running tests or experiments.
 
@@ -87,4 +88,4 @@ node --check dist/src/index.js
 - Parse all tracked bootstrap JSON and scan active defaults/templates for production snowflakes.
 - Do not weaken permission or role-hierarchy checks to make mocks easier.
 
-Before committing, run all validation required by `AGENTS.md`, parse bootstrap JSON, run migration and schema tests, check the built entrypoint, run `git diff --check`, and inspect the complete staged diff. Never stage `.env`, databases, sidecars, backups, dependencies, build output, prompts, editor state, or unrelated work.
+Before committing, run all validation required by `AGENTS.md`, parse bootstrap JSON, run migration and schema tests, check the built entrypoint, run `bash -n ops.sh` and ShellCheck when operations code changes, run `git diff --check`, and inspect the complete staged diff. Never stage environment files, databases, sidecars, backups, dependencies, build output, prompts, editor state, or unrelated work.

@@ -20,10 +20,7 @@ describe("guild settings", () => {
     const settings = createDefaultGuildSettings();
     settings.invocation.keyword = "  Imperial Court  ";
     settings.invocation.aliases = [" Your Majesty ", "your majesty"];
-    settings.roles.staff = [
-      "111111111111111111",
-      "111111111111111111",
-    ];
+    settings.roles.staff = ["111111111111111111", "111111111111111111"];
     const parsed = sanitizeGuildSettings(settings);
     expect(parsed.invocation).toEqual({
       keyword: "imperial court",

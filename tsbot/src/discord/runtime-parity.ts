@@ -47,49 +47,92 @@ import type {
   GuildRuntime,
 } from "../runtime.js";
 import type { PostRecord, RoyalTitle } from "../types.js";
+import {
+  getEffectiveSilenceTargetRoleIds,
+  readSilenceLeases,
+  SILENCE_TARGET_DELETED,
+  SilenceLeaseCoordinator,
+  type SendMessagesState,
+  type SilenceLease,
+  type SilenceOverwriteTarget,
+  type SilenceTargetResolution,
+} from "./silence-leases.js";
+import { AsyncWorkTracker } from "./work-tracker.js";
 
 type BotRuntime = GuildRuntime;
 
 const ANON_ANSWER_BUTTON_ID = "court:anonymous_answer";
 const SILENT_LOCK_SECONDS = 120;
+const SILENCE_RECONCILE_INTERVAL_MS = 5_000;
 type RuntimeTargetChannel = TextChannel | NewsChannel | AnyThreadChannel;
 
-let backgroundLoopsStarted = false;
-const inFlightGuildTasks = new Set<string>();
+const defaultInFlightGuildTasks = new Set<string>();
+const silenceLeaseCoordinator = new SilenceLeaseCoordinator();
+const backgroundLoopControllers = new WeakMap<
+  Client,
+  RuntimeBackgroundLoopController
+>();
+
+export interface RuntimeBackgroundLoopController {
+  readonly stopped: boolean;
+  stop: () => void;
+  drain: (timeoutMs: number) => Promise<boolean>;
+}
 
 export function wireRuntimeParity(
   client: Client,
   runtime: ProcessBotRuntime,
+  workTracker: AsyncWorkTracker = new AsyncWorkTracker(),
 ): void {
-  client.on("messageCreate", async (message) => {
-    await handleMessageCreate(message, runtime).catch((error) => {
-      logError("discord-event", "Message event failed", {
-        guildId: message.guildId ?? "dm",
-        error,
+  client.on("messageCreate", (message) => {
+    return workTracker
+      .run(async () => {
+        await handleMessageCreate(message, runtime).catch((error) => {
+          logError("discord-event", "Message event failed", {
+            guildId: message.guildId ?? "dm",
+            error,
+          });
+        });
+      })
+      .catch((error) => {
+        logError("discord-event", "Tracked message event failed", {
+          guildId: message.guildId ?? "dm",
+          error,
+        });
       });
-    });
   });
 
-  client.on("messageReactionAdd", async (reaction, user) => {
-    await handleReactionAdd(reaction, user, runtime).catch((error) => {
-      logError("discord-event", "Reaction event failed", {
-        guildId: reaction.message.guildId ?? "dm",
-        error,
+  client.on("messageReactionAdd", (reaction, user) => {
+    return workTracker
+      .run(async () => {
+        await handleReactionAdd(reaction, user, runtime).catch((error) => {
+          logError("discord-event", "Reaction event failed", {
+            guildId: reaction.message.guildId ?? "dm",
+            error,
+          });
+        });
+      })
+      .catch((error) => {
+        logError("discord-event", "Tracked reaction event failed", {
+          guildId: reaction.message.guildId ?? "dm",
+          error,
+        });
       });
-    });
   });
-
 }
 
 export function startRuntimeBackgroundLoops(
   client: Client,
   runtime: ProcessBotRuntime,
-): void {
-  if (backgroundLoopsStarted) {
-    return;
+  workTracker: AsyncWorkTracker = new AsyncWorkTracker(),
+): RuntimeBackgroundLoopController {
+  const existing = backgroundLoopControllers.get(client);
+  if (existing) {
+    return existing;
   }
-  backgroundLoopsStarted = true;
-  startBackgroundLoops(client, runtime);
+  const controller = startBackgroundLoops(client, runtime, workTracker);
+  backgroundLoopControllers.set(client, controller);
+  return controller;
 }
 
 async function handleMessageCreate(
@@ -163,7 +206,7 @@ async function handleMessageCreate(
 
   if (
     runtime.settings.features.royalAfk &&
-    await maybeSendRoyalMentionResponse(message, runtime, inRoyalAlertChannel)
+    (await maybeSendRoyalMentionResponse(message, runtime, inRoyalAlertChannel))
   ) {
     return;
   }
@@ -234,24 +277,61 @@ async function handleReactionAdd(
   );
 }
 
-function startBackgroundLoops(client: Client, runtime: ProcessBotRuntime): void {
+function startBackgroundLoops(
+  client: Client,
+  runtime: ProcessBotRuntime,
+  workTracker: AsyncWorkTracker,
+): RuntimeBackgroundLoopController {
+  let stopped = false;
+  const intervals: Array<ReturnType<typeof setInterval>> = [];
+  const inFlightGuildTasks = new Set<string>();
   const run = (name: string, task: () => Promise<void>): void => {
-    void task().catch((error) => {
-      logError("runtime-loop", "Background task failed", {
-        task: name,
-        error,
+    if (stopped) {
+      return;
+    }
+    void workTracker
+      .run(async () => {
+        await task().catch((error) => {
+          logError("runtime-loop", "Background task failed", {
+            task: name,
+            error,
+          });
+        });
+      })
+      .catch((error) => {
+        logError("runtime-loop", "Tracked background task failed", {
+          task: name,
+          error,
+        });
       });
-    });
   };
 
   run("auto_poster", () =>
-    runAcrossEnabledGuilds(client, runtime, "auto_poster", runAutoPoster),
+    runAcrossEnabledGuilds(
+      client,
+      runtime,
+      "auto_poster",
+      runAutoPoster,
+      inFlightGuildTasks,
+    ),
   );
   run("thread_closer", () =>
-    runAcrossEnabledGuilds(client, runtime, "thread_closer", runThreadCloser),
+    runAcrossEnabledGuilds(
+      client,
+      runtime,
+      "thread_closer",
+      runThreadCloser,
+      inFlightGuildTasks,
+    ),
   );
   run("weekly_digest", () =>
-    runAcrossEnabledGuilds(client, runtime, "weekly_digest", runWeeklyDigest),
+    runAcrossEnabledGuilds(
+      client,
+      runtime,
+      "weekly_digest",
+      runWeeklyDigest,
+      inFlightGuildTasks,
+    ),
   );
   run("retention_cleaner", () =>
     runAcrossEnabledGuilds(
@@ -259,42 +339,104 @@ function startBackgroundLoops(client: Client, runtime: ProcessBotRuntime): void 
       runtime,
       "retention_cleaner",
       runRetentionCleaner,
+      inFlightGuildTasks,
+    ),
+  );
+  run("silence_reconciler", () =>
+    reconcileSilenceLeasesAcrossGuilds(client, runtime, inFlightGuildTasks),
+  );
+
+  intervals.push(
+    setInterval(
+      () =>
+        run("auto_poster", () =>
+          runAcrossEnabledGuilds(
+            client,
+            runtime,
+            "auto_poster",
+            runAutoPoster,
+            inFlightGuildTasks,
+          ),
+        ),
+      60_000,
+    ),
+  );
+  intervals.push(
+    setInterval(
+      () =>
+        run("thread_closer", () =>
+          runAcrossEnabledGuilds(
+            client,
+            runtime,
+            "thread_closer",
+            runThreadCloser,
+            inFlightGuildTasks,
+          ),
+        ),
+      10 * 60_000,
+    ),
+  );
+  intervals.push(
+    setInterval(
+      () =>
+        run("weekly_digest", () =>
+          runAcrossEnabledGuilds(
+            client,
+            runtime,
+            "weekly_digest",
+            runWeeklyDigest,
+            inFlightGuildTasks,
+          ),
+        ),
+      30 * 60_000,
+    ),
+  );
+  intervals.push(
+    setInterval(
+      () =>
+        run("retention_cleaner", () =>
+          runAcrossEnabledGuilds(
+            client,
+            runtime,
+            "retention_cleaner",
+            runRetentionCleaner,
+            inFlightGuildTasks,
+          ),
+        ),
+      24 * 60 * 60_000,
+    ),
+  );
+  intervals.push(
+    setInterval(
+      () =>
+        run("silence_reconciler", () =>
+          reconcileSilenceLeasesAcrossGuilds(
+            client,
+            runtime,
+            inFlightGuildTasks,
+          ),
+        ),
+      SILENCE_RECONCILE_INTERVAL_MS,
     ),
   );
 
-  setInterval(
-    () =>
-      run("auto_poster", () =>
-        runAcrossEnabledGuilds(client, runtime, "auto_poster", runAutoPoster),
-      ),
-    60_000,
-  );
-  setInterval(
-    () =>
-      run("thread_closer", () =>
-        runAcrossEnabledGuilds(client, runtime, "thread_closer", runThreadCloser),
-      ),
-    10 * 60_000,
-  );
-  setInterval(
-    () =>
-      run("weekly_digest", () =>
-        runAcrossEnabledGuilds(client, runtime, "weekly_digest", runWeeklyDigest),
-      ),
-    30 * 60_000,
-  );
-  setInterval(
-    () =>
-      run("retention_cleaner", () =>
-        runAcrossEnabledGuilds(
-          client,
-          runtime,
-          "retention_cleaner",
-          runRetentionCleaner,
-        ),
-      ),
-    24 * 60 * 60_000,
-  );
+  return {
+    get stopped(): boolean {
+      return stopped;
+    },
+    stop(): void {
+      if (stopped) {
+        return;
+      }
+      stopped = true;
+      for (const interval of intervals) {
+        clearInterval(interval);
+      }
+    },
+    drain(timeoutMs: number): Promise<boolean> {
+      return workTracker.drain(timeoutMs);
+    },
+  };
 }
 
 export async function runAcrossEnabledGuilds(
@@ -302,6 +444,7 @@ export async function runAcrossEnabledGuilds(
   runtime: ProcessBotRuntime,
   taskName: string,
   task: (guild: Guild, guildRuntime: GuildRuntime) => Promise<void>,
+  inFlightGuildTasks: Set<string> = defaultInFlightGuildTasks,
 ): Promise<void> {
   const records = runtime.storage.listEnabledGuilds();
   const concurrency = Math.max(
@@ -348,10 +491,174 @@ export async function runAcrossEnabledGuilds(
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
 }
 
-async function runAutoPoster(
-  guild: Guild,
-  runtime: BotRuntime,
+async function reconcileSilenceLeasesAcrossGuilds(
+  client: Client,
+  runtime: ProcessBotRuntime,
+  inFlightGuildTasks: Set<string>,
 ): Promise<void> {
+  const records = runtime.storage.listActiveGuilds();
+  const concurrency = Math.max(
+    1,
+    Math.min(runtime.processConfig.schedulerConcurrency, records.length || 1),
+  );
+  let nextIndex = 0;
+
+  const worker = async (): Promise<void> => {
+    while (nextIndex < records.length) {
+      const record = records[nextIndex];
+      nextIndex += 1;
+      if (!record) {
+        continue;
+      }
+      const inFlightKey = `silence_reconciler:${record.guildId}`;
+      if (inFlightGuildTasks.has(inFlightKey)) {
+        continue;
+      }
+      inFlightGuildTasks.add(inFlightKey);
+      try {
+        const guildRuntime = await runtime.forGuild(record.guildId);
+        if (
+          !guildRuntime ||
+          readSilenceLeases(guildRuntime.storage).length === 0
+        ) {
+          continue;
+        }
+        const guild =
+          client.guilds.cache.get(record.guildId) ??
+          (await client.guilds.fetch(record.guildId).catch(() => null));
+        if (!guild) {
+          continue;
+        }
+        const result = await silenceLeaseCoordinator.reconcileGuild(
+          guildRuntime.storage,
+          record.guildId,
+          Date.now(),
+          (lease) => resolveSilenceOverwriteTarget(guild, lease),
+        );
+        if (result.unresolved > 0) {
+          logError(
+            "silence-lock",
+            "Could not reconcile silence overwrites; check Manage Roles permission and role hierarchy",
+            {
+              guildId: record.guildId,
+              unresolved: result.unresolved,
+            },
+          );
+        }
+      } catch (error) {
+        logError("silence-lock", "Silence lease reconciliation failed", {
+          guildId: record.guildId,
+          error,
+        });
+      } finally {
+        inFlightGuildTasks.delete(inFlightKey);
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+}
+
+export async function restoreAllSilenceLeases(
+  guild: Guild,
+  runtime: GuildRuntime,
+): Promise<{
+  restored: number;
+  unresolved: number;
+}> {
+  const result = await silenceLeaseCoordinator.restoreAll(
+    runtime.storage,
+    runtime.guildId,
+    (lease) => resolveSilenceOverwriteTarget(guild, lease),
+  );
+  return {
+    restored: result.restored,
+    unresolved: result.unresolved,
+  };
+}
+
+async function resolveSilenceOverwriteTarget(
+  guild: Guild,
+  lease: SilenceLease,
+): Promise<SilenceTargetResolution> {
+  let channel = guild.channels.cache.get(lease.channelId) ?? null;
+  if (!channel) {
+    try {
+      channel = await guild.channels.fetch(lease.channelId);
+    } catch (error) {
+      return isDefinitivelyMissingDiscordTarget(error)
+        ? SILENCE_TARGET_DELETED
+        : null;
+    }
+    if (!channel) {
+      return SILENCE_TARGET_DELETED;
+    }
+  }
+  if (!(channel instanceof TextChannel)) {
+    return null;
+  }
+
+  let role = guild.roles.cache.get(lease.roleId) ?? null;
+  if (!role) {
+    try {
+      role = await guild.roles.fetch(lease.roleId);
+    } catch (error) {
+      return isDefinitivelyMissingDiscordTarget(error)
+        ? SILENCE_TARGET_DELETED
+        : null;
+    }
+    if (!role) {
+      return SILENCE_TARGET_DELETED;
+    }
+  }
+  return createSilenceOverwriteTarget(channel, role);
+}
+
+function isDefinitivelyMissingDiscordTarget(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: unknown; status?: unknown };
+  return (
+    candidate.status === 404 ||
+    candidate.code === 10003 ||
+    candidate.code === 10011 ||
+    candidate.code === "10003" ||
+    candidate.code === "10011"
+  );
+}
+
+function getSendMessagesState(
+  channel: TextChannel,
+  roleId: string,
+): SendMessagesState {
+  const overwrite = channel.permissionOverwrites.cache.get(roleId);
+  if (overwrite?.allow.has(PermissionFlagsBits.SendMessages)) {
+    return true;
+  }
+  if (overwrite?.deny.has(PermissionFlagsBits.SendMessages)) {
+    return false;
+  }
+  return null;
+}
+
+function createSilenceOverwriteTarget(
+  channel: TextChannel,
+  role: Role,
+): SilenceOverwriteTarget {
+  return {
+    readSendMessages: () => getSendMessagesState(channel, role.id),
+    async writeSendMessages(value, reason): Promise<void> {
+      await channel.permissionOverwrites.edit(
+        role,
+        { SendMessages: value },
+        { reason },
+      );
+    },
+  };
+}
+
+async function runAutoPoster(guild: Guild, runtime: BotRuntime): Promise<void> {
   if (!runtime.settings.features.court || !runtime.isCurrent()) {
     return;
   }
@@ -687,7 +994,9 @@ async function postQuestionFromLoop(
   },
 ): Promise<[string, string]> {
   if (!runtime.isCurrent()) {
-    throw new Error("Court post cancelled because the guild configuration changed.");
+    throw new Error(
+      "Court post cancelled because the guild configuration changed.",
+    );
   }
   const [chosenCategory, question] = runtime.storage.pickQuestion(
     options.category,
@@ -709,14 +1018,18 @@ async function postQuestionFromLoop(
   });
 
   if (!runtime.isCurrent()) {
-    throw new Error("Court post cancelled because the guild configuration changed.");
+    throw new Error(
+      "Court post cancelled because the guild configuration changed.",
+    );
   }
 
   const thread = runtime.settings.features.anonymousAnswers
     ? await getOrCreateAnswerThread(sent, question, runtime)
     : null;
   if (!runtime.isCurrent()) {
-    throw new Error("Court post cancelled because the guild configuration changed.");
+    throw new Error(
+      "Court post cancelled because the guild configuration changed.",
+    );
   }
   runtime.storage.upsertPostRow({
     message_id: String(sent.id),
@@ -756,12 +1069,16 @@ async function closeCourtPostFromLoop(
 
   const thread = await fetchThreadById(guild, record.thread_id);
   if (record.thread_id && !thread) {
-    throw new Error("Stored court thread does not belong to this guild or is missing");
+    throw new Error(
+      "Stored court thread does not belong to this guild or is missing",
+    );
   }
 
   const message = await getPostMessage(guild, record);
   if (!message) {
-    throw new Error("Stored court message does not belong to this guild or is missing");
+    throw new Error(
+      "Stored court message does not belong to this guild or is missing",
+    );
   }
 
   if (thread) {
@@ -923,10 +1240,7 @@ function getInvocationTerms(runtime: BotRuntime): string[] {
   ];
 }
 
-function getRoyalDisplayLabel(
-  runtime: BotRuntime,
-  title: RoyalTitle,
-): string {
+function getRoyalDisplayLabel(runtime: BotRuntime, title: RoyalTitle): string {
   return title === "Emperor"
     ? runtime.settings.labels.emperor
     : runtime.settings.labels.empress;
@@ -1081,8 +1395,8 @@ function canUsePrivilegedInvictusChat(
   member: GuildMember,
   runtime: BotRuntime,
 ): boolean {
-  const hasConfiguredRole = runtime.settings.roles.privilegedChat.some((roleId) =>
-    member.roles.cache.has(roleId),
+  const hasConfiguredRole = runtime.settings.roles.privilegedChat.some(
+    (roleId) => member.roles.cache.has(roleId),
   );
   const isConfiguredUser = runtime.settings.championUserId === member.id;
 
@@ -1201,11 +1515,7 @@ async function maybeSendPrivilegedInvictusChatResponse(
     return false;
   }
 
-  const response = buildPrivilegedInvictusChatResponse(
-    intent,
-    member,
-    runtime,
-  );
+  const response = buildPrivilegedInvictusChatResponse(intent, member, runtime);
 
   await message.channel
     .send({ content: response, allowedMentions: { parse: [] } })
@@ -1213,77 +1523,45 @@ async function maybeSendPrivilegedInvictusChatResponse(
   return true;
 }
 
-async function lockChannelSilently(
+export async function lockChannelSilently(
   channel: TextChannel,
   actor: GuildMember,
   runtime: BotRuntime,
   seconds: number,
 ): Promise<void> {
-  const excluded = new Set(runtime.settings.roles.silenceExcludes);
-  const targetRoleIds = new Set<string>(
-    runtime.settings.roles.silenceTargets.filter(
-      (roleId) => !excluded.has(roleId),
-    ),
+  const targetRoleIds = getEffectiveSilenceTargetRoleIds(
+    runtime.settings.roles.silenceTargets,
+    runtime.settings.roles.silenceExcludes,
   );
-  const targetRoles = Array.from(targetRoleIds)
+  const targetRoles = targetRoleIds
     .map((roleId) => actor.guild.roles.cache.get(roleId) ?? null)
-    .filter((role): role is Role => role !== null && !role.managed);
-
-  const originalSendFlags = new Map<string, boolean | null>();
-  const appliedRoles: Role[] = [];
+    .filter((role): role is Role => role !== null);
+  const expiresAt = Date.now() + Math.max(0, seconds) * 1000;
 
   for (const role of targetRoles) {
     if (!runtime.isCurrent()) {
       break;
     }
-    const overwrite = channel.permissionOverwrites.cache.get(role.id);
-    let originalSend: boolean | null = null;
-    if (overwrite?.allow.has(PermissionFlagsBits.SendMessages)) {
-      originalSend = true;
-    } else if (overwrite?.deny.has(PermissionFlagsBits.SendMessages)) {
-      originalSend = false;
+    const applied = await silenceLeaseCoordinator.apply(
+      runtime.storage,
+      runtime.guildId,
+      channel.id,
+      role.id,
+      expiresAt,
+      createSilenceOverwriteTarget(channel, role),
+      `Silence by ${actor.user.tag}`,
+    );
+    if (!applied) {
+      logError(
+        "silence-lock",
+        "Could not apply silence overwrite; check Manage Roles permission and role hierarchy",
+        {
+          guildId: runtime.guildId,
+          channelId: channel.id,
+          roleId: role.id,
+        },
+      );
     }
-
-    originalSendFlags.set(role.id, originalSend);
-
-    if (!runtime.isCurrent()) {
-      break;
-    }
-    const applied = await channel.permissionOverwrites
-      .edit(
-        role,
-        { SendMessages: false },
-        { reason: `Silence by ${actor.user.tag}` },
-      )
-      .then(() => true)
-      .catch(() => false);
-
-    if (applied) {
-      appliedRoles.push(role);
-    }
-  }
-
-  if (appliedRoles.length === 0) {
-    return;
-  }
-
-  if (runtime.isCurrent()) {
-    await new Promise((resolve) => {
-      setTimeout(resolve, Math.max(0, seconds) * 1000);
-    });
-  }
-
-  for (const role of appliedRoles) {
-    const original = originalSendFlags.get(role.id) ?? null;
-    const sendValue = original ?? null;
-
-    await channel.permissionOverwrites
-      .edit(
-        role,
-        { SendMessages: sendValue },
-        { reason: `Silence expired by ${actor.user.tag}` },
-      )
-      .catch(() => null);
   }
 }
 
@@ -1395,10 +1673,7 @@ async function getRepliedMember(message: Message): Promise<GuildMember | null> {
         : null,
     );
 
-  if (
-    !targetMessage?.author ||
-    targetMessage.guildId !== message.guild.id
-  ) {
+  if (!targetMessage?.author || targetMessage.guildId !== message.guild.id) {
     return null;
   }
 
@@ -1422,6 +1697,9 @@ function canTimeoutTarget(
   if (target.id === actor.id) {
     return [false, "target is yourself"];
   }
+  if (!me.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+    return [false, "bot lacks Moderate Members permission"];
+  }
   if (me.roles.highest.comparePositionTo(target.roles.highest) <= 0) {
     return [false, "bot role is not high enough"];
   }
@@ -1433,6 +1711,9 @@ function canTimeoutTarget(
   ) {
     return [false, "your role is not high enough"];
   }
+  if (!target.moderatable) {
+    return [false, "target is not moderatable by the bot"];
+  }
 
   return [true, ""];
 }
@@ -1442,12 +1723,20 @@ function buildTimeoutReason(
   user: GuildMember,
   reason: string | null,
 ): string {
-  const base = `${action} by ${user.user.tag} via /admin`;
+  const base = `${action} by ${user.user.tag} via Invictus chat`;
   if (!reason) {
     return base;
   }
 
   return `${base} | ${reason}`;
+}
+
+export function __canTimeoutTargetForTests(
+  actor: GuildMember,
+  me: GuildMember,
+  target: GuildMember,
+): [boolean, string] {
+  return canTimeoutTarget(actor, me, target);
 }
 
 async function resolveMessageMember(

@@ -40,16 +40,16 @@ cp .env.example .env
 
 Supported process keys are:
 
-| Key | Purpose |
-| --- | --- |
-| `DISCORD_TOKEN` | Required Discord bot token. Never print or commit it. |
-| `DB_FILE` | Shared SQLite file. A relative path resolves from the repository root; default is `court.db`. |
-| `BOT_VERSION` | Optional process-wide displayed version override. The package version is used when empty. |
-| `COMMAND_REGISTRATION_MODE` | `global` for production or `guild` for development. Defaults to `global`. |
-| `DEV_GUILD_IDS` | Comma-separated development guild snowflakes. Required only in `guild` registration mode. |
-| `BOT_OPERATOR_USER_IDS` | Reserved process metadata. It currently grants no runtime command or setup authority. |
-| `SCHEDULER_CONCURRENCY` | Positive process-wide bound for concurrent per-guild background work. |
-| `LEGACY_GUILD_ID` | One-time tenant ID used while migrating a legacy v1 database. Remove after migration. |
+| Key                         | Purpose                                                                                       |
+| --------------------------- | --------------------------------------------------------------------------------------------- |
+| `DISCORD_TOKEN`             | Required Discord bot token. Never print or commit it.                                         |
+| `DB_FILE`                   | Shared SQLite file. A relative path resolves from the repository root; default is `court.db`. |
+| `BOT_VERSION`               | Optional process-wide displayed version override. The package version is used when empty.     |
+| `COMMAND_REGISTRATION_MODE` | `global` for production or `guild` for development. Defaults to `global`.                     |
+| `DEV_GUILD_IDS`             | Comma-separated development guild snowflakes. Required only in `guild` registration mode.     |
+| `BOT_OPERATOR_USER_IDS`     | Reserved process metadata. It currently grants no runtime command or setup authority.         |
+| `SCHEDULER_CONCURRENCY`     | Positive process-wide bound for concurrent per-guild background work.                         |
+| `LEGACY_GUILD_ID`           | One-time tenant ID used while migrating a legacy v1 database. Remove after migration.         |
 
 Every configured snowflake is validated. In production, leave registration mode as `global` and leave `DEV_GUILD_IDS` empty. Runtime authorization comes from the current guild's ownership, Discord Administrator permission, and configured guild roles—not from `BOT_OPERATOR_USER_IDS`.
 

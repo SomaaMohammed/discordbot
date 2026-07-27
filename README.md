@@ -18,6 +18,7 @@ The active runtime is TypeScript under `tsbot/`. The Imperial Court and Invictus
 - [Configuration and Discord installation](docs/configuration.md)
 - [Development guide](docs/development.md)
 - [Operations, migration, backup, and rollback](docs/operations.md)
+- [Final review and handoff](docs/final-review-and-handoff.md)
 - [Member capabilities](docs/reference/member-capabilities.md)
 - [Trigger patterns](docs/reference/trigger-patterns.md)
 - [Invictus Empire lore](lore/README.md)
@@ -40,16 +41,17 @@ The active runtime is TypeScript under `tsbot/`. The Imperial Court and Invictus
 `-- ops.sh
 ```
 
-Local `.env`, `court.db*`, `backups/`, dependencies, build output, logs, and editor state are ignored and must never be committed.
+Local environment files, common SQLite database/sidecar names, `backups/`, dependencies, build output, logs, and editor state are ignored and must never be committed. Deployment autostash handles tracked source changes only and never moves untracked or ignored operator data.
 
 ## Local Validation
 
-Node.js 22 or newer is recommended.
+Node.js 22.12.0 or newer is required.
 
 ```bash
 cp .env.example .env
 cd tsbot
 npm ci
+npm run format:check
 npm run typecheck
 npm test
 npm run build

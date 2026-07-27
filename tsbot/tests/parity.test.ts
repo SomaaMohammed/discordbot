@@ -65,9 +65,7 @@ describe("parity helpers", () => {
   });
 
   it("extracts role panel ids from single and multi footer", () => {
-    expect(
-      extractRolePanelRoleId(["RolePanelTarget:123456789012345678"]),
-    ).toBe(
+    expect(extractRolePanelRoleId(["RolePanelTarget:123456789012345678"])).toBe(
       "123456789012345678",
     );
     expect(
@@ -99,9 +97,7 @@ describe("parity helpers", () => {
   it("builds and parses role panel custom IDs with role metadata", () => {
     const customId = buildRolePanelButtonCustomId("123456789012345678");
 
-    expect(customId).toBe(
-      "court:role_panel_claim:role:123456789012345678",
-    );
+    expect(customId).toBe("court:role_panel_claim:role:123456789012345678");
     expect(buildRolePanelButtonCustomId("bad-role-id")).toBe(
       "court:role_panel_claim",
     );
@@ -262,9 +258,7 @@ describe("parity helpers", () => {
   });
 
   it("parses privileged invictus chat intents", () => {
-    expect(parsePrivilegedInvictusChatIntent("hi invictus")).toBe(
-      "greeting",
-    );
+    expect(parsePrivilegedInvictusChatIntent("hi invictus")).toBe("greeting");
     expect(parsePrivilegedInvictusChatIntent("invictus help")).toBe("help");
     expect(parsePrivilegedInvictusChatIntent("invictus title me")).toBe(
       "title",
@@ -281,9 +275,7 @@ describe("parity helpers", () => {
     expect(parsePrivilegedInvictusChatIntent("invictus what should i do")).toBe(
       "counsel",
     );
-    expect(parsePrivilegedInvictusChatIntent("thanks invictus")).toBe(
-      "thanks",
-    );
+    expect(parsePrivilegedInvictusChatIntent("thanks invictus")).toBe("thanks");
     expect(parsePrivilegedInvictusChatIntent("good night invictus")).toBe(
       "farewell",
     );

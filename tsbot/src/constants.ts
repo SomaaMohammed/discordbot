@@ -1,6 +1,6 @@
 import type { RoyalTitle } from "./types.js";
 
-export const PACKAGE_VERSION = "2.0.0";
+export const PACKAGE_VERSION = "2.0.1";
 
 export const STATE_FILE = "data/bootstrap/state.json";
 export const QUESTIONS_FILE = "data/bootstrap/questions.json";
@@ -52,6 +52,7 @@ export const EMPEROR_LOCK_PHRASES = new Set<string>([
 export const URL_PATTERN = /https?:\/\/|discord\.gg\//i;
 
 export const USER_METRIC_PREFIX = "user_stats.";
+export const SILENCE_LEASES_METRIC_KEY = "runtime.silence_leases.v1";
 
 export const USER_FUN_METRIC_FIELDS: Array<[string, string]> = [
   ["messages_sent", "Messages Sent"],

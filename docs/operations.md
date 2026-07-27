@@ -11,18 +11,18 @@ This runbook covers version 2 of the TypeScript runtime and the default systemd 
 - Never delete or overwrite an operator backup automatically. `ops.sh` creates unique backup names and has no retention deletion.
 - Do not start the previous release on a v2 database. Restore its pre-migration v1 backup first.
 - Do not use `npm run dev` or `npm run start` as a validation check; both can connect to Discord and access live data.
-- Never print or stage `.env`, the Discord token, `court.db*`, sidecars, or backups.
+- Never print or stage environment files, the Discord token, SQLite databases or sidecars, or backups.
 
 ## Prerequisites
 
 The host needs:
 
-- Node.js 22 or newer and npm;
+- Node.js 22.12.0 or newer and npm;
 - `sqlite3` with backup and read-only CLI support;
 - git, Bash, GNU `realpath`, and `mktemp`;
 - systemd access through `sudo` for normal rollout and restore checks.
 
-The service must continue to run the compiled entrypoint `tsbot/dist/src/index.js`. Review any external systemd unit, working directory, environment-file path, file ownership, sandboxing directives, and restart policy separately; those files are not managed by this repository.
+Run `ops.sh` as the same service account that owns the checkout and runtime data; its private `0077` umask intentionally makes newly installed dependencies and build output owner-only. The service must continue to run the compiled entrypoint `tsbot/dist/src/index.js`. Review any external systemd unit, working directory, environment-file path, file ownership, sandboxing directives, and restart policy separately; those files are not managed by this repository.
 
 Create the process configuration from `.env.example`. For production, use global command registration:
 
@@ -37,9 +37,9 @@ LEGACY_GUILD_ID=
 
 The values above are placeholders. `BOT_OPERATOR_USER_IDS` is reserved process metadata in version 2 and currently grants no command or setup authority. Never paste a real token or guild ID into documentation, source, or shell history shared with others.
 
-By default both the runtime and `ops.sh` load `<repository>/.env`. To select another file, export `ENV_FILE`; a relative path resolves from the repository root. Use the same `ENV_FILE` in the systemd process and every operations command so the migration and runtime cannot read different settings. Do not put `ENV_FILE` inside the file it is supposed to select.
+By default both the runtime and `ops.sh` load `<repository>/.env`. To select another file, export `ENV_FILE`; a relative path resolves from the repository root. Use the same `ENV_FILE` in the systemd process and every operations command so the migration and runtime cannot read different settings. Do not put `ENV_FILE` inside the file it is supposed to select. Commands that infer the database target fail closed when the selected environment file is missing unless `DB_FILE` is supplied explicitly in the shell; an explicit database argument to `ops.sh validate` remains independent of `.env`.
 
-Restrict local configuration and backup access to the service account, for example `chmod 600 .env` and `chmod 700 backups`. Also verify the external systemd unit's `User`, `Group`, `EnvironmentFile`, working directory, and database ownership before rollout.
+Restrict local configuration and live data to the service account: use mode `0600` for `.env`, the SQLite database, and any `-wal`, `-shm`, or `-journal` sidecars, and mode `0700` for backup directories. `ops.sh` uses a `0077` umask and reapplies `0600` while the database is offline or being restored. Configure the external systemd unit with `UMask=0077` so sidecars recreated later by the running service remain private. Also verify the unit's `User`, `Group`, `EnvironmentFile`, working directory, and database ownership before rollout.
 
 ## v1 Migration Preparation
 
@@ -90,7 +90,7 @@ Start from a clean worktree, pull version 2 explicitly, and then launch the newl
 cd ~/imperial-court-bot
 git status --short
 git fetch origin main
-git pull --ff-only origin main
+git merge --ff-only --no-overwrite-ignore FETCH_HEAD
 bash ./ops.sh rollout
 ```
 
@@ -107,7 +107,7 @@ bash ./ops.sh deploy main
 
 After a successful pull, `deploy` replaces its shell process with the newly checked-out `ops.sh rollout`; it never continues rollout using a stale in-memory script. The rollout performs this sequence and stops on the first failure:
 
-1. refuses or explicitly stashes local source changes before pulling;
+1. refuses local changes or explicitly stashes tracked source changes, then fast-forwards with Git's ignored-file overwrite protection while leaving every untracked and ignored operator file untouched;
 2. re-executes the operations script from the new checkout;
 3. installs locked Node dependencies and validates process configuration before downtime;
 4. verifies the configured systemd unit exists, stops it, and confirms it is fully stopped;
@@ -121,6 +121,8 @@ After a successful pull, `deploy` replaces its shell process with the newly chec
 12. confirms that the service is active and prints recent service logs.
 
 Tests, typecheck, and build are mandatory in a production rollout; there are no skip flags for them. A migration or validation failure leaves the service stopped and preserves the source database transaction outcome and the pre-migration backup. Investigate before taking any further write action.
+
+`LOCAL_CHANGES_POLICY=stash` never stashes untracked files, custom environment files, databases, sidecars, or backup directories. It prints the name of any tracked-change stash it creates so the operator can recover it deliberately after deployment. Deployment fetches once and then runs `git merge --ff-only --no-overwrite-ignore FETCH_HEAD`; an untracked or ignored path that conflicts with the fetched branch makes Git abort without moving or overwriting that path.
 
 To roll out an already checked-out branch without pulling:
 
@@ -141,8 +143,13 @@ That option is unsafe for a database still used by any process. It does not stop
 Use the wrapper for production. When diagnosing in a controlled offline environment, the equivalent explicit sequence is:
 
 ```bash
-sudo systemctl stop imperial-court-bot
+umask 077
 cd ~/imperial-court-bot
+cd tsbot
+npm ci
+npm run config:check
+cd ..
+sudo systemctl stop imperial-court-bot
 bash ./ops.sh validate
 bash ./ops.sh backup
 cd tsbot
@@ -253,7 +260,7 @@ Never run the old binary against schema v2. To roll back:
 2. Identify the exact validated `court-pre-migration-*.db` created for the failed rollout, or the exact `court-*.db` path recorded during a manual migration; do not choose a file only because it sorts newest.
 3. Run restore with `DRY_RUN=1` and confirm it is classified as a valid legacy-v1 database.
 4. Restore that pre-migration backup while the service remains stopped.
-5. Check out the previous known-good release and rebuild its TypeScript entrypoint.
+5. Check out the previous known-good release, run `cd tsbot && npm ci`, rebuild with `npm run build`, and verify `node --check dist/src/index.js` so the old code uses its own locked dependency graph.
 6. Restore the previous release's external systemd/environment configuration if it changed.
 7. Start the previous release and verify logs and legacy behavior.
 

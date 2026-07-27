@@ -10,7 +10,9 @@ function main(): void {
   );
   const config = loadDatabaseConfig(repoRoot);
   const allowedArgs = new Set(["--require-current"]);
-  const unknownArgs = process.argv.slice(2).filter((arg) => !allowedArgs.has(arg));
+  const unknownArgs = process.argv
+    .slice(2)
+    .filter((arg) => !allowedArgs.has(arg));
   if (unknownArgs.length > 0) {
     throw new Error(`Unknown db:check option: ${unknownArgs[0]}`);
   }

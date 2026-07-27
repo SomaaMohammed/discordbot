@@ -1,5 +1,9 @@
 # Secrets and local configuration
 .env
+.env.*
+*.env
+*.env.*
+!.env.example
 
 # Local editor and agent state
 .github/prompts/
@@ -26,8 +30,12 @@ coverage/
 *.tsbuildinfo
 
 # SQLite runtime data, backups, and logs
-court.db
-court.db-*
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
 *.db-wal
 *.db-shm
 *.db-journal

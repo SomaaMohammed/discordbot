@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 # Unified operations entrypoint for Imperial Court Bot v2.
 #
@@ -17,7 +18,6 @@ SCHEMA_VERSION=2
 LEGACY_TABLES=(kv posts answers metrics anon_cooldowns)
 CURRENT_TABLES=(schema_migrations guilds guild_settings kv posts answers metrics anon_cooldowns)
 SCOPE="ops"
-LAST_BACKUP_FILE=""
 
 usage() {
   cat <<'EOF'
@@ -52,6 +52,10 @@ Restore options:
 
 `SKIP_SERVICE_RESTART` and `SKIP_SERVICE_CHECK` are for an already-offline
 database only. They never make an active-database migration safe.
+
+`LOCAL_CHANGES_POLICY=stash` stashes tracked source changes only. The fetched
+branch is merged with Git's ignored-file overwrite protection enabled, so
+untracked and ignored operator files abort a conflicting deployment.
 EOF
 }
 
@@ -82,8 +86,40 @@ require_binary_flag() {
   [[ "$value" == "0" || "$value" == "1" ]] || fail "$name must be exactly 0 or 1"
 }
 
+require_supported_node() {
+  local version
+  local major
+  local minor
+  local patch
+  version="$(node --eval 'process.stdout.write(process.versions.node)')" || fail "Unable to determine the Node.js version"
+  IFS=. read -r major minor patch <<<"$version"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ && "$patch" =~ ^[0-9]+$ ]] || fail "Unable to determine the Node.js version"
+  (( major > 22 || (major == 22 && minor >= 12) )) || fail "Node.js 22.12.0 or newer is required; found $version"
+}
+
+trim_boundary_whitespace() {
+  TRIM_VALUE="$1" node --eval 'process.stdout.write(process.env.TRIM_VALUE.trim())'
+}
+
+restrict_live_database_permissions() {
+  local database_file="$1"
+  local sqlite_file
+
+  for sqlite_file in \
+    "$database_file" \
+    "$database_file-wal" \
+    "$database_file-shm" \
+    "$database_file-journal"; do
+    [[ ! -L "$sqlite_file" ]] || fail "Refusing to change permissions through a SQLite symbolic link"
+    [[ -e "$sqlite_file" ]] || continue
+    [[ -f "$sqlite_file" ]] || fail "SQLite live path is not a regular file"
+    chmod 600 -- "$sqlite_file"
+  done
+}
+
 prepare_operation_paths() {
   require_cmd realpath
+  require_cmd node
 
   if [[ "$APP_DIR" != /* ]]; then
     APP_DIR="$(pwd)/$APP_DIR"
@@ -95,6 +131,8 @@ prepare_operation_paths() {
   fi
   TSBOT_DIR="$(realpath -m -- "$TSBOT_DIR")"
 
+  ENV_FILE="$(trim_boundary_whitespace "$ENV_FILE")"
+  ENV_FILE="${ENV_FILE:-.env}"
   if [[ "$ENV_FILE" != /* ]]; then
     ENV_FILE="$APP_DIR/$ENV_FILE"
   fi
@@ -144,7 +182,12 @@ validate_process_config() {
 
 resolve_runtime_db_file() {
   local configured_db
-  configured_db="$(read_config_value "DB_FILE")"
+
+  if [[ ! -f "$ENV_FILE" && -z "${DB_FILE:-}" ]]; then
+    fail "Cannot resolve DB_FILE because the selected environment file does not exist: $ENV_FILE"
+  fi
+
+  configured_db="$(trim_boundary_whitespace "$(read_config_value "DB_FILE")")"
   configured_db="${configured_db:-court.db}"
 
   if [[ "$configured_db" = /* ]]; then
@@ -380,7 +423,6 @@ create_validated_backup() {
 
   mv -n -- "$partial_file" "$final_file"
   [[ ! -e "$partial_file" && -f "$final_file" ]] || fail "Refusing to overwrite an existing backup path"
-  LAST_BACKUP_FILE="$final_file"
   log "SQLite-consistent backup created and validated: $final_file"
 }
 
@@ -459,6 +501,7 @@ require_legacy_migration_identity() {
 ensure_clean_or_handle_changes() {
   local local_changes_policy="$1"
   local dirty
+  local tracked_dirty
   dirty="$(git status --porcelain)"
   if [[ -z "$dirty" ]]; then
     return
@@ -471,14 +514,28 @@ ensure_clean_or_handle_changes() {
       ;;
     stash)
       local stash_name
-      stash_name="deploy-autostash-$(date -u +%Y%m%d-%H%M%S)"
-      git stash push --include-untracked -m "$stash_name" >/dev/null
-      log "Tracked and untracked changes were stashed; ignored secrets and databases were untouched."
+      tracked_dirty="$(git status --porcelain --untracked-files=no)"
+      if [[ -n "$tracked_dirty" ]]; then
+        stash_name="deploy-autostash-$(date -u +%Y%m%d-%H%M%S)"
+        git stash push -m "$stash_name" >/dev/null
+        [[ -z "$(git status --porcelain --untracked-files=no)" ]] || fail "Tracked changes remain after the deployment stash"
+        log "Tracked changes were stashed as $stash_name."
+      else
+        log "No tracked changes required stashing."
+      fi
+      if [[ -n "$(git status --porcelain)" ]]; then
+        log "Untracked operator files were left untouched; the protected merge will abort if they conflict."
+      fi
       ;;
     *)
       fail "LOCAL_CHANGES_POLICY must be abort or stash"
       ;;
   esac
+}
+
+fast_forward_fetched_branch() {
+  git merge --ff-only --no-overwrite-ignore FETCH_HEAD ||
+    fail "Fast-forward refused; resolve the branch state or move conflicting untracked/ignored files without deleting operator data"
 }
 
 stop_service_for_rollout() {
@@ -543,11 +600,13 @@ command_deploy() {
     log "Validating git worktree"
     ensure_clean_or_handle_changes "$local_changes_policy"
 
-    log "Fetching requested branch"
-    git fetch origin "$branch"
+    git check-ref-format "refs/heads/$branch" >/dev/null || fail "Requested branch name is invalid"
 
-    log "Fast-forwarding requested branch"
-    git pull --ff-only origin "$branch"
+    log "Fetching requested branch"
+    git fetch --no-tags origin "refs/heads/$branch"
+
+    log "Fast-forwarding the fetched branch with operator-file protection"
+    fast_forward_fetched_branch
   else
     log "SKIP_PULL=1 set; using the current checkout"
   fi
@@ -575,6 +634,7 @@ command_rollout() {
   require_binary_flag "SKIP_SERVICE_RESTART" "$skip_service_restart"
   require_binary_flag "OFFLINE_MIGRATION_CONFIRMED" "${OFFLINE_MIGRATION_CONFIRMED:-0}"
   require_cmd node
+  require_supported_node
   require_cmd npm
   require_cmd sqlite3
   require_cmd mktemp
@@ -593,6 +653,7 @@ command_rollout() {
   stop_service_for_rollout "$skip_service_restart"
 
   if [[ -f "$DB_FILE" ]]; then
+    restrict_live_database_permissions "$DB_FILE"
     log "Running read-only pre-migration database checks"
     pre_schema_kind="$(validate_sqlite_database "$DB_FILE")"
     if [[ "$pre_schema_kind" != "empty" ]]; then
@@ -612,6 +673,7 @@ command_rollout() {
     cd "$TSBOT_DIR"
     ENV_FILE="$ENV_FILE" DB_FILE="$DB_FILE" npm run migrate
   )
+  restrict_live_database_permissions "$DB_FILE"
 
   log "Running read-only post-migration integrity and schema checks"
   post_schema_kind="$(validate_sqlite_database "$DB_FILE" "current-v2")"
@@ -649,6 +711,7 @@ command_validate() {
 
   require_cmd sqlite3
   require_cmd node
+  require_supported_node
   require_cmd npm
   require_dir "$TSBOT_DIR"
 
@@ -674,6 +737,7 @@ command_backup() {
 
   require_cmd sqlite3
   require_cmd node
+  require_supported_node
   require_cmd npm
   require_dir "$TSBOT_DIR"
   resolve_runtime_db_file
@@ -706,6 +770,7 @@ command_restore() {
   require_binary_flag "OFFLINE_MIGRATION_CONFIRMED" "${OFFLINE_MIGRATION_CONFIRMED:-0}"
   require_cmd sqlite3
   require_cmd node
+  require_supported_node
   require_cmd npm
   require_dir "$TSBOT_DIR"
 
@@ -737,6 +802,10 @@ command_restore() {
     fail "The restore source and destination must be different files"
   fi
 
+  if [[ -e "$DB_FILE" ]]; then
+    restrict_live_database_permissions "$DB_FILE"
+  fi
+
   if [[ -f "$DB_FILE" && "$backup_before_restore" == "1" ]]; then
     local existing_kind
     existing_kind="$(validate_sqlite_database "$DB_FILE")"
@@ -744,6 +813,7 @@ command_restore() {
   fi
 
   sqlite3 "$DB_FILE" ".timeout 5000" ".restore '$source_backup'"
+  restrict_live_database_permissions "$DB_FILE"
   restored_kind="$(validate_sqlite_database "$DB_FILE" "$source_kind")"
   [[ "$restored_kind" == "$source_kind" ]] || fail "Restored schema does not match the source backup"
   compare_table_counts "$source_backup" "$DB_FILE" "$source_kind"
@@ -794,4 +864,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

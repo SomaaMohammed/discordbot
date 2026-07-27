@@ -13,17 +13,13 @@ import {
   createV2Objects,
   databaseIntegrityCheck,
   detectDatabaseSchema,
-  initializeV2Schema,
   recordCurrentSchemaVersion,
   validateV2Schema,
   type DatabaseSchemaKind,
 } from "./schema.js";
 
 export type MigrationFailurePoint =
-  | "after-rename"
-  | "after-create"
-  | "after-copy"
-  | "after-verify";
+  "after-rename" | "after-create" | "after-copy" | "after-verify";
 
 export interface MigrateDatabaseOptions {
   dbFile: string;
@@ -66,52 +62,62 @@ export function migrateDatabase(
   const db = new Database(options.dbFile);
   const now = options.now ?? (() => new Date().toISOString());
   try {
-    assertHealthy(db);
-    const schema = detectDatabaseSchema(db);
-    if (schema === "current-v2") {
-      return {
-        status: "already-current",
-        schemaVersion: 2,
-        copiedRows: {},
-      };
-    }
-    if (schema === "unknown") {
-      throw new Error(
-        "Database schema is unknown or incomplete; migration refused without changes.",
-      );
-    }
-
     db.pragma("foreign_keys = ON");
-    if (schema === "empty") {
-      initializeV2Schema(db, now());
-      return {
-        status: "initialized",
-        schemaVersion: 2,
-        copiedRows: {},
-      };
-    }
+    const migrate = db.transaction((): MigrationResult => {
+      // BEGIN IMMEDIATE is acquired before schema classification or any legacy
+      // source reads. A v1 writer therefore cannot commit newer rows between
+      // the snapshot used for transformation and the INSERT ... SELECT copy.
+      assertHealthy(db);
+      const schema = detectDatabaseSchema(db);
+      if (schema === "current-v2") {
+        return {
+          status: "already-current",
+          schemaVersion: 2,
+          copiedRows: {},
+        };
+      }
+      if (schema === "unknown") {
+        throw new Error(
+          "Database schema is unknown or incomplete; migration refused without changes.",
+        );
+      }
 
-    const counts = countLegacyRows(db);
-    const hasRows = Object.values(counts).some((count) => count > 0);
-    const guildId = options.legacyGuildId
-      ? assertDiscordSnowflake(options.legacyGuildId, "LEGACY_GUILD_ID")
-      : null;
-    if (hasRows && !guildId) {
-      throw new Error(
-        "LEGACY_GUILD_ID is required because the legacy database contains rows (TEST_GUILD_ID is accepted only by the migration CLI as a deprecated fallback).",
-      );
-    }
+      if (schema === "empty") {
+        const appliedAt = now();
+        createV2Objects(db);
+        recordCurrentSchemaVersion(db, appliedAt);
+        const issues = validateV2Schema(db);
+        if (issues.length > 0) {
+          throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
+        }
+        assertHealthy(db);
+        return {
+          status: "initialized",
+          schemaVersion: 2,
+          copiedRows: {},
+        };
+      }
 
-    const stateRow = db
-      .prepare("SELECT value FROM kv WHERE key = 'state'")
-      .get() as { value: string } | undefined;
-    const legacyState = parseLegacyStateJson(stateRow?.value ?? null);
-    const settings = guildId
-      ? buildLegacyGuildSettings(options.environment ?? {}, legacyState)
-      : null;
-    const appliedAt = now();
+      const counts = countLegacyRows(db);
+      const hasRows = Object.values(counts).some((count) => count > 0);
+      const guildId = options.legacyGuildId
+        ? assertDiscordSnowflake(options.legacyGuildId, "LEGACY_GUILD_ID")
+        : null;
+      if (hasRows && !guildId) {
+        throw new Error(
+          "LEGACY_GUILD_ID is required because the legacy database contains rows (TEST_GUILD_ID is accepted only by the migration CLI as a deprecated fallback).",
+        );
+      }
 
-    const migrate = db.transaction(() => {
+      const stateRow = db
+        .prepare("SELECT value FROM kv WHERE key = 'state'")
+        .get() as { value: string } | undefined;
+      const legacyState = parseLegacyStateJson(stateRow?.value ?? null);
+      const settings = guildId
+        ? buildLegacyGuildSettings(options.environment ?? {}, legacyState)
+        : null;
+      const appliedAt = now();
+
       for (const [current, legacy] of Object.entries(LEGACY_TABLE_MAP)) {
         db.exec(
           `ALTER TABLE ${quoteIdentifier(current)} RENAME TO ${quoteIdentifier(legacy)}`,
@@ -150,7 +156,10 @@ export function migrateDatabase(
           db.prepare(
             `UPDATE kv SET value = ?
              WHERE guild_id = ? AND key = 'state'`,
-          ).run(JSON.stringify(buildMigratedStatePayload(legacyState)), guildId);
+          ).run(
+            JSON.stringify(buildMigratedStatePayload(legacyState)),
+            guildId,
+          );
         }
         db.prepare(
           `INSERT INTO posts (
@@ -198,17 +207,19 @@ export function migrateDatabase(
 
       const issues = validateV2Schema(db);
       if (issues.length > 0) {
-        throw new Error(`Migrated schema validation failed: ${issues.join("; ")}`);
+        throw new Error(
+          `Migrated schema validation failed: ${issues.join("; ")}`,
+        );
       }
       assertHealthy(db);
-    });
-    migrate.immediate();
 
-    return {
-      status: "migrated",
-      schemaVersion: 2,
-      copiedRows: counts,
-    };
+      return {
+        status: "migrated",
+        schemaVersion: 2,
+        copiedRows: counts,
+      };
+    });
+    return migrate.immediate();
   } finally {
     db.close();
   }
@@ -231,7 +242,9 @@ export function validateDatabaseFile(
     if (schema === "current-v2") {
       const issues = validateV2Schema(db);
       if (issues.length > 0) {
-        throw new Error(`Database schema validation failed: ${issues.join("; ")}`);
+        throw new Error(
+          `Database schema validation failed: ${issues.join("; ")}`,
+        );
       }
     }
     return {

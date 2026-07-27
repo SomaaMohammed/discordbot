@@ -11,7 +11,11 @@ import {
   runWeeklyDigest,
   wireRuntimeParity,
 } from "../src/discord/runtime-parity.js";
-import { createRuntime, type BotRuntime, type GuildRuntime } from "../src/runtime.js";
+import {
+  createRuntime,
+  type BotRuntime,
+  type GuildRuntime,
+} from "../src/runtime.js";
 import { GuildSettingsConflictError } from "../src/storage/db.js";
 
 const GUILD_A = "111111111111111111";
@@ -49,12 +53,10 @@ function schedulerRuntime(
   return {
     processConfig: { schedulerConcurrency: concurrency },
     storage: {
-      listEnabledGuilds: vi.fn(() =>
-        guildIds.map((guildId) => ({ guildId })),
-      ),
+      listEnabledGuilds: vi.fn(() => guildIds.map((guildId) => ({ guildId }))),
     },
-    forGuild: vi.fn(async (guildId: string) =>
-      guildRuntimes.get(guildId) ?? null,
+    forGuild: vi.fn(
+      async (guildId: string) => guildRuntimes.get(guildId) ?? null,
     ),
   } as unknown as BotRuntime;
 }
@@ -91,6 +93,14 @@ function createRealRuntimeForTest(prefix: string): BotRuntime {
   return runtime;
 }
 
+function enableStoredGuild(runtime: BotRuntime, guildId: string): void {
+  runtime.storage.setGuildEnabled(
+    guildId,
+    true,
+    runtime.storage.getGuildEnableExpectation(guildId)!,
+  );
+}
+
 describe("runtime tenant isolation", () => {
   it("does not record message metrics for a disabled guild", async () => {
     const callbacks = new Map<string, (...args: unknown[]) => unknown>();
@@ -98,9 +108,11 @@ describe("runtime tenant isolation", () => {
       on: vi.fn((event: string, callback: (...args: unknown[]) => unknown) => {
         callbacks.set(event, callback);
       }),
-      once: vi.fn((event: string, callback: (...args: unknown[]) => unknown) => {
-        callbacks.set(event, callback);
-      }),
+      once: vi.fn(
+        (event: string, callback: (...args: unknown[]) => unknown) => {
+          callbacks.set(event, callback);
+        },
+      ),
     } as unknown as Client;
     const settings = createDefaultGuildSettings();
     const metricsIncrement = vi.fn();
@@ -280,8 +292,8 @@ describe("runtime tenant isolation", () => {
     realRuntimes.push(runtime);
     runtime.storage.ensureGuild(GUILD_A);
     runtime.storage.ensureGuild(GUILD_B);
-    runtime.storage.setGuildEnabled(GUILD_A, true);
-    runtime.storage.setGuildEnabled(GUILD_B, true);
+    enableStoredGuild(runtime, GUILD_A);
+    enableStoredGuild(runtime, GUILD_B);
 
     const a = await runtime.forGuild(GUILD_A);
     const aAgain = await runtime.forGuild(GUILD_A);
@@ -306,7 +318,7 @@ describe("runtime tenant isolation", () => {
     runtime.invalidateGuild(GUILD_A);
     runtime.storage.reactivateGuild(GUILD_A, "Guild A rejoined");
     runtime.invalidateGuild(GUILD_A);
-    runtime.storage.setGuildEnabled(GUILD_A, true);
+    enableStoredGuild(runtime, GUILD_A);
     const rejoinedA = await runtime.forGuild(GUILD_A);
     expect(rejoinedA?.backfillStatus).toBe(a?.backfillStatus);
     expect(rejoinedA?.backfillStatus.running).toBe(true);
@@ -315,7 +327,7 @@ describe("runtime tenant isolation", () => {
     runtime.invalidateGuild(GUILD_A, { forgetBackfillStatus: true });
     runtime.storage.purgeGuild(GUILD_A);
     runtime.storage.ensureGuild(GUILD_A, "Guild A recreated");
-    runtime.storage.setGuildEnabled(GUILD_A, true);
+    enableStoredGuild(runtime, GUILD_A);
     const recreatedA = await runtime.forGuild(GUILD_A);
     expect(recreatedA?.backfillStatus).not.toBe(a?.backfillStatus);
     expect(recreatedA?.backfillStatus).toMatchObject({
@@ -327,7 +339,9 @@ describe("runtime tenant isolation", () => {
   });
 
   it("keeps the settings mutator current while invalidating sibling guild contexts", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "court-runtime-generation-"));
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "court-runtime-generation-"),
+    );
     roots.push(root);
     fs.mkdirSync(path.join(root, "data", "bootstrap"), { recursive: true });
     fs.writeFileSync(
@@ -348,7 +362,7 @@ describe("runtime tenant isolation", () => {
     );
     realRuntimes.push(runtime);
     runtime.storage.ensureGuild(GUILD_A);
-    runtime.storage.setGuildEnabled(GUILD_A, true);
+    enableStoredGuild(runtime, GUILD_A);
 
     const mutator = await runtime.forGuild(GUILD_A);
     const sibling = await runtime.forGuild(GUILD_A);
@@ -372,7 +386,7 @@ describe("runtime tenant isolation", () => {
   it("rejects stale runtime saves instead of clobbering concurrent settings or re-enabling", async () => {
     const runtime = createRealRuntimeForTest("court-runtime-settings-race-");
     runtime.storage.ensureGuild(GUILD_A);
-    runtime.storage.setGuildEnabled(GUILD_A, true);
+    enableStoredGuild(runtime, GUILD_A);
 
     const stale = (await runtime.forGuild(GUILD_A))!;
     const writer = (await runtime.forGuild(GUILD_A))!;
@@ -405,6 +419,52 @@ describe("runtime tenant isolation", () => {
     });
   });
 
+  it("rejects a reviewed enable snapshot across leave and repeated rejoin lifecycle changes", async () => {
+    const runtime = createRealRuntimeForTest("court-runtime-lifecycle-race-");
+    const initial = runtime.storage.ensureGuild(
+      GUILD_A,
+      "Guild A",
+      "2026-07-01T00:00:00.000Z",
+    );
+    const staleSetup = (await runtime.forGuild(GUILD_A))!;
+    await staleSetup.refreshSettings();
+
+    runtime.storage.markGuildLeft(GUILD_A);
+    runtime.invalidateGuild(GUILD_A);
+    await expect(staleSetup.setEnabled(true)).rejects.toThrow(
+      "must rejoin before it can be enabled",
+    );
+
+    const firstRejoin = runtime.storage.reactivateGuild(
+      GUILD_A,
+      "Guild A",
+      initial.joinedAt,
+    );
+    runtime.storage.markGuildLeft(GUILD_A);
+    const secondRejoin = runtime.storage.reactivateGuild(
+      GUILD_A,
+      "Guild A",
+      initial.joinedAt,
+    );
+    runtime.invalidateGuild(GUILD_A);
+
+    expect(Date.parse(firstRejoin.joinedAt!)).toBeGreaterThan(
+      Date.parse(initial.joinedAt!),
+    );
+    expect(Date.parse(secondRejoin.joinedAt!)).toBeGreaterThan(
+      Date.parse(firstRejoin.joinedAt!),
+    );
+    await expect(staleSetup.setEnabled(true)).rejects.toBeInstanceOf(
+      GuildSettingsConflictError,
+    );
+    expect(runtime.storage.getGuild(GUILD_A)).toMatchObject({
+      enabled: false,
+      leftAt: null,
+      joinedAt: secondRejoin.joinedAt,
+    });
+    expect(runtime.storage.getGuildSettings(GUILD_A)?.enabled).toBe(false);
+  });
+
   it("preserves enablement on ordinary writes and conditionally enables only an unchanged snapshot", () => {
     const runtime = createRealRuntimeForTest("court-runtime-enable-race-");
     runtime.storage.ensureGuild(GUILD_A);
@@ -421,7 +481,10 @@ describe("runtime tenant isolation", () => {
     expect(runtime.storage.getGuild(GUILD_A)?.enabled).toBe(false);
 
     expect(() =>
-      runtime.storage.setGuildEnabled(GUILD_A, true, reviewed),
+      runtime.storage.setGuildEnabled(GUILD_A, true, {
+        settings: reviewed,
+        lifecycleJoinedAt: runtime.storage.getGuild(GUILD_A)!.joinedAt,
+      }),
     ).toThrow(GuildSettingsConflictError);
     expect(runtime.storage.getGuildSettings(GUILD_A)).toMatchObject({
       enabled: false,

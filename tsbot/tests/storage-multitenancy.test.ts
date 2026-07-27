@@ -4,6 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { DateTime } from "luxon";
 import { afterEach, describe, expect, it } from "vitest";
+import { SILENCE_LEASES_METRIC_KEY } from "../src/constants.js";
 import { CourtStorage } from "../src/storage/db.js";
 
 const GUILD_A = "111111111111111111";
@@ -66,7 +67,11 @@ describe("guild-scoped storage", () => {
     aSettings.weeklyDigestSchedule = { weekday: 4, hour: 9 };
     aSettings.enabled = true;
     a.saveSettings(aSettings);
-    storage.setGuildEnabled(GUILD_A, true);
+    storage.setGuildEnabled(
+      GUILD_A,
+      true,
+      storage.getGuildEnableExpectation(GUILD_A)!,
+    );
 
     expect(b.getSettings()).toMatchObject({
       enabled: false,
@@ -130,19 +135,15 @@ describe("guild-scoped storage", () => {
     expect(b.getPostRecord("900000000000000001")?.question).toBe(
       "Other question?",
     );
-    expect(
-      a.findAnswerRecord("600000000000000001")?.user_id,
-    ).toBe("700000000000000001");
+    expect(a.findAnswerRecord("600000000000000001")?.user_id).toBe(
+      "700000000000000001",
+    );
     expect(a.findAnswerRecord("600000000000000002")).toBeNull();
-    expect(
-      b.findAnswerRecord("600000000000000002")?.user_id,
-    ).toBe("700000000000000001");
-    expect(
-      a.getLastAnswerTimeForUser("700000000000000001"),
-    ).not.toBeNull();
-    expect(
-      b.getLastAnswerTimeForUser("700000000000000001"),
-    ).not.toBeNull();
+    expect(b.findAnswerRecord("600000000000000002")?.user_id).toBe(
+      "700000000000000001",
+    );
+    expect(a.getLastAnswerTimeForUser("700000000000000001")).not.toBeNull();
+    expect(b.getLastAnswerTimeForUser("700000000000000001")).not.toBeNull();
     expect(a.metricsGet("custom", "0")).toBe("11");
     expect(b.metricsGet("custom", "0")).toBe("22");
   });
@@ -152,7 +153,11 @@ describe("guild-scoped storage", () => {
     storage.ensureGuild(GUILD_A);
     const a = storage.forGuild(GUILD_A);
     a.setQuestions({ general: ["Retained?"] });
-    storage.setGuildEnabled(GUILD_A, true);
+    storage.setGuildEnabled(
+      GUILD_A,
+      true,
+      storage.getGuildEnableExpectation(GUILD_A)!,
+    );
 
     const left = storage.markGuildLeft(GUILD_A);
     expect(left).toMatchObject({ enabled: false });
@@ -180,7 +185,11 @@ describe("guild-scoped storage", () => {
     b.setQuestions({ general: ["B"] });
     a.metricsSet("only-a", 1);
     b.metricsSet("only-b", 1);
-    storage.setGuildEnabled(GUILD_B, true);
+    storage.setGuildEnabled(
+      GUILD_B,
+      true,
+      storage.getGuildEnableExpectation(GUILD_B)!,
+    );
 
     const exportB = b.exportData();
     expect(exportB.settings.enabled).toBe(true);
@@ -202,6 +211,58 @@ describe("guild-scoped storage", () => {
     expect(storage.getGuild(GUILD_B)).not.toBeNull();
     expect(storage.forGuild(GUILD_B).getQuestions().general).toEqual(["B"]);
     expect(storage.forGuild(GUILD_B).metricsGet("only-b", "0")).toBe("1");
+  });
+
+  it("reserves live silence leases from portable export and import replacement", () => {
+    const storage = makeStorage();
+    storage.ensureGuild(GUILD_A);
+    const guild = storage.forGuild(GUILD_A);
+    const liveLease = JSON.stringify({
+      version: 1,
+      leases: [
+        {
+          channelId: "333333333333333333",
+          roleId: "444444444444444444",
+          originalSendMessages: null,
+          expiresAt: 9_999,
+        },
+      ],
+    });
+    guild.metricsSet(SILENCE_LEASES_METRIC_KEY, liveLease);
+    guild.metricsSet("portable", 7);
+    const portable = guild.exportData();
+
+    expect(portable.metrics.map((metric) => metric.key)).not.toContain(
+      SILENCE_LEASES_METRIC_KEY,
+    );
+    const injected = structuredClone(portable);
+    injected.metrics.push({
+      key: SILENCE_LEASES_METRIC_KEY,
+      value: "attacker-controlled",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(() => guild.importData(injected)).toThrow(/reserved silence-lock/i);
+    expect(guild.metricsGet(SILENCE_LEASES_METRIC_KEY, "")).toBe(liveLease);
+    expect(guild.metricsGet("portable", "0")).toBe("7");
+
+    guild.metricsSet("portable", 99);
+    guild.importData(portable);
+    expect(guild.metricsGet("portable", "0")).toBe("7");
+    expect(guild.metricsGet(SILENCE_LEASES_METRIC_KEY, "")).toBe(liveLease);
+  });
+
+  it("preserves malformed live silence metadata across import replacement", () => {
+    const storage = makeStorage();
+    storage.ensureGuild(GUILD_A);
+    const guild = storage.forGuild(GUILD_A);
+    guild.metricsSet(SILENCE_LEASES_METRIC_KEY, "{unknown-baseline");
+    const portable = guild.exportData();
+
+    guild.importData(portable);
+
+    expect(guild.metricsGet(SILENCE_LEASES_METRIC_KEY, "")).toBe(
+      "{unknown-baseline",
+    );
   });
 
   it("preserves an uninitialized question pool across export and import", () => {
@@ -260,6 +321,82 @@ describe("guild-scoped storage", () => {
     expect(guild.countAllAnswerRecords()).toBe(0);
   });
 
+  it("rejects duplicate imported answer message IDs without changing guild data", () => {
+    const storage = makeStorage();
+    storage.ensureGuild(GUILD_A);
+    const guild = storage.forGuild(GUILD_A);
+    guild.setQuestions({ general: ["Original question?"] });
+    guild.metricsSet("original", 7);
+    guild.markUserAnswered(
+      "900000000000000001",
+      "700000000000000001",
+      "600000000000000001",
+    );
+    const before = guild.exportData();
+    const payload = structuredClone(before);
+    payload.answers = [
+      {
+        questionMessageId: "900000000000000002",
+        userId: "700000000000000002",
+        answerMessageId: "600000000000000002",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        questionMessageId: "900000000000000003",
+        userId: "700000000000000003",
+        answerMessageId: "600000000000000002",
+        createdAt: "2026-01-02T00:00:00.000Z",
+      },
+    ];
+
+    expect(() => guild.importData(payload)).toThrow(
+      /answer message ID must be unique/i,
+    );
+
+    const after = guild.exportData();
+    expect({ ...after, exportedAt: before.exportedAt }).toEqual(before);
+  });
+
+  it("rolls back the entire anonymous-answer record when an aggregate metric write fails", () => {
+    const { storage, dbFile } = makeFileStorage();
+    storage.ensureGuild(GUILD_A);
+    const guild = storage.forGuild(GUILD_A);
+    const injector = new Database(dbFile);
+    try {
+      injector.exec(`
+        CREATE TRIGGER fail_answer_total
+        BEFORE INSERT ON metrics
+        WHEN NEW.metric_key = 'answers_total'
+        BEGIN
+          SELECT RAISE(ABORT, 'injected aggregate metric failure');
+        END
+      `);
+    } finally {
+      injector.close();
+    }
+
+    expect(() =>
+      guild.markUserAnswered(
+        "900000000000000001",
+        "700000000000000001",
+        "600000000000000001",
+      ),
+    ).toThrow("injected aggregate metric failure");
+
+    expect(guild.countAllAnswerRecords()).toBe(0);
+    expect(guild.getLastAnswerTimeForUser("700000000000000001")).toBeNull();
+    expect(
+      guild.metricsGet(
+        guild.buildUserMetricKey(
+          "700000000000000001",
+          "anonymous_answers_sent",
+        ),
+        "0",
+      ),
+    ).toBe("0");
+    expect(guild.metricsGet("answers_total", "0")).toBe("0");
+  });
+
   it("preserves malformed state and question bytes when reads fail", () => {
     const { storage, dbFile } = makeFileStorage();
     storage.ensureGuild(GUILD_A);
@@ -311,14 +448,10 @@ describe("guild-scoped storage", () => {
     const seed = new Database(dbFile);
     try {
       const row = seed
-        .prepare(
-          "SELECT value FROM kv WHERE guild_id = ? AND key = 'state'",
-        )
+        .prepare("SELECT value FROM kv WHERE guild_id = ? AND key = 'state'")
         .get(GUILD_A) as { value: string };
       seed
-        .prepare(
-          "UPDATE kv SET value = ? WHERE guild_id = ? AND key = 'state'",
-        )
+        .prepare("UPDATE kv SET value = ? WHERE guild_id = ? AND key = 'state'")
         .run(
           JSON.stringify({
             ...(JSON.parse(row.value) as Record<string, unknown>),
@@ -340,9 +473,7 @@ describe("guild-scoped storage", () => {
     const verify = new Database(dbFile, { readonly: true });
     try {
       const row = verify
-        .prepare(
-          "SELECT value FROM kv WHERE guild_id = ? AND key = 'state'",
-        )
+        .prepare("SELECT value FROM kv WHERE guild_id = ? AND key = 'state'")
         .get(GUILD_A) as { value: string };
       expect(JSON.parse(row.value)).toMatchObject({
         history: ["A normal runtime update"],
@@ -394,9 +525,7 @@ describe("guild-scoped storage", () => {
     expect(guild.listPostRecords(true, 1)[0]?.message_id).toBe(
       "900000000000000002",
     );
-    expect(guild.getLatestOpenPost()?.message_id).toBe(
-      "900000000000000002",
-    );
+    expect(guild.getLatestOpenPost()?.message_id).toBe("900000000000000002");
   });
 
   it("restores raw kv and built-in metrics without coercion or conflicts", () => {
@@ -514,10 +643,7 @@ describe("guild-scoped storage", () => {
         questionMessageId: "900000000000000002",
         userId: "700000000000000002",
         answerMessageId: "600000000000000002",
-        createdAt: cutoff
-          .plus({ hours: 12 })
-          .setZone("Etc/GMT+12")
-          .toISO()!,
+        createdAt: cutoff.plus({ hours: 12 }).setZone("Etc/GMT+12").toISO()!,
       },
     ];
     guild.importData(exported);

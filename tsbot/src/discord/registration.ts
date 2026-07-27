@@ -11,6 +11,11 @@ export interface CommandRegistrationPlan {
   developmentGuildIds: string[];
 }
 
+interface GuildCommandFailure {
+  guildId: string;
+  error: unknown;
+}
+
 export function buildCommandRegistrationPlan(
   mode: "global" | "guild",
   developmentGuildIds: readonly string[],
@@ -28,10 +33,7 @@ export function buildCommandRegistrationPlan(
 
 export async function synchronizeCommands(
   client: Client,
-  config: Pick<
-    ProcessConfig,
-    "commandRegistrationMode" | "devGuildIds"
-  >,
+  config: Pick<ProcessConfig, "commandRegistrationMode" | "devGuildIds">,
   definitions: RESTPostAPIChatInputApplicationCommandsJSONBody[],
 ): Promise<void> {
   const application = client.application;
@@ -55,7 +57,8 @@ export async function synchronizeCommands(
       new Set<string>(),
     );
     if (failedGuildClears.length > 0) {
-      throw new Error(
+      throw new AggregateError(
+        failedGuildClears.map((failure) => failure.error),
         `Global command sync refused because ${failedGuildClears.length} guild command scope(s) could not be cleared`,
       );
     }
@@ -79,32 +82,52 @@ export async function synchronizeCommands(
   });
 
   const targetGuildIds = new Set(plan.developmentGuildIds);
-  await clearGuildCommandSets(client, targetGuildIds);
+  const failedGuildClears = await clearGuildCommandSets(client, targetGuildIds);
+  const failedGuildSyncs: GuildCommandFailure[] = [];
 
   for (const guildId of plan.developmentGuildIds) {
     try {
       const guild = await client.guilds.fetch(guildId);
       const synced = await guild.commands.set(definitions);
-      logInfo("discord-registration", "Development guild command sync completed", {
-        mode: plan.mode,
-        guildId,
-        commandCount: synced.size,
-      });
+      logInfo(
+        "discord-registration",
+        "Development guild command sync completed",
+        {
+          mode: plan.mode,
+          guildId,
+          commandCount: synced.size,
+        },
+      );
     } catch (error) {
-      logError("discord-registration", "Development guild command sync failed", {
-        mode: plan.mode,
-        guildId,
-        error,
-      });
+      failedGuildSyncs.push({ guildId, error });
+      logError(
+        "discord-registration",
+        "Development guild command sync failed",
+        {
+          mode: plan.mode,
+          guildId,
+          error,
+        },
+      );
     }
+  }
+
+  if (failedGuildClears.length > 0 || failedGuildSyncs.length > 0) {
+    throw new AggregateError(
+      [
+        ...failedGuildClears.map((failure) => failure.error),
+        ...failedGuildSyncs.map((failure) => failure.error),
+      ],
+      `Development command synchronization failed: ${failedGuildClears.length} stale guild clear(s) and ${failedGuildSyncs.length} target guild sync(s) failed`,
+    );
   }
 }
 
 async function clearGuildCommandSets(
   client: Client,
   retainedGuildIds: ReadonlySet<string>,
-): Promise<string[]> {
-  const failedGuildIds: string[] = [];
+): Promise<GuildCommandFailure[]> {
+  const failures: GuildCommandFailure[] = [];
   for (const guild of client.guilds.cache.values()) {
     if (retainedGuildIds.has(guild.id)) {
       continue;
@@ -117,12 +140,12 @@ async function clearGuildCommandSets(
         commandCount: cleared.size,
       });
     } catch (error) {
-      failedGuildIds.push(guild.id);
+      failures.push({ guildId: guild.id, error });
       logWarn("discord-registration", "Failed to clear guild command set", {
         guildId: guild.id,
         error,
       });
     }
   }
-  return failedGuildIds;
+  return failures;
 }

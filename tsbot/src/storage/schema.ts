@@ -3,10 +3,7 @@ import type Database from "better-sqlite3";
 export const CURRENT_SCHEMA_VERSION = 2;
 
 export type DatabaseSchemaKind =
-  | "empty"
-  | "legacy-v1"
-  | "current-v2"
-  | "unknown";
+  "empty" | "legacy-v1" | "current-v2" | "unknown";
 
 export const SCHEMA_MIGRATIONS_TABLE_SQL = `
 CREATE TABLE schema_migrations (
@@ -129,16 +126,18 @@ CREATE INDEX idx_guilds_enabled_left_at
 ON guilds (enabled, left_at)
 `;
 
-const V2_TABLE_SQL = [
-  SCHEMA_MIGRATIONS_TABLE_SQL,
-  GUILDS_TABLE_SQL,
-  GUILD_SETTINGS_TABLE_SQL,
-  KV_TABLE_SQL,
-  POSTS_TABLE_SQL,
-  ANSWERS_TABLE_SQL,
-  METRICS_TABLE_SQL,
-  ANON_COOLDOWNS_TABLE_SQL,
-] as const;
+const EXPECTED_V2_TABLE_SQL = {
+  schema_migrations: SCHEMA_MIGRATIONS_TABLE_SQL,
+  guilds: GUILDS_TABLE_SQL,
+  guild_settings: GUILD_SETTINGS_TABLE_SQL,
+  kv: KV_TABLE_SQL,
+  posts: POSTS_TABLE_SQL,
+  answers: ANSWERS_TABLE_SQL,
+  metrics: METRICS_TABLE_SQL,
+  anon_cooldowns: ANON_COOLDOWNS_TABLE_SQL,
+} as const;
+
+const V2_TABLE_SQL = Object.values(EXPECTED_V2_TABLE_SQL);
 
 const V2_INDEX_SQL = [
   POSTS_GUILD_CLOSED_POSTED_AT_INDEX_SQL,
@@ -459,7 +458,9 @@ export function getUserTableNames(db: Database.Database): string[] {
   return rows.map((row) => String(row.name));
 }
 
-export function detectDatabaseSchema(db: Database.Database): DatabaseSchemaKind {
+export function detectDatabaseSchema(
+  db: Database.Database,
+): DatabaseSchemaKind {
   const tables = getUserTableNames(db);
   if (tables.length === 0) {
     return "empty";
@@ -538,6 +539,22 @@ export function validateV2Schema(db: Database.Database): string[] {
     return issues;
   }
 
+  for (const [table, expectedSql] of Object.entries(EXPECTED_V2_TABLE_SQL)) {
+    const definition = db
+      .prepare(
+        `SELECT tbl_name, sql FROM sqlite_master
+         WHERE type = 'table' AND name = ?`,
+      )
+      .get(table) as IndexDefinitionRow | undefined;
+    if (
+      !definition ||
+      definition.tbl_name !== table ||
+      normalizeSql(definition.sql ?? "") !== normalizeSql(expectedSql)
+    ) {
+      issues.push(`${table} SQL does not match the required definition`);
+    }
+  }
+
   for (const [table, expectedKey] of Object.entries(EXPECTED_PRIMARY_KEYS)) {
     const tableInfo = getTableInfo(db, table);
     const actualColumns = tableInfo.map((column) => column.name);
@@ -587,7 +604,9 @@ export function validateV2Schema(db: Database.Database): string[] {
         row.on_delete.toUpperCase() === "CASCADE",
     );
     if (!guildForeignKey) {
-      issues.push(`${table} is missing its guilds(guild_id) cascade foreign key`);
+      issues.push(
+        `${table} is missing its guilds(guild_id) cascade foreign key`,
+      );
     }
   }
 
@@ -639,7 +658,9 @@ export function validateV2Schema(db: Database.Database): string[] {
         row.version > CURRENT_SCHEMA_VERSION,
     )
   ) {
-    issues.push(`schema_migrations must end at version ${CURRENT_SCHEMA_VERSION}`);
+    issues.push(
+      `schema_migrations must end at version ${CURRENT_SCHEMA_VERSION}`,
+    );
   }
 
   const foreignKeyViolations = db.pragma("foreign_key_check") as unknown[];
@@ -698,12 +719,12 @@ function sameLegacyColumns(
       const wanted = expected[index];
       return Boolean(
         wanted &&
-          column.name === wanted.name &&
-          String(column.type).trim().toUpperCase() === wanted.type &&
-          Boolean(column.notnull) === wanted.notNull &&
-          Number(column.pk) === wanted.primaryKeyPosition &&
-          normalizeDefaultValue(column.dflt_value) === wanted.defaultValue &&
-          Number(column.hidden) === 0,
+        column.name === wanted.name &&
+        String(column.type).trim().toUpperCase() === wanted.type &&
+        Boolean(column.notnull) === wanted.notNull &&
+        Number(column.pk) === wanted.primaryKeyPosition &&
+        normalizeDefaultValue(column.dflt_value) === wanted.defaultValue &&
+        Number(column.hidden) === 0,
       );
     })
   );
@@ -724,11 +745,7 @@ function sameNullableStrings(
 }
 
 function normalizeSql(sql: string): string {
-  return sql
-    .trim()
-    .replace(/;$/, "")
-    .replaceAll(/\s+/g, " ")
-    .toLowerCase();
+  return sql.trim().replace(/;$/, "").replaceAll(/\s+/g, " ").toLowerCase();
 }
 
 function normalizeLegacyIndexSql(sql: string): string {

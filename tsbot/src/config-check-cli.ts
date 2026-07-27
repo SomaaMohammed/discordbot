@@ -8,7 +8,9 @@ function main(): void {
     "../..",
   );
   loadProcessConfig(repoRoot);
-  console.log("[config:check] process configuration is valid; values were not printed.");
+  console.log(
+    "[config:check] process configuration is valid; values were not printed.",
+  );
 }
 
 try {

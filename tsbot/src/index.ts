@@ -4,6 +4,11 @@ import { loadProcessConfig } from "./config.js";
 import { createDiscordClient } from "./discord/bot.js";
 import { logError, logInfo } from "./logging.js";
 import { createRuntime } from "./runtime.js";
+import {
+  createShutdownCoordinator,
+  installShutdownSignalHandlers,
+  loginWithShutdown,
+} from "./shutdown.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFile);
@@ -20,13 +25,21 @@ async function main(): Promise<void> {
   const config = loadProcessConfig(repoRoot);
   const runtime = createRuntime(config, repoRoot);
   const client = createDiscordClient(runtime);
+  const shutdownCoordinator = createShutdownCoordinator(client, runtime);
+  const removeShutdownSignalHandlers =
+    installShutdownSignalHandlers(shutdownCoordinator);
 
   logInfo("bootstrap", "Starting TypeScript bot runtime", {
     version: runtime.processConfig.botVersion,
     commandRegistrationMode: runtime.processConfig.commandRegistrationMode,
   });
 
-  await client.login(config.discordToken);
+  await loginWithShutdown(
+    client,
+    config.discordToken,
+    shutdownCoordinator,
+    removeShutdownSignalHandlers,
+  );
 }
 
 try {

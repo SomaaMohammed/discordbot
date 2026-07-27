@@ -2,10 +2,7 @@ import { config as loadDotEnv } from "dotenv";
 import path from "node:path";
 import { PACKAGE_VERSION } from "./constants.js";
 import { assertDiscordSnowflake } from "./guild-settings.js";
-import type {
-  CommandRegistrationMode,
-  ProcessConfig,
-} from "./types.js";
+import type { CommandRegistrationMode, ProcessConfig } from "./types.js";
 
 function envInt(
   name: string,

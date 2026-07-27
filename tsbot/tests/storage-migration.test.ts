@@ -190,7 +190,9 @@ function updateLegacyState(
 ): string {
   const db = new Database(dbFile);
   try {
-    const row = db.prepare("SELECT value FROM kv WHERE key = 'state'").get() as {
+    const row = db
+      .prepare("SELECT value FROM kv WHERE key = 'state'")
+      .get() as {
       value: string;
     };
     const state = JSON.parse(row.value) as Record<string, unknown>;
@@ -272,9 +274,7 @@ describe("v1 to v2 migration", () => {
       });
       expect(
         db
-          .prepare(
-            `SELECT user_id FROM anon_cooldowns WHERE guild_id = ?`,
-          )
+          .prepare(`SELECT user_id FROM anon_cooldowns WHERE guild_id = ?`)
           .get(LEGACY_GUILD),
       ).toEqual({ user_id: "700000000000000001" });
       expect(
@@ -289,9 +289,7 @@ describe("v1 to v2 migration", () => {
       });
 
       const settingsRow = db
-        .prepare(
-          "SELECT settings_json FROM guild_settings WHERE guild_id = ?",
-        )
+        .prepare("SELECT settings_json FROM guild_settings WHERE guild_id = ?")
         .get(LEGACY_GUILD) as { settings_json: string };
       const settings = parseGuildSettingsJson(settingsRow.settings_json);
       expect(settings).toMatchObject({
@@ -441,10 +439,7 @@ describe("v1 to v2 migration", () => {
 
       expect(guild.metricsIncrement(exactKeyA)).toBe(5);
       expect(
-        guild.mergeUserMetricBackfill(
-          { [exactUserB]: 6 },
-          "messages_sent",
-        ),
+        guild.mergeUserMetricBackfill({ [exactUserB]: 6 }, "messages_sent"),
       ).toEqual([1, 1]);
 
       expect(guild.metricsGet(legacyKey, "0")).toBe("4");
@@ -490,7 +485,9 @@ describe("v1 to v2 migration", () => {
         expect(detectDatabaseSchema(verify)).toBe("legacy-v1");
         expect(
           (
-            verify.prepare("SELECT value FROM kv WHERE key = 'state'").get() as {
+            verify
+              .prepare("SELECT value FROM kv WHERE key = 'state'")
+              .get() as {
               value: string;
             }
           ).value,
@@ -530,6 +527,57 @@ describe("v1 to v2 migration", () => {
     }
   });
 
+  it("preserves zero sentinels while empty optional bindings use legacy defaults", () => {
+    const migrateBindings = (suffix: string, overrides: NodeJS.ProcessEnv) => {
+      const root = makeRoot();
+      const dbFile = path.join(root, `optional-bindings-${suffix}.db`);
+      createLegacyDatabase(dbFile);
+      migrateDatabase({
+        dbFile,
+        legacyGuildId: LEGACY_GUILD,
+        environment: { ...migrationEnvironment(), ...overrides },
+      });
+
+      const storage = new CourtStorage({ dbFile }, root);
+      storage.initStorage();
+      try {
+        const settings = storage.getGuildSettings(LEGACY_GUILD);
+        expect(settings).not.toBeNull();
+        return {
+          emperor: settings!.roles.emperor,
+          empress: settings!.roles.empress,
+          royalAlert: settings!.channels.royalAlert,
+          championUserId: settings!.championUserId,
+        };
+      } finally {
+        storage.close();
+      }
+    };
+
+    const absent = migrateBindings("absent", {});
+    const empty = migrateBindings("empty", {
+      EMPEROR_ROLE_ID: "",
+      EMPRESS_ROLE_ID: "",
+      ROYAL_ALERT_CHANNEL_ID: "",
+      UNDEFEATED_USER_ID: "",
+    });
+    const zero = migrateBindings("zero", {
+      EMPEROR_ROLE_ID: "0",
+      EMPRESS_ROLE_ID: "0",
+      ROYAL_ALERT_CHANNEL_ID: "0",
+      UNDEFEATED_USER_ID: "0",
+    });
+
+    expect(Object.values(absent).every((value) => value !== null)).toBe(true);
+    expect(empty).toEqual(absent);
+    expect(zero).toEqual({
+      emperor: null,
+      empress: null,
+      royalAlert: null,
+      championUserId: null,
+    });
+  });
+
   it("is idempotent and never overwrites migrated settings", () => {
     const root = makeRoot();
     const dbFile = path.join(root, "legacy.db");
@@ -564,6 +612,65 @@ describe("v1 to v2 migration", () => {
       ]);
     } finally {
       db.close();
+    }
+  });
+
+  it("locks legacy writers before reading and transforming source state", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "legacy-lock.db");
+    createLegacyDatabase(dbFile);
+    const writer = new Database(dbFile);
+    writer.pragma("busy_timeout = 0");
+    let concurrentWrite: "not-attempted" | "blocked" | "committed" =
+      "not-attempted";
+
+    try {
+      const result = migrateDatabase({
+        dbFile,
+        legacyGuildId: LEGACY_GUILD,
+        environment: migrationEnvironment(),
+        now: () => {
+          const row = writer
+            .prepare("SELECT value FROM kv WHERE key = 'state'")
+            .get() as { value: string };
+          const state = JSON.parse(row.value) as Record<string, unknown>;
+          state.history = ["concurrent"];
+          try {
+            writer
+              .prepare(
+                "UPDATE kv SET value = ?, updated_at = ? WHERE key = 'state'",
+              )
+              .run(JSON.stringify(state), "2026-01-31T23:59:59.000Z");
+            concurrentWrite = "committed";
+          } catch (error) {
+            expect((error as { code?: string }).code).toBe("SQLITE_BUSY");
+            concurrentWrite = "blocked";
+          }
+          return "2026-02-01T00:00:00.000Z";
+        },
+      });
+
+      expect(result.status).toBe("migrated");
+      expect(concurrentWrite).toBe("blocked");
+    } finally {
+      writer.close();
+    }
+
+    const migrated = new Database(dbFile, {
+      readonly: true,
+      fileMustExist: true,
+    });
+    try {
+      const row = migrated
+        .prepare(
+          "SELECT value, updated_at FROM kv WHERE guild_id = ? AND key = 'state'",
+        )
+        .get(LEGACY_GUILD) as { value: string; updated_at: string };
+      const state = JSON.parse(row.value) as { history?: string[] };
+      expect(state.history).not.toEqual(["concurrent"]);
+      expect(row.updated_at).toBe("2026-01-03T00:00:00.000Z");
+    } finally {
+      migrated.close();
     }
   });
 
@@ -638,9 +745,11 @@ describe("v1 to v2 migration", () => {
       expect(db.prepare("SELECT COUNT(*) AS count FROM posts").get()).toEqual({
         count: 1,
       });
-      expect(db.prepare("SELECT COUNT(*) AS count FROM answers").get()).toEqual({
-        count: 1,
-      });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM answers").get()).toEqual(
+        {
+          count: 1,
+        },
+      );
     } finally {
       db.close();
     }

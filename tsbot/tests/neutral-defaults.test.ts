@@ -3,7 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const tsbotRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const tsbotRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
 const repoRoot = path.resolve(tsbotRoot, "..");
 const legacyCompatibilityFile = path.join(
   tsbotRoot,
@@ -29,7 +32,8 @@ describe("neutral runtime defaults and bootstrap templates", () => {
 
     const activeFiles = [
       ...listFiles(path.join(tsbotRoot, "src")).filter(
-        (filePath) => path.resolve(filePath) !== path.resolve(legacyCompatibilityFile),
+        (filePath) =>
+          path.resolve(filePath) !== path.resolve(legacyCompatibilityFile),
       ),
       ...listFiles(path.join(repoRoot, "data", "bootstrap")),
     ];
@@ -77,9 +81,9 @@ describe("neutral runtime defaults and bootstrap templates", () => {
     expect(Object.keys(questions).length).toBeGreaterThan(0);
     for (const value of Object.values(questions)) {
       expect(Array.isArray(value)).toBe(true);
-      expect((value as unknown[]).every((item) => typeof item === "string")).toBe(
-        true,
-      );
+      expect(
+        (value as unknown[]).every((item) => typeof item === "string"),
+      ).toBe(true);
     }
   });
 });

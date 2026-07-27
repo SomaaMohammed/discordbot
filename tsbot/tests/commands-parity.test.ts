@@ -1,11 +1,13 @@
 import { DateTime } from "luxon";
 import { describe, expect, it, vi } from "vitest";
-import type {
-  ButtonInteraction,
-  ChatInputCommandInteraction,
-  GuildMember,
+import {
+  PermissionFlagsBits,
+  type ButtonInteraction,
+  type ChatInputCommandInteraction,
+  type GuildMember,
 } from "discord.js";
 import {
+  __findMissingChannelPermissionsForTests,
   handleButtonInteraction,
   handleChatInputCommand,
 } from "../src/discord/commands.js";
@@ -76,7 +78,9 @@ type StorageMock = {
   >;
   metricsSnapshot: ReturnType<typeof vi.fn<() => MetricsShape>>;
   countAllAnswerRecords: ReturnType<typeof vi.fn<() => number>>;
-  getPostRecord: ReturnType<typeof vi.fn<(messageId: string) => PostRecord | null>>;
+  getPostRecord: ReturnType<
+    typeof vi.fn<(messageId: string) => PostRecord | null>
+  >;
   recordCommandMetric: ReturnType<typeof vi.fn<(commandName: string) => void>>;
   updateStateAtomic: ReturnType<
     typeof vi.fn<(mutator: (state: CourtState) => void) => CourtState>
@@ -130,13 +134,13 @@ type RuntimeMock = BotRuntime & { guildRuntime: GuildRuntime };
 
 function createRuntimeMock(storage: StorageMock, now: DateTime): RuntimeMock {
   const processConfig = {
-      discordToken: "test-token",
-      botVersion: "0.2.0-test",
-      dbFile: "./tests/does-not-exist.sqlite3",
-      commandRegistrationMode: "global" as const,
-      devGuildIds: [],
-      botOperatorUserIds: [],
-      schedulerConcurrency: 2,
+    discordToken: "test-token",
+    botVersion: "0.2.0-test",
+    dbFile: "./tests/does-not-exist.sqlite3",
+    commandRegistrationMode: "global" as const,
+    devGuildIds: [],
+    botOperatorUserIds: [],
+    schedulerConcurrency: 2,
   };
   const settings = createDefaultGuildSettings();
   settings.enabled = true;
@@ -407,7 +411,8 @@ describe("command parity dispatch", () => {
     expect(storage.getPostRecord).toHaveBeenCalledWith(messageId);
     expect(showModal).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
-      content: "This button is not attached to a current court post in this server.",
+      content:
+        "This button is not attached to a current court post in this server.",
       ephemeral: true,
     });
   });
@@ -444,7 +449,9 @@ describe("command parity dispatch", () => {
     expect(storage.recordCommandMetric).toHaveBeenCalledWith("greetings.send");
     expect(
       storage.recordCommandMetric.mock.invocationCallOrder[0],
-    ).toBeLessThan(reply.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER);
+    ).toBeLessThan(
+      reply.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
   });
 
   it("cancels /court health when channel resolution invalidates the guild", async () => {
@@ -461,15 +468,18 @@ describe("command parity dispatch", () => {
     const guild = interaction.guild as NonNullable<
       ChatInputCommandInteraction["guild"]
     >;
-    (guild.channels.fetch as unknown as ReturnType<typeof vi.fn>)
-      .mockImplementation(async () => {
-        current = false;
-        return null;
-      });
+    (
+      guild.channels.fetch as unknown as ReturnType<typeof vi.fn>
+    ).mockImplementation(async () => {
+      current = false;
+      return null;
+    });
 
     await handleChatInputCommand(interaction, runtime);
 
-    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith("court.health");
+    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith(
+      "court.health",
+    );
     expect(reply).toHaveBeenLastCalledWith({
       content:
         "Action cancelled because this server was disabled, removed, purged, or its configuration changed.",
@@ -557,6 +567,128 @@ describe("command parity dispatch", () => {
     const dataField = embedJson?.fields?.find((field) => field.name === "Data");
     expect(dataField?.value).toContain("**Tenant Storage:** `available`");
     expect(dataField?.value).not.toContain("KB");
+
+    const warningsField = embedJson?.fields?.find(
+      (field) => field.name === "Warnings",
+    );
+    expect(warningsField?.value).toContain(
+      "Could not resolve the bot member to validate permissions",
+    );
+  });
+
+  it("matches setup permissions when anonymous answers are disabled or enabled", () => {
+    const granted = new Set<bigint>([
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.EmbedLinks,
+    ]);
+    const channel = {
+      isThread: vi.fn(() => false),
+      permissionsFor: vi.fn(() => ({
+        has: (permission: bigint) => granted.has(permission),
+      })),
+    };
+
+    expect(__findMissingChannelPermissionsForTests(channel, {}, false)).toEqual(
+      ["Read Message History"],
+    );
+    expect(__findMissingChannelPermissionsForTests(channel, {}, true)).toEqual([
+      "Read Message History",
+      "Create Public Threads",
+      "Send Messages In Threads",
+      "Manage Threads",
+    ]);
+  });
+
+  it("reports a thread court target as incompatible with anonymous answers", async () => {
+    const now = DateTime.fromISO("2026-04-19T13:18:00Z");
+    const storage = createStorageMock(buildState(), buildMetrics(), []);
+    const runtime = createRuntimeMock(storage, now);
+    runtime.guildRuntime.settings.features.anonymousAnswers = true;
+    const { interaction, reply } = createInteractionMock({
+      commandName: "court",
+      subcommand: "health",
+      isAdmin: true,
+    });
+    const targetId = "123456789012345679";
+    const target = {
+      id: targetId,
+      guildId: GUILD_ID,
+      isThread: vi.fn(() => true),
+      permissionsFor: vi.fn(() => ({ has: vi.fn(() => true) })),
+      toString: vi.fn(() => "<#123456789012345679>"),
+    };
+    const guild = interaction.guild as NonNullable<
+      ChatInputCommandInteraction["guild"]
+    >;
+    (guild.channels.cache as Map<string, unknown>).set(targetId, target);
+    (guild.members as unknown as { me: GuildMember | null }).me =
+      {} as GuildMember;
+
+    await handleChatInputCommand(interaction, runtime);
+
+    const payload = reply.mock.calls.at(-1)?.[0] as {
+      embeds: Array<{
+        toJSON: () => { fields?: Array<{ name: string; value: string }> };
+      }>;
+    };
+    const warnings = payload.embeds[0]
+      ?.toJSON()
+      .fields?.find((field) => field.name === "Warnings")?.value;
+    expect(warnings).toContain(
+      "Court channel must be a text or announcement channel while anonymous answers are enabled",
+    );
+  });
+
+  it("does not mark a backfill running when the acknowledgement fails", async () => {
+    const now = DateTime.fromISO("2026-04-19T13:20:00Z");
+    const storage = createStorageMock(buildState(), buildMetrics(), []);
+    const runtime = createRuntimeMock(storage, now);
+    const { interaction, reply } = createInteractionMock({
+      commandName: "invictus",
+      subcommand: "backfillstats",
+      isAdmin: true,
+    });
+    reply.mockRejectedValueOnce(
+      new Error("interaction acknowledgement failed"),
+    );
+
+    await expect(handleChatInputCommand(interaction, runtime)).rejects.toThrow(
+      "interaction acknowledgement failed",
+    );
+
+    expect(runtime.guildRuntime.backfillStatus.running).toBe(false);
+    expect(runtime.guildRuntime.backfillStatus.last_status).toBe("idle");
+    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith(
+      "invictus.backfillstats",
+    );
+  });
+
+  it("clears a backfill running marker after an unhandled worker failure", async () => {
+    const now = DateTime.fromISO("2026-04-19T13:25:00Z");
+    const storage = createStorageMock(buildState(), buildMetrics(), []);
+    const runtime = createRuntimeMock(storage, now);
+    const { interaction } = createInteractionMock({
+      commandName: "invictus",
+      subcommand: "backfillstats",
+      isAdmin: true,
+    });
+    runtime.guildRuntime.now = () => {
+      throw new Error("worker startup failed");
+    };
+
+    await handleChatInputCommand(interaction, runtime);
+
+    await vi.waitFor(() => {
+      expect(runtime.guildRuntime.backfillStatus.running).toBe(false);
+      expect(runtime.guildRuntime.backfillStatus.last_status).toBe("failed");
+      expect(runtime.guildRuntime.backfillStatus.last_error).toContain(
+        "worker startup failed",
+      );
+    });
+    expect(storage.recordCommandMetric).toHaveBeenCalledWith(
+      "invictus.backfillstats",
+    );
   });
 
   it("handles /court analytics and includes top command/category lines", async () => {
@@ -672,7 +804,9 @@ describe("command parity dispatch", () => {
     await handleChatInputCommand(interaction, runtime);
 
     expect(storage.updateStateAtomic).not.toHaveBeenCalled();
-    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith("court.dryrun");
+    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith(
+      "court.dryrun",
+    );
     expect(reply).toHaveBeenLastCalledWith({
       content:
         "Action cancelled because this server was disabled, removed, purged, or its configuration changed.",
@@ -702,8 +836,9 @@ describe("command parity dispatch", () => {
     const guild = interaction.guild as NonNullable<
       ChatInputCommandInteraction["guild"]
     >;
-    (guild.channels.fetch as unknown as ReturnType<typeof vi.fn>)
-      .mockResolvedValue(targetChannel);
+    (
+      guild.channels.fetch as unknown as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(targetChannel);
     Object.assign(storage, {
       pickQuestion: vi.fn(() => ["general", "A"]),
       upsertPostRow: vi.fn(),
@@ -776,9 +911,9 @@ describe("command parity dispatch", () => {
         highest: { comparePositionTo: vi.fn(() => 1) },
       },
     } as unknown as GuildMember;
-    const members = (interaction.guild as NonNullable<
-      ChatInputCommandInteraction["guild"]
-    >).members;
+    const members = (
+      interaction.guild as NonNullable<ChatInputCommandInteraction["guild"]>
+    ).members;
     (members.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       async () => {
         current = false;
@@ -816,16 +951,19 @@ describe("command parity dispatch", () => {
     const guild = interaction.guild as NonNullable<
       ChatInputCommandInteraction["guild"]
     >;
-    (guild.members.fetch as unknown as ReturnType<typeof vi.fn>)
-      .mockImplementation(async () => {
-        current = false;
-        return royalActor;
-      });
+    (
+      guild.members.fetch as unknown as ReturnType<typeof vi.fn>
+    ).mockImplementation(async () => {
+      current = false;
+      return royalActor;
+    });
 
     await handleChatInputCommand(interaction, runtime);
 
     expect(storage.updateStateAtomic).not.toHaveBeenCalled();
-    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith("invictus.afk");
+    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith(
+      "invictus.afk",
+    );
     expect(reply).toHaveBeenLastCalledWith({
       content:
         "Action cancelled because this server was disabled, removed, purged, or its configuration changed.",
@@ -850,8 +988,9 @@ describe("command parity dispatch", () => {
     });
     const challengerId = "1001";
     const opponentId = "300000000000000001";
-    (interaction.options.getUser as unknown as ReturnType<typeof vi.fn>)
-      .mockReturnValue({ id: opponentId });
+    (
+      interaction.options.getUser as unknown as ReturnType<typeof vi.fn>
+    ).mockReturnValue({ id: opponentId });
     let current = true;
     runtime.guildRuntime.isCurrent = () => current;
     const makeMember = (id: string): GuildMember =>
@@ -863,13 +1002,14 @@ describe("command parity dispatch", () => {
     const guild = interaction.guild as NonNullable<
       ChatInputCommandInteraction["guild"]
     >;
-    (guild.members.fetch as unknown as ReturnType<typeof vi.fn>)
-      .mockImplementation(async (id: string) => {
-        if (id === opponentId) {
-          current = false;
-        }
-        return makeMember(id === opponentId ? opponentId : challengerId);
-      });
+    (
+      guild.members.fetch as unknown as ReturnType<typeof vi.fn>
+    ).mockImplementation(async (id: string) => {
+      if (id === opponentId) {
+        current = false;
+      }
+      return makeMember(id === opponentId ? opponentId : challengerId);
+    });
 
     await handleChatInputCommand(interaction, runtime);
 
@@ -955,20 +1095,21 @@ describe("command parity dispatch", () => {
 
     expect(showModal).toHaveBeenCalledTimes(1);
     expect(deferReply).not.toHaveBeenCalled();
-    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith("invictus.say");
+    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith(
+      "invictus.say",
+    );
   });
 
   it("supports /invictus say message_file and chunks long content", async () => {
     const now = DateTime.fromISO("2026-04-19T19:25:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
-    const { interaction, showModal, deferReply, editReply } = createInteractionMock(
-      {
+    const { interaction, showModal, deferReply, editReply } =
+      createInteractionMock({
         commandName: "invictus",
         subcommand: "say",
         isAdmin: true,
-      },
-    );
+      });
 
     const send = vi.fn(async () => ({ id: "msg-1" }));
     const targetChannel = {
@@ -1101,6 +1242,188 @@ describe("command parity dispatch", () => {
     );
   });
 
+  it("blocks timeout execution when the bot lacks Moderate Members", async () => {
+    const now = DateTime.fromISO("2026-04-19T19:32:00Z");
+    const storage = createStorageMock(buildState(), buildMetrics(), []);
+    const runtime = createRuntimeMock(storage, now);
+    const { interaction, reply } = createInteractionMock({
+      commandName: "invictus",
+      subcommand: "timeout",
+      isAdmin: true,
+    });
+    const targetId = "300000000000000001";
+    const actor = {
+      id: "1001",
+      user: { bot: false, tag: "actor#0001" },
+      permissions: { has: vi.fn(() => true) },
+      guild: { ownerId: "9999" },
+      roles: {
+        cache: { some: vi.fn(() => false) },
+        highest: { comparePositionTo: vi.fn(() => 1) },
+      },
+      toString: vi.fn(() => "<@1001>"),
+    } as unknown as GuildMember;
+    const timeout = vi.fn(async () => undefined);
+    const target = {
+      id: targetId,
+      user: { bot: false, tag: "target#0001" },
+      guild: { ownerId: "9999" },
+      moderatable: true,
+      roles: { highest: { comparePositionTo: vi.fn(() => 0) } },
+      timeout,
+      toString: vi.fn(() => `<@${targetId}>`),
+    } as unknown as GuildMember;
+    const me = {
+      id: "2000",
+      permissions: { has: vi.fn(() => false) },
+      roles: { highest: { comparePositionTo: vi.fn(() => 1) } },
+    } as unknown as GuildMember;
+    const members = (
+      interaction.guild as NonNullable<ChatInputCommandInteraction["guild"]>
+    ).members;
+    (members as unknown as { me: GuildMember | null }).me = me;
+    (members.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (id: string) => (id === targetId ? target : actor),
+    );
+    (
+      interaction.options.getUser as unknown as ReturnType<typeof vi.fn>
+    ).mockReturnValue({ id: targetId });
+    (
+      interaction.options.getInteger as unknown as ReturnType<typeof vi.fn>
+    ).mockReturnValue(15);
+
+    await handleChatInputCommand(interaction, runtime);
+
+    expect(timeout).not.toHaveBeenCalled();
+    const payload = reply.mock.calls.at(-1)?.[0] as { content: string };
+    expect(payload.content).toContain("bot lacks Moderate Members permission");
+    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith(
+      "invictus.timeout",
+    );
+  });
+
+  it("excludes non-moderatable members from a muteall dry run", async () => {
+    const now = DateTime.fromISO("2026-04-19T19:33:00Z");
+    const storage = createStorageMock(buildState(), buildMetrics(), []);
+    const runtime = createRuntimeMock(storage, now);
+    const { interaction, editReply } = createInteractionMock({
+      commandName: "invictus",
+      subcommand: "muteall",
+      isAdmin: true,
+      boolOptions: { dry_run: true },
+    });
+    const targetId = "300000000000000001";
+    const actor = {
+      id: "1001",
+      user: { bot: false, tag: "actor#0001" },
+      permissions: { has: vi.fn(() => true) },
+      guild: { ownerId: "9999" },
+      roles: {
+        cache: { some: vi.fn(() => false) },
+        highest: { comparePositionTo: vi.fn(() => 1) },
+      },
+      toString: vi.fn(() => "<@1001>"),
+    } as unknown as GuildMember;
+    const timeout = vi.fn(async () => undefined);
+    const target = {
+      id: targetId,
+      user: { bot: false, tag: "target#0001" },
+      guild: { ownerId: "9999" },
+      moderatable: false,
+      roles: { highest: { comparePositionTo: vi.fn(() => 0) } },
+      timeout,
+      toString: vi.fn(() => `<@${targetId}>`),
+    } as unknown as GuildMember;
+    const me = {
+      id: "2000",
+      permissions: { has: vi.fn(() => true) },
+      roles: { highest: { comparePositionTo: vi.fn(() => 1) } },
+    } as unknown as GuildMember;
+    const members = (
+      interaction.guild as NonNullable<ChatInputCommandInteraction["guild"]>
+    ).members;
+    (members as unknown as { me: GuildMember | null }).me = me;
+    (members.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (id?: string) =>
+        id ? actor : new Map<string, GuildMember>([[targetId, target]]),
+    );
+    (
+      interaction.options.getString as unknown as ReturnType<typeof vi.fn>
+    ).mockImplementation((name: string) =>
+      name === "confirm" ? "CONFIRM" : null,
+    );
+    (
+      interaction.options.getInteger as unknown as ReturnType<typeof vi.fn>
+    ).mockReturnValue(15);
+
+    await handleChatInputCommand(interaction, runtime);
+
+    expect(timeout).not.toHaveBeenCalled();
+    const payload = editReply.mock.calls.at(-1)?.[0] as { content: string };
+    expect(payload.content).toContain("would timeout `0` member(s)");
+    expect(payload.content).toContain("target is not moderatable by the bot");
+  });
+
+  it.each([
+    ["muteall", "no server-wide timeout was attempted"],
+    ["unmuteall", "no server-wide timeout removal was attempted"],
+  ])(
+    "stops /invictus %s when the complete member fetch fails",
+    async (subcommand, expectedMessage) => {
+      const now = DateTime.fromISO("2026-04-19T19:34:00Z");
+      const storage = createStorageMock(buildState(), buildMetrics(), []);
+      const runtime = createRuntimeMock(storage, now);
+      const { interaction, editReply } = createInteractionMock({
+        commandName: "invictus",
+        subcommand,
+        isAdmin: true,
+      });
+      const actor = {
+        id: "1001",
+        user: { bot: false, tag: "actor#0001" },
+        permissions: { has: vi.fn(() => true) },
+        guild: { ownerId: "9999" },
+        roles: {
+          cache: { some: vi.fn(() => false) },
+          highest: { comparePositionTo: vi.fn(() => 1) },
+        },
+      } as unknown as GuildMember;
+      const me = {
+        id: "2000",
+        permissions: { has: vi.fn(() => true) },
+        roles: { highest: { comparePositionTo: vi.fn(() => 1) } },
+      } as unknown as GuildMember;
+      const members = (
+        interaction.guild as NonNullable<ChatInputCommandInteraction["guild"]>
+      ).members;
+      (members as unknown as { me: GuildMember | null }).me = me;
+      (members.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+        async (id?: string) => {
+          if (id) {
+            return actor;
+          }
+          throw new Error("member list fetch failed");
+        },
+      );
+      (
+        interaction.options.getString as unknown as ReturnType<typeof vi.fn>
+      ).mockImplementation((name: string) =>
+        name === "confirm" ? "CONFIRM" : null,
+      );
+      (
+        interaction.options.getInteger as unknown as ReturnType<typeof vi.fn>
+      ).mockReturnValue(15);
+
+      await handleChatInputCommand(interaction, runtime);
+
+      const payload = editReply.mock.calls.at(-1)?.[0] as { content: string };
+      expect(payload.content).toContain(expectedMessage);
+      expect(storage.recordCommandMetric).not.toHaveBeenCalledWith(
+        `invictus.${subcommand}`,
+      );
+    },
+  );
+
   it("cancels /invictus timeout when the guild generation changes during member lookup", async () => {
     const now = DateTime.fromISO("2026-04-19T19:35:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
@@ -1130,17 +1453,19 @@ describe("command parity dispatch", () => {
       id: targetId,
       user: { bot: false, tag: "target#0001" },
       guild: { ownerId: "9999" },
+      moderatable: true,
       roles: { highest: { comparePositionTo: vi.fn(() => 0) } },
       timeout,
       toString: vi.fn(() => `<@${targetId}>`),
     } as unknown as GuildMember;
     const me = {
       id: "2000",
+      permissions: { has: vi.fn(() => true) },
       roles: { highest: { comparePositionTo: vi.fn(() => 1) } },
     } as unknown as GuildMember;
-    const members = (interaction.guild as NonNullable<
-      ChatInputCommandInteraction["guild"]
-    >).members;
+    const members = (
+      interaction.guild as NonNullable<ChatInputCommandInteraction["guild"]>
+    ).members;
     (members as unknown as { me: GuildMember | null }).me = me;
     (members.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       async (id: string) => {
@@ -1151,10 +1476,12 @@ describe("command parity dispatch", () => {
         return actor;
       },
     );
-    (interaction.options.getUser as unknown as ReturnType<typeof vi.fn>)
-      .mockReturnValue({ id: targetId });
-    (interaction.options.getInteger as unknown as ReturnType<typeof vi.fn>)
-      .mockReturnValue(15);
+    (
+      interaction.options.getUser as unknown as ReturnType<typeof vi.fn>
+    ).mockReturnValue({ id: targetId });
+    (
+      interaction.options.getInteger as unknown as ReturnType<typeof vi.fn>
+    ).mockReturnValue(15);
 
     await handleChatInputCommand(interaction, runtime);
 
@@ -1206,6 +1533,7 @@ describe("command parity dispatch", () => {
         id,
         user: { bot: false, tag: `target-${id}` },
         guild: { ownerId: "9999" },
+        moderatable: true,
         roles: { highest: { comparePositionTo: vi.fn(() => 0) } },
         timeout,
         toString: vi.fn(() => `<@${id}>`),
@@ -1216,26 +1544,31 @@ describe("command parity dispatch", () => {
     ]);
     const me = {
       id: "2000",
+      permissions: { has: vi.fn(() => true) },
       roles: { highest: { comparePositionTo: vi.fn(() => 1) } },
     } as unknown as GuildMember;
-    const members = (interaction.guild as NonNullable<
-      ChatInputCommandInteraction["guild"]
-    >).members;
-    (members as unknown as {
-      me: GuildMember | null;
-      cache: Map<string, GuildMember>;
-    }).me = me;
+    const members = (
+      interaction.guild as NonNullable<ChatInputCommandInteraction["guild"]>
+    ).members;
+    (
+      members as unknown as {
+        me: GuildMember | null;
+        cache: Map<string, GuildMember>;
+      }
+    ).me = me;
     (members as unknown as { cache: Map<string, GuildMember> }).cache =
       new Map();
     (members.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       async (id: string) => targets.get(id) ?? actor,
     );
-    (interaction.options.getString as unknown as ReturnType<typeof vi.fn>)
-      .mockImplementation((name: string) =>
-        name === "members" ? `${firstId} ${secondId}` : null,
-      );
-    (interaction.options.getInteger as unknown as ReturnType<typeof vi.fn>)
-      .mockImplementation((name: string) => (name === "minutes" ? 15 : null));
+    (
+      interaction.options.getString as unknown as ReturnType<typeof vi.fn>
+    ).mockImplementation((name: string) =>
+      name === "members" ? `${firstId} ${secondId}` : null,
+    );
+    (
+      interaction.options.getInteger as unknown as ReturnType<typeof vi.fn>
+    ).mockImplementation((name: string) => (name === "minutes" ? 15 : null));
 
     await handleChatInputCommand(interaction, runtime);
 

@@ -70,11 +70,13 @@ import type {
   BotRuntime as ProcessBotRuntime,
   GuildRuntime,
 } from "../runtime.js";
+import { logError } from "../logging.js";
 import {
   buildSetupCommandDefinition,
   handleSetupCommand,
   requireSetupAdmin,
 } from "./setup.js";
+import { KeyedSerialQueue } from "./keyed-serial-queue.js";
 
 type BotRuntime = GuildRuntime;
 
@@ -167,6 +169,21 @@ const INVICTUS_DM_PANEL_MODAL_PREFIX = "invictus:dm_panel_modal:";
 const INVICTUS_DM_PANEL_MODAL_INPUT_ID = "dm_message";
 const INVICTUS_DM_PANEL_FOOTER_PREFIX = "InvictusDmTarget:";
 const INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL = "Message Invictus";
+const anonymousAnswerUserQueue = new KeyedSerialQueue();
+const anonymousAnswerQuestionQueue = new KeyedSerialQueue();
+
+function runAnonymousAnswerAdmission<T>(
+  guildId: string,
+  userId: string,
+  questionMessageId: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const userQueueKey = `${guildId}:${userId}`;
+  const questionQueueKey = `${guildId}:${questionMessageId}`;
+  return anonymousAnswerUserQueue.run(userQueueKey, () =>
+    anonymousAnswerQuestionQueue.run(questionQueueKey, task),
+  );
+}
 
 const BOSS_STATS = [
   "Strength",
@@ -1246,7 +1263,10 @@ export async function handleButtonInteraction(
   interaction: ButtonInteraction,
   runtime: ProcessBotRuntime,
 ): Promise<void> {
-  const guildRuntime = await resolveEnabledComponentRuntime(interaction, runtime);
+  const guildRuntime = await resolveEnabledComponentRuntime(
+    interaction,
+    runtime,
+  );
   if (!guildRuntime) {
     return;
   }
@@ -1323,12 +1343,10 @@ export async function handleButtonInteraction(
   }
 
   const postRecord = guildRuntime.storage.getPostRecord(interaction.message.id);
-  if (
-    !postRecord ||
-    postRecord.channel_id !== interaction.channelId
-  ) {
+  if (!postRecord || postRecord.channel_id !== interaction.channelId) {
     await interaction.reply({
-      content: "This button is not attached to a current court post in this server.",
+      content:
+        "This button is not attached to a current court post in this server.",
       ephemeral: true,
     });
     return;
@@ -1347,7 +1365,10 @@ export async function handleModalSubmitInteraction(
   interaction: ModalSubmitInteraction,
   runtime: ProcessBotRuntime,
 ): Promise<void> {
-  const guildRuntime = await resolveEnabledComponentRuntime(interaction, runtime);
+  const guildRuntime = await resolveEnabledComponentRuntime(
+    interaction,
+    runtime,
+  );
   if (!guildRuntime) {
     return;
   }
@@ -1406,24 +1427,25 @@ export async function handleModalSubmitInteraction(
     return;
   }
 
+  await interaction.deferReply({ ephemeral: true });
+
   const member = await interaction.guild.members
     .fetch(interaction.user.id)
     .catch(() => null);
   if (!member || !guildRuntime.isCurrent()) {
-    await interaction.reply({ content: MSG_VERIFY_ROLES, ephemeral: true });
+    await interaction.editReply({ content: MSG_VERIFY_ROLES });
     return;
   }
 
   const postRecord = guildRuntime.storage.getPostRecord(questionMessageId);
   if (!postRecord) {
-    await interaction.reply({
+    await interaction.editReply({
       content: "Could not find the original court post for this server.",
-      ephemeral: true,
     });
     return;
   }
   if (postRecord.closed) {
-    await interaction.reply({ content: MSG_INQUIRY_CLOSED, ephemeral: true });
+    await interaction.editReply({ content: MSG_INQUIRY_CLOSED });
     return;
   }
 
@@ -1433,16 +1455,15 @@ export async function handleModalSubmitInteraction(
     questionMessageId,
   );
   if (!sourceMessage) {
-    await interaction.reply({
+    await interaction.editReply({
       content: "Could not find the original court post.",
-      ephemeral: true,
     });
     return;
   }
   if (!guildRuntime.isCurrent()) {
-    await interaction.reply({
-      content: "This answer was cancelled because this server's configuration changed.",
-      ephemeral: true,
+    await interaction.editReply({
+      content:
+        "This answer was cancelled because this server's configuration changed.",
     });
     return;
   }
@@ -1451,9 +1472,8 @@ export async function handleModalSubmitInteraction(
     .getTextInputValue(ANON_MODAL_INPUT_ID)
     .trim();
   if (!answerText) {
-    await interaction.reply({
+    await interaction.editReply({
       content: "Answer cannot be empty.",
-      ephemeral: true,
     });
     return;
   }
@@ -1464,77 +1484,168 @@ export async function handleModalSubmitInteraction(
     guildRuntime,
   );
   if (validationError) {
-    await interaction.reply({ content: validationError, ephemeral: true });
+    await interaction.editReply({ content: validationError });
     return;
   }
 
   if (guildRuntime.storage.hasUserAnswered(questionMessageId, member.id)) {
-    await interaction.reply({
+    await interaction.editReply({
       content: "You already answered this court inquiry.",
-      ephemeral: true,
     });
     return;
   }
 
   const question = extractQuestionFromMessage(sourceMessage);
-  const thread = await getOrCreateAnswerThread(
-    sourceMessage,
-    question,
-    guildRuntime,
+  const submitAnswer = async () => {
+    if (!guildRuntime.isCurrent()) {
+      return {
+        posted: false as const,
+        content:
+          "This answer was cancelled because this server's configuration changed.",
+      };
+    }
+
+    const freshPostRecord =
+      guildRuntime.storage.getPostRecord(questionMessageId);
+    if (!freshPostRecord) {
+      return {
+        posted: false as const,
+        content: "Could not find the original court post for this server.",
+      };
+    }
+    if (freshPostRecord.closed) {
+      return { posted: false as const, content: MSG_INQUIRY_CLOSED };
+    }
+
+    const freshValidationError = validateAnonymousAnswerSubmission(
+      member,
+      answerText,
+      guildRuntime,
+    );
+    if (freshValidationError) {
+      return { posted: false as const, content: freshValidationError };
+    }
+    if (guildRuntime.storage.hasUserAnswered(questionMessageId, member.id)) {
+      return {
+        posted: false as const,
+        content: "You already answered this court inquiry.",
+      };
+    }
+
+    const thread = await getOrCreateAnswerThread(
+      sourceMessage,
+      question,
+      guildRuntime,
+    );
+    if (!guildRuntime.isCurrent()) {
+      return {
+        posted: false as const,
+        content:
+          "This answer was cancelled because this server's configuration changed.",
+      };
+    }
+    if (!thread) {
+      return {
+        posted: false as const,
+        content:
+          "Could not create or find the reply thread. Check the bot's thread permissions.",
+      };
+    }
+
+    const postBeforeSend =
+      guildRuntime.storage.getPostRecord(questionMessageId);
+    if (!postBeforeSend || postBeforeSend.closed || thread.locked) {
+      return { posted: false as const, content: MSG_INQUIRY_CLOSED };
+    }
+    if (guildRuntime.storage.hasUserAnswered(questionMessageId, member.id)) {
+      return {
+        posted: false as const,
+        content: "You already answered this court inquiry.",
+      };
+    }
+
+    const answerNumber =
+      guildRuntime.storage.nextAnswerNumber(questionMessageId);
+    const embed = new EmbedBuilder()
+      .setTitle(`Anonymous Answer #${answerNumber}`)
+      .setDescription(answerText)
+      .setColor(ROLE_COLOR)
+      .setTimestamp(guildRuntime.now().toJSDate())
+      .setFooter({ text: "Submitted anonymously" });
+
+    const sent = await thread.send({ embeds: [embed] }).catch(() => null);
+    if (!sent) {
+      return {
+        posted: false as const,
+        content: "Failed to post your anonymous answer.",
+      };
+    }
+
+    const deleteUntrackedAnswer = async (reason: string): Promise<boolean> => {
+      return sent
+        .delete()
+        .then(() => true)
+        .catch((error) => {
+          logError("anonymous-answer", "Failed to delete untracked answer", {
+            guildId: guildRuntime.guildId,
+            questionMessageId,
+            answerMessageId: sent.id,
+            reason,
+            error,
+          });
+          return false;
+        });
+    };
+
+    if (!guildRuntime.isCurrent()) {
+      await deleteUntrackedAnswer("runtime_invalidated");
+      return {
+        posted: false as const,
+        content:
+          "This answer was cancelled because this server's configuration changed.",
+      };
+    }
+
+    const postAfterSend = guildRuntime.storage.getPostRecord(questionMessageId);
+    if (!postAfterSend || postAfterSend.closed || thread.locked) {
+      await deleteUntrackedAnswer("inquiry_closed");
+      return { posted: false as const, content: MSG_INQUIRY_CLOSED };
+    }
+
+    try {
+      guildRuntime.storage.markUserAnswered(
+        questionMessageId,
+        member.id,
+        sent.id,
+      );
+    } catch (error) {
+      const deleted = await deleteUntrackedAnswer("persistence_failed");
+      logError("anonymous-answer", "Failed to persist anonymous answer", {
+        guildId: guildRuntime.guildId,
+        questionMessageId,
+        answerMessageId: sent.id,
+        error,
+      });
+      return {
+        posted: false as const,
+        content: deleted
+          ? "Failed to save your anonymous answer. The posted message was removed; please try again."
+          : "Failed to save your anonymous answer, and I could not remove the untracked message. Please contact an administrator.",
+      };
+    }
+    return { posted: true as const, thread };
+  };
+  const result = await runAnonymousAnswerAdmission(
+    guildRuntime.guildId,
+    member.id,
+    questionMessageId,
+    submitAnswer,
   );
-  if (!thread) {
-    await interaction.reply({
-      content:
-        "Could not create or find the reply thread. Check the bot's thread permissions.",
-      ephemeral: true,
-    });
-    return;
-  }
 
-  if (!guildRuntime.isCurrent()) {
-    await interaction.reply({
-      content: "This answer was cancelled because this server's configuration changed.",
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (thread.locked) {
-    await interaction.reply({ content: MSG_INQUIRY_CLOSED, ephemeral: true });
-    return;
-  }
-
-  const answerNumber = guildRuntime.storage.nextAnswerNumber(questionMessageId);
-  const embed = new EmbedBuilder()
-    .setTitle(`Anonymous Answer #${answerNumber}`)
-    .setDescription(answerText)
-    .setColor(ROLE_COLOR)
-    .setTimestamp(guildRuntime.now().toJSDate())
-    .setFooter({ text: "Submitted anonymously" });
-
-  const sent = await thread.send({ embeds: [embed] }).catch(() => null);
-  if (!sent) {
-    await interaction.reply({
-      content: "Failed to post your anonymous answer.",
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (!guildRuntime.isCurrent()) {
-    await interaction.reply({
-      content: "This answer was cancelled because this server's configuration changed.",
-      ephemeral: true,
-    });
-    return;
-  }
-
-  guildRuntime.storage.markUserAnswered(questionMessageId, member.id, sent.id);
-  guildRuntime.storage.recordAnswerMetric();
-
-  await interaction.reply({
-    content: `Your anonymous answer has been posted in ${thread.toString()}.`,
-    ephemeral: true,
+  await interaction.editReply({
+    content: result.posted
+      ? `Your anonymous answer has been posted in ${result.thread.toString()}.`
+      : result.content,
   });
 }
 
@@ -1599,12 +1710,18 @@ async function handleCourtHealth(
   const [openPosts, overduePosts] = countOpenAndOverduePosts(posts, now);
   const targetChannel = await getTargetChannel(interaction, runtime);
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
   const logChannel = await getLogChannel(interaction, runtime);
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1612,10 +1729,17 @@ async function handleCourtHealth(
     interaction.guild.members.me ??
     (await interaction.guild.members.fetchMe().catch(() => null));
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
-  const missingPermissions = findMissingChannelPermissions(targetChannel, me);
+  const missingPermissions = findMissingChannelPermissions(
+    targetChannel,
+    me,
+    runtime.settings.features.anonymousAnswers,
+  );
 
   const nextRunText = buildNextRunText(
     runtime.settings.courtSchedule.mode,
@@ -1636,6 +1760,14 @@ async function handleCourtHealth(
   const warnings: string[] = [];
   if (!targetChannel) {
     warnings.push("Court channel is not reachable");
+  }
+  if (!me) {
+    warnings.push("Could not resolve the bot member to validate permissions");
+  }
+  if (runtime.settings.features.anonymousAnswers && targetChannel?.isThread()) {
+    warnings.push(
+      "Court channel must be a text or announcement channel while anonymous answers are enabled",
+    );
   }
   if (runtime.settings.channels.log && !logChannel) {
     warnings.push("Log channel is configured but not reachable");
@@ -1800,7 +1932,10 @@ async function handleCourtDryRun(
   settings.courtSchedule.dryRun = enabled;
   await runtime.saveSettings(settings);
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
   runtime.storage.updateStateAtomic((state) => {
@@ -1924,7 +2059,10 @@ async function handleCourtChannel(
   settings.channels.court = channel.id;
   await runtime.saveSettings(settings);
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -1954,7 +2092,10 @@ async function handleCourtLogChannel(
     });
     return;
   }
-  if (channel && (!interaction.guild || channel.guildId !== interaction.guild.id)) {
+  if (
+    channel &&
+    (!interaction.guild || channel.guildId !== interaction.guild.id)
+  ) {
     await interaction.reply({
       content: "Choose a channel from this server.",
       ephemeral: true,
@@ -1966,7 +2107,10 @@ async function handleCourtLogChannel(
   settings.channels.log = channel?.id ?? null;
   await runtime.saveSettings(settings);
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -2247,32 +2391,33 @@ function buildNextRunText(
 function findMissingChannelPermissions(
   channel: DmPanelTargetChannel | null,
   me: GuildMember | null,
+  anonymousAnswersEnabled: boolean,
 ): string[] {
   if (!channel || !me) {
     return [];
   }
 
   const permissions = channel.permissionsFor(me);
-  const missing: string[] = [];
-  if (!permissions.has(PermissionFlagsBits.ViewChannel)) {
-    missing.push("View Channel");
-  }
-  if (!permissions.has(PermissionFlagsBits.SendMessages)) {
-    missing.push("Send Messages");
-  }
-  if (!permissions.has(PermissionFlagsBits.EmbedLinks)) {
-    missing.push("Embed Links");
-  }
-  if (
-    !channel.isThread() &&
-    !permissions.has(PermissionFlagsBits.CreatePublicThreads)
-  ) {
-    missing.push("Create Public Threads");
-  }
-  if (!permissions.has(PermissionFlagsBits.SendMessagesInThreads)) {
-    missing.push("Send Messages In Threads");
-  }
-  return missing;
+  const required: Array<[bigint, string]> = [
+    [PermissionFlagsBits.ViewChannel, "View Channel"],
+    [PermissionFlagsBits.SendMessages, "Send Messages"],
+    [PermissionFlagsBits.EmbedLinks, "Embed Links"],
+    [PermissionFlagsBits.ReadMessageHistory, "Read Message History"],
+    ...(anonymousAnswersEnabled
+      ? ([
+          [PermissionFlagsBits.CreatePublicThreads, "Create Public Threads"],
+          [
+            PermissionFlagsBits.SendMessagesInThreads,
+            "Send Messages In Threads",
+          ],
+          [PermissionFlagsBits.ManageThreads, "Manage Threads"],
+        ] as Array<[bigint, string]>)
+      : []),
+  ];
+
+  return required
+    .filter(([permission]) => !permissions?.has(permission))
+    .map(([, label]) => label);
 }
 
 async function handleCourtMode(
@@ -2301,7 +2446,10 @@ async function handleCourtMode(
   settings.courtSchedule.mode = requestedMode as BotMode;
   await runtime.saveSettings(settings);
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -2351,7 +2499,10 @@ async function handleCourtSchedule(
   }
   await runtime.saveSettings(settings);
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
   await interaction.reply({
@@ -2551,8 +2702,7 @@ async function handleGreetingSend(
   }
   const requestedName = interaction.options.getString("profile", true).trim();
   const profile = runtime.settings.greetings.find(
-    (candidate) =>
-      candidate.name.toLowerCase() === requestedName.toLowerCase(),
+    (candidate) => candidate.name.toLowerCase() === requestedName.toLowerCase(),
   );
   if (!profile) {
     await interaction.reply({
@@ -2569,7 +2719,8 @@ async function handleGreetingSend(
       .catch(() => null);
     if (!member) {
       await interaction.reply({
-        content: "That greeting profile refers to a user who is not in this server.",
+        content:
+          "That greeting profile refers to a user who is not in this server.",
         ephemeral: true,
       });
       return;
@@ -2639,7 +2790,8 @@ async function handleInvictusSay(
   const fileContent = await fetchAdminSayAttachmentText(messageFile.url);
   if (fileContent === null) {
     await interaction.editReply({
-      content: "Failed to read the message file. Please upload a plain text file.",
+      content:
+        "Failed to read the message file. Please upload a plain text file.",
     });
     return;
   }
@@ -2676,7 +2828,9 @@ async function handleInvictusSay(
   );
 }
 
-async function fetchAdminSayAttachmentText(fileUrl: string): Promise<string | null> {
+async function fetchAdminSayAttachmentText(
+  fileUrl: string,
+): Promise<string | null> {
   try {
     const response = await fetch(fileUrl);
     if (!response.ok) {
@@ -2791,8 +2945,7 @@ async function handleInvictusDmPanel(
   const targetChannel =
     (isCurrentGuildTargetChannel(interaction, requestedChannel)
       ? requestedChannel
-      : null) ??
-    getDmPanelTargetChannel(interaction);
+      : null) ?? getDmPanelTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
       content:
@@ -2845,7 +2998,10 @@ async function handleInvictusDmPanel(
   const mentionPayload = buildAnnouncementMentions(mentionEveryone);
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -2868,7 +3024,10 @@ async function handleInvictusDmPanel(
   }
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -2908,7 +3067,10 @@ async function handleAdminSayModalSubmit(
   const channel =
     interaction.guild.channels.cache.get(channelId) ??
     (await interaction.guild.channels.fetch(channelId).catch(() => null));
-  if (!isDmPanelTargetChannel(channel) || channel.guildId !== interaction.guild.id) {
+  if (
+    !isDmPanelTargetChannel(channel) ||
+    channel.guildId !== interaction.guild.id
+  ) {
     await interaction.reply({
       content: "Target channel no longer exists or cannot receive messages.",
       ephemeral: true,
@@ -2953,7 +3115,10 @@ async function handleAdminSayModalSubmit(
     return;
   }
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3030,7 +3195,10 @@ async function handleInvictusDmPanelModalSubmit(
     );
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3048,7 +3216,10 @@ async function handleInvictusDmPanelModalSubmit(
   }
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3079,8 +3250,7 @@ async function handleInvictusResetRoyalTimer(
 
   runtime.storage.recordCommandMetric("invictus.resetroyaltimer");
   await interaction.reply({
-    content:
-      `Royal timer reset. The next message from the ${runtime.settings.labels.emperor} or the ${runtime.settings.labels.empress} can trigger the H1 announcement immediately.`,
+    content: `Royal timer reset. The next message from the ${runtime.settings.labels.emperor} or the ${runtime.settings.labels.empress} can trigger the H1 announcement immediately.`,
     ephemeral: true,
   });
 
@@ -3101,7 +3271,10 @@ async function handleInvictusAfk(
     return;
   }
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3220,14 +3393,6 @@ async function handleInvictusBackfillStats(
   const lookbackDays = interaction.options.getInteger("days") ?? 0;
   const lookbackText = backfillLookbackText(lookbackDays);
 
-  markBackfillStarted(
-    runtime.backfillStatus,
-    interaction.user.id,
-    lookbackDays,
-    isoNow(runtime.settings.timezone),
-  );
-  runtime.storage.recordCommandMetric("invictus.backfillstats");
-
   await interaction.reply({
     content:
       `Starting user stats backfill for ${lookbackText}. This can take a while and may hit API rate limits on large servers. ` +
@@ -3235,12 +3400,55 @@ async function handleInvictusBackfillStats(
     ephemeral: true,
   });
 
-  void runUserActivityBackfill(
+  if (!runtime.isCurrent()) {
+    await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
+    return;
+  }
+  if (runtime.backfillStatus.running) {
+    await interaction.editReply({
+      content:
+        "A user stats backfill started while this request was being acknowledged. Wait for it to finish before starting another.",
+    });
+    return;
+  }
+
+  const startedAtIso = isoNow(runtime.settings.timezone);
+  runtime.storage.recordCommandMetric("invictus.backfillstats");
+  markBackfillStarted(
+    runtime.backfillStatus,
+    interaction.user.id,
+    lookbackDays,
+    startedAtIso,
+  );
+
+  await runUserActivityBackfill(
     interaction,
     runtime,
     interaction.guild,
     lookbackDays,
-  );
+  ).catch((error) => {
+    if (
+      runtime.backfillStatus.running &&
+      runtime.backfillStatus.started_at === startedAtIso
+    ) {
+      const errorText =
+        error instanceof Error
+          ? `${error.name}: ${error.message}`
+          : String(error);
+      markBackfillFinished(
+        runtime.backfillStatus,
+        runtime.isCurrent() ? "failed" : "cancelled",
+        isoNow(runtime.settings.timezone),
+        null,
+        errorText.slice(0, 400),
+      );
+    }
+    logError("backfill", "Unhandled user stats backfill failure", {
+      guildId: runtime.guildId,
+      initiatedByUserId: interaction.user.id,
+      error,
+    });
+  });
 }
 
 async function runUserActivityBackfill(
@@ -3373,7 +3581,9 @@ async function backfillUserActivityMetrics(
   let scannedReactions = 0;
 
   assertBackfillIsCurrent(runtime);
-  const targets = await getBackfillHistoryTargets(guild);
+  const targets = await getBackfillHistoryTargets(guild, () =>
+    runtime.isCurrent(),
+  );
   assertBackfillIsCurrent(runtime);
   for (const target of targets) {
     assertBackfillIsCurrent(runtime);
@@ -3426,31 +3636,78 @@ async function backfillUserActivityMetrics(
 
 async function getBackfillHistoryTargets(
   guild: NonNullable<ChatInputCommandInteraction["guild"]>,
-): Promise<Array<TextChannel | AnyThreadChannel>> {
-  const targets: Array<TextChannel | AnyThreadChannel> = [];
+  shouldContinue: () => boolean = () => true,
+): Promise<Array<TextChannel | NewsChannel | AnyThreadChannel>> {
+  const targets: Array<TextChannel | NewsChannel | AnyThreadChannel> = [];
   const seenIds = new Set<string>();
+  const assertDiscoveryIsCurrent = (): void => {
+    if (!shouldContinue()) {
+      throw new Error(
+        "Backfill cancelled during archived-thread target discovery.",
+      );
+    }
+  };
 
+  const addTarget = (
+    target: TextChannel | NewsChannel | AnyThreadChannel,
+  ): void => {
+    if (seenIds.has(target.id)) {
+      return;
+    }
+    seenIds.add(target.id);
+    targets.push(target);
+  };
+
+  assertDiscoveryIsCurrent();
   for (const channel of guild.channels.cache.values()) {
-    if (!(channel instanceof TextChannel)) {
+    assertDiscoveryIsCurrent();
+    if (
+      channel.type === ChannelType.GuildText ||
+      channel.type === ChannelType.GuildAnnouncement
+    ) {
+      addTarget(channel);
+    }
+
+    if (
+      channel.type !== ChannelType.GuildText &&
+      channel.type !== ChannelType.GuildAnnouncement &&
+      channel.type !== ChannelType.GuildForum &&
+      channel.type !== ChannelType.GuildMedia
+    ) {
       continue;
     }
 
-    if (!seenIds.has(channel.id)) {
-      seenIds.add(channel.id);
-      targets.push(channel);
+    const archivedPublicThreads = await channel.threads
+      .fetchArchived({ type: "public", fetchAll: true })
+      .catch(() => null);
+    assertDiscoveryIsCurrent();
+    if (archivedPublicThreads) {
+      for (const thread of archivedPublicThreads.threads.values()) {
+        addTarget(thread);
+      }
+    }
+
+    if (channel.type === ChannelType.GuildText) {
+      const archivedPrivateThreads = await channel.threads
+        .fetchArchived({ type: "private", fetchAll: true })
+        .catch(() => null);
+      assertDiscoveryIsCurrent();
+      if (archivedPrivateThreads) {
+        for (const thread of archivedPrivateThreads.threads.values()) {
+          addTarget(thread);
+        }
+      }
     }
   }
 
+  assertDiscoveryIsCurrent();
   const activeThreads = await guild.channels
     .fetchActiveThreads()
     .catch(() => null);
+  assertDiscoveryIsCurrent();
   if (activeThreads) {
     for (const thread of activeThreads.threads.values()) {
-      if (seenIds.has(thread.id)) {
-        continue;
-      }
-      seenIds.add(thread.id);
-      targets.push(thread);
+      addTarget(thread);
     }
   }
 
@@ -3458,7 +3715,7 @@ async function getBackfillHistoryTargets(
 }
 
 async function scanBackfillHistoryTarget(
-  target: TextChannel | AnyThreadChannel,
+  target: TextChannel | NewsChannel | AnyThreadChannel,
   afterTimestamp: number | null,
   messageCounts: Record<string, number>,
   reactionsSentCounts: Record<string, number>,
@@ -3471,14 +3728,18 @@ async function scanBackfillHistoryTarget(
 
   while (true) {
     if (!shouldContinue()) {
-      throw new Error("Backfill cancelled because the guild is no longer active.");
+      throw new Error(
+        "Backfill cancelled because the guild is no longer active.",
+      );
     }
     const batch = await target.messages.fetch({
       limit: 100,
       ...(before ? { before } : {}),
     });
     if (!shouldContinue()) {
-      throw new Error("Backfill cancelled because the guild is no longer active.");
+      throw new Error(
+        "Backfill cancelled because the guild is no longer active.",
+      );
     }
     if (batch.size === 0) {
       break;
@@ -3493,7 +3754,9 @@ async function scanBackfillHistoryTarget(
       shouldContinue,
     );
     if (!shouldContinue()) {
-      throw new Error("Backfill cancelled because the guild is no longer active.");
+      throw new Error(
+        "Backfill cancelled because the guild is no longer active.",
+      );
     }
     scannedMessages += batchResult.scannedMessages;
     scannedReactions += batchResult.scannedReactions;
@@ -3533,7 +3796,9 @@ async function scanBackfillMessageBatch(
 
   for (const message of messages) {
     if (!shouldContinue()) {
-      throw new Error("Backfill cancelled because the guild is no longer active.");
+      throw new Error(
+        "Backfill cancelled because the guild is no longer active.",
+      );
     }
     if (afterTimestamp !== null && message.createdTimestamp < afterTimestamp) {
       reachedLookback = true;
@@ -3553,7 +3818,9 @@ async function scanBackfillMessageBatch(
       shouldContinue,
     );
     if (!shouldContinue()) {
-      throw new Error("Backfill cancelled because the guild is no longer active.");
+      throw new Error(
+        "Backfill cancelled because the guild is no longer active.",
+      );
     }
   }
 
@@ -3571,11 +3838,15 @@ async function tallyReactionCountsForMessage(
 
   for (const reaction of message.reactions.cache.values()) {
     if (!shouldContinue()) {
-      throw new Error("Backfill cancelled because the guild is no longer active.");
+      throw new Error(
+        "Backfill cancelled because the guild is no longer active.",
+      );
     }
     const reactors = await reaction.users.fetch().catch(() => null);
     if (!shouldContinue()) {
-      throw new Error("Backfill cancelled because the guild is no longer active.");
+      throw new Error(
+        "Backfill cancelled because the guild is no longer active.",
+      );
     }
     if (!reactors) {
       continue;
@@ -3734,7 +4005,10 @@ async function handleFunBattle(
     return;
   }
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3750,7 +4024,10 @@ async function handleFunBattle(
     return;
   }
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3848,7 +4125,10 @@ async function handleFunStats(
     return;
   }
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -3909,7 +4189,10 @@ async function handleFunLeaderboard(
       interaction.guild.members.cache.get(String(userId)) ??
       (await interaction.guild.members.fetch(String(userId)).catch(() => null));
     if (!runtime.isCurrent()) {
-      await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+      await interaction.reply({
+        content: MSG_RUNTIME_CANCELLED,
+        ephemeral: true,
+      });
       return;
     }
     const display = member ? member.toString() : `<@${userId}>`;
@@ -4057,7 +4340,10 @@ async function handleInvictusLock(
     "Channel locked via /invictus lock";
   const everyone = interaction.guild.roles.everyone;
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
   const success = await channel.permissionOverwrites
@@ -4067,14 +4353,17 @@ async function handleInvictusLock(
   if (!success) {
     await interaction.reply({
       content:
-        "Could not lock this channel. Check my Manage Channels permission and role hierarchy.",
+        "Could not lock this channel. Check my Manage Roles permission and role hierarchy.",
       ephemeral: true,
     });
     return;
   }
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -4112,7 +4401,10 @@ async function handleInvictusUnlock(
     "Channel unlocked via /invictus unlock";
   const everyone = interaction.guild.roles.everyone;
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
   const success = await channel.permissionOverwrites
@@ -4122,14 +4414,17 @@ async function handleInvictusUnlock(
   if (!success) {
     await interaction.reply({
       content:
-        "Could not unlock this channel. Check my Manage Channels permission and role hierarchy.",
+        "Could not unlock this channel. Check my Manage Roles permission and role hierarchy.",
       ephemeral: true,
     });
     return;
   }
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -4159,7 +4454,10 @@ async function handleInvictusSlowMode(
 
   const seconds = interaction.options.getInteger("seconds", true);
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
   const success = await channel
@@ -4175,7 +4473,10 @@ async function handleInvictusSlowMode(
   }
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -4230,7 +4531,10 @@ async function handleInvictusTimeout(
   const modReason = buildTimeoutReason("Muted", actor, reason);
   const durationMs = minutes * 60_000;
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
   const success = await member
@@ -4246,7 +4550,10 @@ async function handleInvictusTimeout(
   }
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -4306,7 +4613,10 @@ async function handleInvictusUntimeout(
 
   const modReason = buildTimeoutReason("Unmuted", actor, reason);
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
   const success = await member
@@ -4322,7 +4632,10 @@ async function handleInvictusUntimeout(
   }
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -4548,14 +4861,21 @@ async function handleInvictusMuteAll(
   const reason = interaction.options.getString("reason");
 
   await interaction.deferReply({ ephemeral: true });
-  await guild.members.fetch().catch(() => null);
+  const fetchedMembers = await guild.members.fetch().catch(() => null);
 
   if (!runtime.isCurrent()) {
     await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
     return;
   }
+  if (!fetchedMembers) {
+    await interaction.editReply({
+      content:
+        "Could not fetch the complete server member list; no server-wide timeout was attempted.",
+    });
+    return;
+  }
 
-  const targets = [...guild.members.cache.values()];
+  const targets = [...fetchedMembers.values()];
   const preview = previewTimeoutTargets(actor, me, targets);
   const cap = runtime.settings.limits.muteallTargetCap;
   if (cap > 0 && preview.eligible > cap) {
@@ -4633,14 +4953,21 @@ async function handleInvictusUnmuteAll(
   const reason = interaction.options.getString("reason");
 
   await interaction.deferReply({ ephemeral: true });
-  await guild.members.fetch().catch(() => null);
+  const fetchedMembers = await guild.members.fetch().catch(() => null);
 
   if (!runtime.isCurrent()) {
     await interaction.editReply({ content: MSG_RUNTIME_CANCELLED });
     return;
   }
+  if (!fetchedMembers) {
+    await interaction.editReply({
+      content:
+        "Could not fetch the complete server member list; no server-wide timeout removal was attempted.",
+    });
+    return;
+  }
 
-  const targets = [...guild.members.cache.values()];
+  const targets = [...fetchedMembers.values()];
   const preview = previewTimeoutTargets(actor, me, targets, true);
   const cap = runtime.settings.limits.muteallTargetCap;
   if (cap > 0 && preview.eligible > cap) {
@@ -4739,6 +5066,9 @@ function canTimeoutTarget(
   if (target.id === actor.id) {
     return [false, "target is yourself"];
   }
+  if (!me.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+    return [false, "bot lacks Moderate Members permission"];
+  }
   if (me.roles.highest.comparePositionTo(target.roles.highest) <= 0) {
     return [false, "bot role is not high enough"];
   }
@@ -4750,6 +5080,9 @@ function canTimeoutTarget(
   ) {
     return [false, "your role is not high enough"];
   }
+  if (!target.moderatable) {
+    return [false, "target is not moderatable by the bot"];
+  }
 
   return [true, ""];
 }
@@ -4759,7 +5092,7 @@ function buildTimeoutReason(
   user: GuildMember,
   reason: string | null,
 ): string {
-  const base = `${action} by ${user.user.tag} via /admin`;
+  const base = `${action} by ${user.user.tag} via /invictus`;
   return reason ? `${base} | ${reason}` : base;
 }
 
@@ -4933,8 +5266,7 @@ async function handleInvictusRolePanel(
   const targetChannel =
     (isCurrentGuildTargetChannel(interaction, requestedChannel)
       ? requestedChannel
-      : null) ??
-    getDmPanelTargetChannel(interaction);
+      : null) ?? getDmPanelTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
       content:
@@ -5001,7 +5333,10 @@ async function handleInvictusRolePanel(
   const mentionPayload = buildAnnouncementMentions(mentionEveryone);
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
   const sent = await targetChannel
@@ -5023,7 +5358,10 @@ async function handleInvictusRolePanel(
   }
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -5062,8 +5400,7 @@ async function handleInvictusRolePanelMulti(
   const targetChannel =
     (isCurrentGuildTargetChannel(interaction, requestedChannel)
       ? requestedChannel
-      : null) ??
-    getDmPanelTargetChannel(interaction);
+      : null) ?? getDmPanelTargetChannel(interaction);
   if (!targetChannel) {
     await interaction.reply({
       content:
@@ -5139,7 +5476,10 @@ async function handleInvictusRolePanelMulti(
   const mentionPayload = buildAnnouncementMentions(mentionEveryone);
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
   const sent = await targetChannel
@@ -5161,7 +5501,10 @@ async function handleInvictusRolePanelMulti(
   }
 
   if (!runtime.isCurrent()) {
-    await interaction.reply({ content: MSG_RUNTIME_CANCELLED, ephemeral: true });
+    await interaction.reply({
+      content: MSG_RUNTIME_CANCELLED,
+      ephemeral: true,
+    });
     return;
   }
 
@@ -5590,7 +5933,9 @@ function getMemberRoyalTitles(
 
 function assertBackfillIsCurrent(runtime: BotRuntime): void {
   if (!runtime.isCurrent()) {
-    throw new Error("Backfill cancelled because the guild is no longer active.");
+    throw new Error(
+      "Backfill cancelled because the guild is no longer active.",
+    );
   }
 }
 
@@ -5605,10 +5950,7 @@ function isCurrentGuildTargetChannel(
   );
 }
 
-function getRoyalDisplayLabel(
-  runtime: BotRuntime,
-  title: RoyalTitle,
-): string {
+function getRoyalDisplayLabel(runtime: BotRuntime, title: RoyalTitle): string {
   return title === "Emperor"
     ? runtime.settings.labels.emperor
     : runtime.settings.labels.empress;
@@ -5706,7 +6048,8 @@ async function handleCourtCustom(
   const mentionPayload = buildAnnouncementMentions(false);
   if (!runtime.isCurrent()) {
     await interaction.editReply({
-      content: "Court post was cancelled because this server's configuration changed.",
+      content:
+        "Court post was cancelled because this server's configuration changed.",
     });
     return;
   }
@@ -5724,22 +6067,19 @@ async function handleCourtCustom(
 
   if (!runtime.isCurrent()) {
     await interaction.editReply({
-      content: "Court post was cancelled because this server's configuration changed.",
+      content:
+        "Court post was cancelled because this server's configuration changed.",
     });
     return;
   }
 
   const thread = runtime.settings.features.anonymousAnswers
-    ? await getOrCreateAnswerThread(
-        sent,
-        cleanQuestion,
-        runtime,
-        interaction,
-      )
+    ? await getOrCreateAnswerThread(sent, cleanQuestion, runtime, interaction)
     : null;
   if (!runtime.isCurrent()) {
     await interaction.editReply({
-      content: "Court post was cancelled because this server's configuration changed.",
+      content:
+        "Court post was cancelled because this server's configuration changed.",
     });
     return;
   }
@@ -6038,7 +6378,10 @@ async function closeCourtPost(
   runtime: BotRuntime,
 ): Promise<[boolean, string]> {
   if (!runtime.isCurrent()) {
-    return [false, "Court close was cancelled because this server's configuration changed."];
+    return [
+      false,
+      "Court close was cancelled because this server's configuration changed.",
+    ];
   }
   if (record.closed) {
     return [false, MSG_INQUIRY_CLOSED];
@@ -6088,7 +6431,10 @@ async function closeCourtPost(
   }
 
   if (!runtime.isCurrent()) {
-    return [false, "Court close was cancelled because this server's configuration changed."];
+    return [
+      false,
+      "Court close was cancelled because this server's configuration changed.",
+    ];
   }
 
   runtime.storage.markPostClosed(record.message_id, reason);
@@ -6102,7 +6448,10 @@ async function reopenCourtPost(
   runtime: BotRuntime,
 ): Promise<[boolean, string]> {
   if (!runtime.isCurrent()) {
-    return [false, "Court reopen was cancelled because this server's configuration changed."];
+    return [
+      false,
+      "Court reopen was cancelled because this server's configuration changed.",
+    ];
   }
   if (!record.closed) {
     return [false, "This court inquiry is already open."];
@@ -6156,7 +6505,10 @@ async function reopenCourtPost(
   }
 
   if (!runtime.isCurrent()) {
-    return [false, "Court reopen was cancelled because this server's configuration changed."];
+    return [
+      false,
+      "Court reopen was cancelled because this server's configuration changed.",
+    ];
   }
 
   const reopened = runtime.storage.markPostOpen(
@@ -6181,7 +6533,9 @@ async function postQuestion(
   },
 ): Promise<[string, string]> {
   if (!runtime.isCurrent()) {
-    throw new Error("Court post cancelled because this server's configuration changed.");
+    throw new Error(
+      "Court post cancelled because this server's configuration changed.",
+    );
   }
   const [chosenCategory, question] = runtime.storage.pickQuestion(
     options.category,
@@ -6203,14 +6557,18 @@ async function postQuestion(
   });
 
   if (!runtime.isCurrent()) {
-    throw new Error("Court post cancelled because this server's configuration changed.");
+    throw new Error(
+      "Court post cancelled because this server's configuration changed.",
+    );
   }
 
   const thread = runtime.settings.features.anonymousAnswers
     ? await getOrCreateAnswerThread(sent, question, runtime)
     : null;
   if (!runtime.isCurrent()) {
-    throw new Error("Court post cancelled because this server's configuration changed.");
+    throw new Error(
+      "Court post cancelled because this server's configuration changed.",
+    );
   }
   runtime.storage.upsertPostRow({
     message_id: String(sent.id),
@@ -6589,8 +6947,7 @@ async function handleRolePanelButtonInteraction(
     footerTexts,
     buttonSlot,
   );
-  const roleIdText =
-    roleIdFromCustomId ?? roleIdFromFooter;
+  const roleIdText = roleIdFromCustomId ?? roleIdFromFooter;
   if (!roleIdText) {
     await interaction.reply({
       content: "This role panel is missing role metadata.",
@@ -6765,7 +7122,8 @@ async function resolveCourtPostMessageForModal(
     return null;
   }
   const message = await getPostMessage(interaction.guild, postRecord);
-  return message && isMessageAuthoredByClient(message, interaction.client.user?.id)
+  return message &&
+    isMessageAuthoredByClient(message, interaction.client.user?.id)
     ? message
     : null;
 }
@@ -6775,10 +7133,7 @@ function isBotAuthoredInteractionMessage(
 ): boolean {
   return Boolean(
     interaction.message &&
-      isMessageAuthoredByClient(
-        interaction.message,
-        interaction.client.user?.id,
-      ),
+    isMessageAuthoredByClient(interaction.message, interaction.client.user?.id),
   );
 }
 
@@ -7043,6 +7398,28 @@ async function getOrFetchSendableGuildChannel(
     : null;
 }
 
+export function __findMissingChannelPermissionsForTests(
+  channel: unknown,
+  me: unknown,
+  anonymousAnswersEnabled: boolean,
+): string[] {
+  return findMissingChannelPermissions(
+    channel as DmPanelTargetChannel,
+    me as GuildMember,
+    anonymousAnswersEnabled,
+  );
+}
+
+export async function __getBackfillHistoryTargetsForTests(
+  guild: unknown,
+  shouldContinue: () => boolean = () => true,
+): Promise<Array<TextChannel | NewsChannel | AnyThreadChannel>> {
+  return getBackfillHistoryTargets(
+    guild as NonNullable<ChatInputCommandInteraction["guild"]>,
+    shouldContinue,
+  );
+}
+
 export async function __scanBackfillHistoryTargetForTests(
   target: unknown,
   afterTimestamp: number | null,
@@ -7052,7 +7429,7 @@ export async function __scanBackfillHistoryTargetForTests(
   shouldContinue: () => boolean = () => true,
 ): Promise<[number, number]> {
   return scanBackfillHistoryTarget(
-    target as TextChannel | AnyThreadChannel,
+    target as TextChannel | NewsChannel | AnyThreadChannel,
     afterTimestamp,
     messageCounts,
     reactionsSentCounts,

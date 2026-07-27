@@ -2,7 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { __scanBackfillHistoryTargetForTests } from "../src/discord/commands.js";
+import { ChannelType } from "discord.js";
+import {
+  __getBackfillHistoryTargetsForTests,
+  __scanBackfillHistoryTargetForTests,
+} from "../src/discord/commands.js";
 import { CourtStorage, type GuildStorage } from "../src/storage/db.js";
 
 type FakeUser = { id: string; bot?: boolean };
@@ -101,6 +105,115 @@ function createStorageForBackfillTests(): GuildStorage {
 }
 
 describe("backfill scanning regression", () => {
+  it("discovers announcement channels plus active and archived threads", async () => {
+    const textPublic = { id: "text-public" };
+    const textPrivate = { id: "text-private" };
+    const announcementThread = { id: "announcement-thread" };
+    const forumThread = { id: "forum-thread" };
+    const activeThread = { id: "active-thread" };
+    const textFetchArchived = vi.fn(
+      async (options: { type: "public" | "private" }) => ({
+        threads: new Map(
+          options.type === "private"
+            ? [[textPrivate.id, textPrivate]]
+            : [[textPublic.id, textPublic]],
+        ),
+      }),
+    );
+    const announcementFetchArchived = vi.fn(async () => ({
+      threads: new Map([[announcementThread.id, announcementThread]]),
+    }));
+    const forumFetchArchived = vi.fn(async () => ({
+      threads: new Map([[forumThread.id, forumThread]]),
+    }));
+    const textChannel = {
+      id: "text-channel",
+      type: ChannelType.GuildText,
+      threads: { fetchArchived: textFetchArchived },
+    };
+    const announcementChannel = {
+      id: "announcement-channel",
+      type: ChannelType.GuildAnnouncement,
+      threads: { fetchArchived: announcementFetchArchived },
+    };
+    const forumChannel = {
+      id: "forum-channel",
+      type: ChannelType.GuildForum,
+      threads: { fetchArchived: forumFetchArchived },
+    };
+    const guild = {
+      channels: {
+        cache: new Map<string, unknown>([
+          [textChannel.id, textChannel],
+          [announcementChannel.id, announcementChannel],
+          [forumChannel.id, forumChannel],
+          ["category", { id: "category", type: ChannelType.GuildCategory }],
+        ]),
+        fetchActiveThreads: vi.fn(async () => ({
+          threads: new Map([
+            [textPublic.id, textPublic],
+            [activeThread.id, activeThread],
+          ]),
+        })),
+      },
+    };
+
+    const targets = await __getBackfillHistoryTargetsForTests(guild);
+
+    expect(targets.map((target) => target.id)).toEqual([
+      textChannel.id,
+      textPublic.id,
+      textPrivate.id,
+      announcementChannel.id,
+      announcementThread.id,
+      forumThread.id,
+      activeThread.id,
+    ]);
+    expect(textFetchArchived).toHaveBeenCalledWith({
+      type: "public",
+      fetchAll: true,
+    });
+    expect(textFetchArchived).toHaveBeenCalledWith({
+      type: "private",
+      fetchAll: true,
+    });
+    expect(announcementFetchArchived).toHaveBeenCalledWith({
+      type: "public",
+      fetchAll: true,
+    });
+    expect(forumFetchArchived).toHaveBeenCalledWith({
+      type: "public",
+      fetchAll: true,
+    });
+  });
+
+  it("stops archived-thread discovery when the guild invalidates", async () => {
+    let current = true;
+    const fetchArchived = vi.fn(async () => {
+      current = false;
+      return { threads: new Map() };
+    });
+    const fetchActiveThreads = vi.fn(async () => ({ threads: new Map() }));
+    const channel = {
+      id: "text-channel",
+      type: ChannelType.GuildText,
+      threads: { fetchArchived },
+    };
+    const guild = {
+      channels: {
+        cache: new Map([[channel.id, channel]]),
+        fetchActiveThreads,
+      },
+    };
+
+    await expect(
+      __getBackfillHistoryTargetsForTests(guild, () => current),
+    ).rejects.toThrow("Backfill cancelled");
+
+    expect(fetchArchived).toHaveBeenCalledTimes(1);
+    expect(fetchActiveThreads).not.toHaveBeenCalled();
+  });
+
   it("respects lookback cutoff and tallies non-bot users", async () => {
     const m1 = createMessage("m1", 1300, { id: "100000000000000010" }, [
       createReaction([
@@ -108,9 +221,12 @@ describe("backfill scanning regression", () => {
         { id: "100000000000000021", bot: true },
       ]),
     ]);
-    const m2 = createMessage("m2", 1100, { id: "100000000000000011", bot: true }, [
-      createReaction([{ id: "100000000000000022" }]),
-    ]);
+    const m2 = createMessage(
+      "m2",
+      1100,
+      { id: "100000000000000011", bot: true },
+      [createReaction([{ id: "100000000000000022" }])],
+    );
     const m3 = createMessage("m3", 900, { id: "100000000000000012" }, [
       createReaction([{ id: "100000000000000023" }]),
     ]);
@@ -147,20 +263,13 @@ describe("backfill scanning regression", () => {
     let current = true;
     const firstFetch = vi.fn(async () => {
       current = false;
-      return new Map([
-        ["100000000000000020", { id: "100000000000000020" }],
-      ]);
+      return new Map([["100000000000000020", { id: "100000000000000020" }]]);
     });
     const secondFetch = vi.fn(async () => new Map());
-    const message = createMessage(
-      "m1",
-      1300,
-      { id: "100000000000000010" },
-      [
-        { users: { fetch: firstFetch } },
-        { users: { fetch: secondFetch } },
-      ],
-    );
+    const message = createMessage("m1", 1300, { id: "100000000000000010" }, [
+      { users: { fetch: firstFetch } },
+      { users: { fetch: secondFetch } },
+    ]);
     const { target, fetchMock } = createScanTarget([[message]]);
 
     const messageCounts: Record<string, number> = {};
