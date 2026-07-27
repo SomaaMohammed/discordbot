@@ -115,6 +115,45 @@ describe("Discord work tracking", () => {
     expect(drainCompleted).toBe(true);
   });
 
+  it("does not fetch partial reaction messages for a disabled guild", async () => {
+    const settings = createDefaultGuildSettings();
+    settings.enabled = false;
+    const guildRuntime = {
+      settings,
+      isCurrent: vi.fn(() => true),
+    } as unknown as GuildRuntime;
+    const forGuild = vi.fn(async () => guildRuntime);
+    const runtime = { forGuild } as unknown as BotRuntime;
+    const client = createDiscordClient(runtime);
+    clients.push(client);
+    const emitter = client as unknown as EventEmitter;
+    const fetch = vi.fn(async () => ({
+      guildId: GUILD_ID,
+      guild: { id: GUILD_ID },
+    }));
+    const reaction = {
+      message: {
+        partial: true,
+        guildId: GUILD_ID,
+        fetch,
+      },
+    } as unknown as MessageReaction;
+    const reactionUser = {
+      id: "234567890123456789",
+      bot: false,
+    } as User;
+
+    emitter.emit("messageReactionAdd", reaction, reactionUser);
+    await vi.waitFor(() => {
+      expect(forGuild).toHaveBeenCalledWith(GUILD_ID);
+    });
+
+    const workLifecycle = getDiscordClientWorkLifecycle(client);
+    workLifecycle?.stop();
+    await expect(workLifecycle?.drain(1_000)).resolves.toBe(true);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("keeps archived-thread backfill discovery in the interaction drain", async () => {
     const archivedDiscovery = deferred<{ threads: Map<string, never> }>();
     const fetchArchived = vi.fn(
@@ -156,7 +195,7 @@ describe("Discord work tracking", () => {
     const mergeUserMetricBackfill = vi.fn(() => [0, 0] as [number, number]);
     const guildRuntime = {
       guildId: GUILD_ID,
-      botVersion: "2.0.1-test",
+      botVersion: "3.0.0-test",
       settings,
       storage: {
         recordCommandMetric: vi.fn(),
@@ -178,7 +217,7 @@ describe("Discord work tracking", () => {
     const interaction = {
       guildId: GUILD_ID,
       guild,
-      commandName: "invictus",
+      commandName: "superior",
       options: {
         getSubcommand: vi.fn(() => "backfillstats"),
         getInteger: vi.fn(() => 0),

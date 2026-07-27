@@ -1,60 +1,56 @@
-# Invictus Member Capabilities
+# Superior Member Capabilities
 
-Capabilities are scoped to the current guild. The guild must be active, configured, and enabled, and the relevant feature flag must be on. A role or channel configured in one guild never grants access or receives output in another.
+Capabilities are scoped to the current guild. The guild must be active, configured, and enabled, and any relevant feature flag must be on. A channel or role configured in one guild never grants access or receives output in another.
 
 ## Before Guild Enablement
 
-New and rejoined guilds are disabled. They do not receive message-trigger replies, moderation actions, metrics, scheduled posts, digests, retention work, or backfills.
+New and rejoined guilds are disabled. They do not receive message-trigger replies, moderation actions, activity metrics, or backfill work.
 
-The guild owner and members with Administrator permission can use the `/setup` family to inspect and configure the guild. Other command families return a setup-required response until `/setup validate` succeeds and an administrator runs `/setup enable`.
+The guild owner and members with Discord Administrator permission can use `/setup` to inspect and configure the guild. Other command families return a setup-required response until setup validates and an administrator enables the guild.
 
 ## Any Member
 
-When their feature is enabled, ordinary members can use:
+When the relevant feature is enabled, ordinary members can use:
 
-- Public Invictus chat intents in normal guild messages containing the configured invocation keyword or an alias.
-- Court threads and anonymous-answer flows, subject to the guild's required role, account/member age, cooldown, and link policy.
-- Role-panel buttons for configured self-assignable roles. The bot still needs Manage Roles and sufficient hierarchy; managed roles and `@everyone` cannot be self-assigned.
-- DM-panel buttons created by an administrator. DM forwarding can fail if the recipient blocks DMs.
-- `/greetings send profile:<name>` for a greeting profile configured in the current guild.
-- `/fun` verdict, title, fate, battle, stats, and leaderboard commands.
-- Royal AFK mention responses in the configured royal-alert channel when the referenced title is AFK.
+- Public Superior message intents for greetings, help, coin flips, local time, thanks, farewell, ping, uptime, bot information, dice, and choices.
+- `/utility ping`, `/utility avatar`, `/utility userinfo`, and `/utility serverinfo`.
+- `/fun battle`, `/fun stats`, and `/fun leaderboard`.
+- `/superior help` for the current command and feature summary.
+- `/greetings send profile:<name>` for a profile configured in that guild.
+- Role-panel buttons for configured self-assignable roles. Discord managed roles and `@everyone` cannot be self-assigned, and the bot still needs Manage Roles and sufficient hierarchy.
+- DM-panel buttons created by an administrator. Forwarding can fail when the recipient blocks DMs; when a log channel is configured, the submission and sender identity are copied there as disclosed by the panel.
 
-Component interactions validate the message guild as well as their custom ID. DMs are rejected unless the individual feature explicitly supports them.
+Component interactions validate the message guild as well as their stable custom ID. User-install and unsupported DM command contexts are rejected.
 
-## Configured Royal Members
+## Legacy Role Bindings
 
-Members with the guild's Emperor or Empress role can use `/invictus afk` to set or clear the AFK state for their bound title. Royal AFK and presence behavior also requires the guild's feature flag and royal-alert channel.
-
-Temporary silence phrases are available only to the configured royal role and apply only to the guild's configured silence-target roles, excluding configured silence-exclude roles. There is no built-in citizen role or production role ID.
-
-## Privileged Invictus Chat
-
-Status, counsel, and title-bestowal conversational intents require one of the current guild's configured privileged-chat roles or its configured champion user. Emperor and Empress bindings are distinct and do not grant privileged chat unless the same role is also added to `privileged-chat`. The invocation keyword and display labels can differ by guild.
-
-## Configured Staff
-
-Members with one of the current guild's configured staff roles can use the `/questions` reports and the non-administrative `/court` operations. Those operations include status, health, analytics, category and question maintenance, manual/custom posting, closing and reopening posts, deadline extension, open-post listing, and answer removal.
-
-Configured staff access is local to that guild. It does not grant `/setup`, process-wide authority, or the administrator-only court operations listed below. Guild owners and Discord Administrators also satisfy the staff check.
+`/setup role` is retired and is not published. All supported conversational intents are public to guild members when `superior-chat` is enabled. Reply moderation requires the guild owner or Discord Administrator permission. Persisted privileged-chat and other legacy role bindings can remain in storage and exports for compatibility and rollback, but they have no active runtime consumer.
 
 ## Administrators and Guild Owner
 
-The following operations require the guild owner or Discord Administrator permission and remain subject to Discord bot permissions and role hierarchy:
+The following operations require the guild owner or Discord Administrator permission and remain subject to the bot's Discord permissions and role hierarchy:
 
-- all non-purge `/setup` mutations, validation, enablement, disablement, and export;
-- court dry runs, state export/import, mode, channel, log-channel, schedule, and history-reset operations;
-- Invictus announcements, DM/role panels, message purge, locks, slowmode, timeouts, and bulk moderation;
-- user-stat backfill execution/status and royal-presence timer reset;
-- Invictus administrative help and royal-AFK status inspection;
+- `/setup` mutations, validation, enablement, disablement, and export;
+- `/superior say`, `dmpanel`, `rolepanel`, and `rolepanelmulti`;
+- `/superior purge`, `purgeuser`, `lock`, `unlock`, and `slowmode`;
+- `/superior timeout`, `untimeout`, `mutemany`, `unmutemany`, `muteall`, and `unmuteall`;
+- `/superior backfillstats` and `backfillstatus`;
 - text-triggered reply moderation when enabled.
 
-`/setup validate` checks channels, required bot permissions, configured role existence, silence-target hierarchy, schedules, timezone, limits, and feature dependencies. Role-panel interactions separately reject managed roles and `@everyone` and enforce assignment hierarchy when used. `/setup enable` refuses an incomplete configuration.
+Announcements, panels, moderation targets, channel objects, and role objects are re-resolved in the current guild. Timeout and role actions enforce Discord ownership, permission, managed-role, and hierarchy rules at execution time. Bulk actions honor the configured `mute_target_cap` and their confirmation/dry-run controls.
+
+`/setup validate` checks the log channel, supported feature dependencies, timezone, moderation permission, and configuration shape. It does not reactivate or require old role, court, question, answer, royal, schedule, or staff settings retained in legacy data.
 
 ## Guild Owner Only
 
-`/setup purge` is restricted to the server owner. It displays what will be removed and requires the exact confirmation `PURGE <guildId>`. A successful purge deletes only the current guild's settings and tenant data. It never deletes the shared database file or another guild's rows.
+`/setup purge` is restricted to the server owner. It previews the current guild's removal scope and requires exact `PURGE <guildId>` confirmation. A successful purge deletes only that guild's active-database rows; it does not delete the shared database file, another guild's rows, previously downloaded exports, Discord content, host logs, or operator backups.
+
+## Retired Surfaces and Retained Data
+
+`/court`, `/questions`, anonymous court-answer components, royal AFK/presence commands and triggers, `/fun verdict`, `/fun title`, and `/fun fate` are retired. A stale Discord command or component does not restore them.
+
+Schema-v2 storage and private exports can still contain legacy questions, posts, answer mappings, cooldowns, schedules, royal state, and metrics for compatibility, rollback, retention, and owner-authorized purge. Their presence in storage does not make them active member capabilities.
 
 ## Guild Lifecycle
 
-`/setup disable` stops guild behavior without deleting data. If the bot leaves, the guild is marked inactive and all tenant data is retained. Rejoining restores that retained record but does not auto-enable it; an administrator must validate and enable it again.
+`/setup disable` stops guild behavior without deleting data. If the bot leaves, the guild is marked inactive and retained. Rejoining restores the record but does not auto-enable it; an administrator must review, validate, and enable it again.

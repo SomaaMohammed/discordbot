@@ -7,6 +7,8 @@ import {
   PermissionFlagsBits,
   TextChannel,
   ThreadAutoArchiveDuration,
+  escapeInlineCode,
+  escapeMarkdown,
   type AnyThreadChannel,
   type Channel,
   type Client,
@@ -29,16 +31,9 @@ import {
 import {
   buildAnnouncementMentions,
   getPostCloseDeadline,
-  randomImperialOmen,
-  randomImperialTitle,
-  randomImperialVerdict,
-  getRoyalAfkResponse,
-  isPublicInvictusChatIntent,
-  isEmperorLockTrigger,
-  isSilenceLockTrigger,
-  parsePrivilegedInvictusChatIntent,
   parseReplyMuteMessage,
-  shouldAnnounceRoyalPresence,
+  parseSuperiorChatIntent,
+  type SuperiorChatIntent,
 } from "../parity.js";
 import { logError } from "../logging.js";
 import { getWeekKey, isoNow } from "../time.js";
@@ -46,7 +41,7 @@ import type {
   BotRuntime as ProcessBotRuntime,
   GuildRuntime,
 } from "../runtime.js";
-import type { PostRecord, RoyalTitle } from "../types.js";
+import type { PostRecord } from "../types.js";
 import {
   getEffectiveSilenceTargetRoleIds,
   readSilenceLeases,
@@ -62,7 +57,6 @@ import { AsyncWorkTracker } from "./work-tracker.js";
 type BotRuntime = GuildRuntime;
 
 const ANON_ANSWER_BUTTON_ID = "court:anonymous_answer";
-const SILENT_LOCK_SECONDS = 120;
 const SILENCE_RECONCILE_INTERVAL_MS = 5_000;
 type RuntimeTargetChannel = TextChannel | NewsChannel | AnyThreadChannel;
 
@@ -156,90 +150,30 @@ async function handleMessageCreate(
   runtime.storage.metricsIncrement(
     runtime.storage.buildUserMetricKey(member.id, "messages_sent"),
   );
-
-  const clearedTitles = runtime.settings.features.royalAfk
-    ? clearMemberRoyalAfk(member, runtime)
-    : [];
-  if (clearedTitles.length > 0) {
-    await sendRuntimeLog(
-      message.guild,
-      runtime,
-      "Royal AFK Auto-Cleared",
-      `**By:** ${member.toString()}\n**Titles:** \`${clearedTitles.join(", ")}\`\n**Trigger:** Message activity in ${message.channel.toString()}`,
-      String(message.channel.id),
-    );
-    if (!runtime.isCurrent()) {
-      return;
-    }
-  }
-
-  const inRoyalAlertChannel = isRoyalAlertChannel(
-    String(message.channel.id),
-    runtime,
-  );
-  if (runtime.settings.features.royalPresence && inRoyalAlertChannel) {
-    await handleRoyalPresenceAnnouncement(message, member, runtime);
-    if (!runtime.isCurrent()) {
-      return;
-    }
-  }
-
-  if (
-    runtime.settings.features.silenceLock &&
-    (isSilenceLockTrigger(message.content) ||
-      isEmperorLockTrigger(message.content, runtime.settings.labels.emperor))
-  ) {
-    if (!getMemberRoyalTitles(member, runtime).includes("Emperor")) {
-      return;
-    }
-
-    if (message.channel instanceof TextChannel) {
-      await lockChannelSilently(
-        message.channel,
-        member,
-        runtime,
-        SILENT_LOCK_SECONDS,
-      );
-    }
-    return;
-  }
-
-  if (
-    runtime.settings.features.royalAfk &&
-    (await maybeSendRoyalMentionResponse(message, runtime, inRoyalAlertChannel))
-  ) {
-    return;
-  }
   if (!runtime.isCurrent()) {
     return;
+  }
+
+  const invocationTerms = getInvocationTerms(runtime);
+  if (runtime.settings.features.replyModeration) {
+    const reasonText = parseReplyMuteMessage(message.content, invocationTerms);
+    if (reasonText !== null) {
+      if (isAdmin(member)) {
+        await handleReplyMuteTrigger(message, member, reasonText, runtime);
+      }
+      return;
+    }
   }
 
   if (
     runtime.settings.features.invictusChat &&
-    (await maybeSendPrivilegedInvictusChatResponse(message, member, runtime))
+    (await maybeSendSuperiorChatResponse(message, member, runtime))
   ) {
     return;
   }
   if (!runtime.isCurrent()) {
     return;
   }
-
-  if (!runtime.settings.features.replyModeration) {
-    return;
-  }
-  const reasonText = parseReplyMuteMessage(
-    message.content,
-    getInvocationTerms(runtime),
-  );
-  if (reasonText === null) {
-    return;
-  }
-
-  if (!isAdmin(member)) {
-    return;
-  }
-
-  await handleReplyMuteTrigger(message, member, reasonText, runtime);
 }
 
 async function handleReactionAdd(
@@ -251,15 +185,20 @@ async function handleReactionAdd(
     return;
   }
 
-  const message = reaction.message.partial
-    ? await reaction.message.fetch().catch(() => null)
-    : reaction.message;
-  if (!message?.guild) {
+  const guildId = reaction.message.guildId;
+  if (!guildId) {
     return;
   }
 
-  const runtime = await processRuntime.forGuild(message.guild.id);
+  const runtime = await processRuntime.forGuild(guildId);
   if (!runtime?.settings.enabled || !runtime.isCurrent()) {
+    return;
+  }
+
+  const message = reaction.message.partial
+    ? await reaction.message.fetch().catch(() => null)
+    : reaction.message;
+  if (!message?.guild || message.guild.id !== guildId || !runtime.isCurrent()) {
     return;
   }
 
@@ -306,30 +245,12 @@ function startBackgroundLoops(
       });
   };
 
-  run("auto_poster", () =>
-    runAcrossEnabledGuilds(
-      client,
-      runtime,
-      "auto_poster",
-      runAutoPoster,
-      inFlightGuildTasks,
-    ),
-  );
   run("thread_closer", () =>
     runAcrossEnabledGuilds(
       client,
       runtime,
       "thread_closer",
       runThreadCloser,
-      inFlightGuildTasks,
-    ),
-  );
-  run("weekly_digest", () =>
-    runAcrossEnabledGuilds(
-      client,
-      runtime,
-      "weekly_digest",
-      runWeeklyDigest,
       inFlightGuildTasks,
     ),
   );
@@ -349,21 +270,6 @@ function startBackgroundLoops(
   intervals.push(
     setInterval(
       () =>
-        run("auto_poster", () =>
-          runAcrossEnabledGuilds(
-            client,
-            runtime,
-            "auto_poster",
-            runAutoPoster,
-            inFlightGuildTasks,
-          ),
-        ),
-      60_000,
-    ),
-  );
-  intervals.push(
-    setInterval(
-      () =>
         run("thread_closer", () =>
           runAcrossEnabledGuilds(
             client,
@@ -374,21 +280,6 @@ function startBackgroundLoops(
           ),
         ),
       10 * 60_000,
-    ),
-  );
-  intervals.push(
-    setInterval(
-      () =>
-        run("weekly_digest", () =>
-          runAcrossEnabledGuilds(
-            client,
-            runtime,
-            "weekly_digest",
-            runWeeklyDigest,
-            inFlightGuildTasks,
-          ),
-        ),
-      30 * 60_000,
     ),
   );
   intervals.push(
@@ -799,7 +690,7 @@ export async function runThreadCloser(
   guild: Guild,
   runtime: BotRuntime,
 ): Promise<void> {
-  if (!runtime.settings.features.court || !runtime.isCurrent()) {
+  if (!runtime.isCurrent()) {
     return;
   }
 
@@ -828,7 +719,7 @@ export async function runThreadCloser(
         await sendRuntimeLog(
           guild,
           runtime,
-          "Court Inquiry Auto-Closed",
+          "Legacy Inquiry Auto-Closed",
           `**Message ID:** \`${record.message_id}\`\n**Question:** ${record.question}`,
           record.channel_id,
         );
@@ -837,7 +728,7 @@ export async function runThreadCloser(
       await sendFailureAlert(
         guild,
         runtime,
-        "Court Thread Auto-Close Failed",
+        "Legacy Inquiry Thread Auto-Close Failed",
         asError(error),
         "thread_closer loop",
         record.channel_id,
@@ -902,7 +793,7 @@ export async function runRetentionCleaner(
   guild: Guild,
   runtime: BotRuntime,
 ): Promise<void> {
-  if (!runtime.settings.features.anonymousAnswers || !runtime.isCurrent()) {
+  if (!runtime.isCurrent()) {
     return;
   }
 
@@ -1240,274 +1131,135 @@ function getInvocationTerms(runtime: BotRuntime): string[] {
   ];
 }
 
-function getRoyalDisplayLabel(runtime: BotRuntime, title: RoyalTitle): string {
-  return title === "Emperor"
-    ? runtime.settings.labels.emperor
-    : runtime.settings.labels.empress;
-}
-
-function getMemberRoyalTitles(
+function buildSuperiorChatResponse(
+  intent: SuperiorChatIntent,
   member: GuildMember,
   runtime: BotRuntime,
-): RoyalTitle[] {
-  const titles: RoyalTitle[] = [];
-
-  if (
-    runtime.settings.roles.emperor &&
-    member.roles.cache.has(runtime.settings.roles.emperor)
-  ) {
-    titles.push("Emperor");
-  }
-  if (
-    runtime.settings.roles.empress &&
-    member.roles.cache.has(runtime.settings.roles.empress)
-  ) {
-    titles.push("Empress");
-  }
-
-  return titles;
-}
-
-function clearMemberRoyalAfk(
-  member: GuildMember,
-  runtime: BotRuntime,
-): RoyalTitle[] {
-  const titles = getMemberRoyalTitles(member, runtime);
-  if (titles.length === 0) {
-    return [];
-  }
-
-  const cleared: RoyalTitle[] = [];
-  runtime.storage.updateStateAtomic((state) => {
-    for (const title of titles) {
-      const entry = state.royal_afk.by_title[title];
-      if (entry.active) {
-        cleared.push(title);
-      }
-
-      state.royal_afk.by_title[title] = {
-        active: false,
-        reason: "",
-        set_at: null,
-        set_by_user_id: null,
-      };
-    }
-  });
-
-  return cleared;
-}
-
-function isRoyalAlertChannel(channelId: string, runtime: BotRuntime): boolean {
-  if (!runtime.settings.channels.royalAlert) {
-    return false;
-  }
-
-  return channelId === runtime.settings.channels.royalAlert;
-}
-
-async function handleRoyalPresenceAnnouncement(
-  message: Message,
-  member: GuildMember,
-  runtime: BotRuntime,
-): Promise<void> {
-  if (!runtime.isCurrent()) {
-    return;
-  }
-  const title = getMemberRoyalTitles(member, runtime)[0] ?? null;
-  if (!title) {
-    return;
-  }
-
-  const createdAt = DateTime.fromJSDate(message.createdAt);
-  let shouldAnnounce = false;
-  runtime.storage.updateStateAtomic((state) => {
-    const previousIso = state.royal_presence.last_message_at_by_title[title];
-    const previous = previousIso ? DateTime.fromISO(previousIso) : null;
-    shouldAnnounce = shouldAnnounceRoyalPresence(
-      previous?.isValid ? previous : null,
-      createdAt,
-    );
-
-    const nowIso = createdAt.toISO();
-    state.royal_presence.last_message_at_by_title[title] = nowIso;
-    state.royal_presence.last_message_at = nowIso;
-    state.royal_presence.last_speaker = title;
-  });
-
-  if (
-    shouldAnnounce &&
-    runtime.isCurrent() &&
-    isSendableChannel(message.channel)
-  ) {
-    await message.channel
-      .send({
-        content: `# The ${getRoyalDisplayLabel(runtime, title)} has spoken`,
-        allowedMentions: { parse: [] },
-      })
-      .catch(() => null);
-  }
-}
-
-async function maybeSendRoyalMentionResponse(
-  message: Message,
-  runtime: BotRuntime,
-  inRoyalAlertChannel: boolean,
-): Promise<boolean> {
-  if (!inRoyalAlertChannel) {
-    return false;
-  }
-
-  const mentionedTitles: RoyalTitle[] = [];
-  for (const member of message.mentions.members?.values() ?? []) {
-    for (const title of getMemberRoyalTitles(member, runtime)) {
-      if (!mentionedTitles.includes(title)) {
-        mentionedTitles.push(title);
-      }
-    }
-  }
-
-  const state = runtime.storage.getState();
-  const response = getRoyalAfkResponse(
-    message.content,
-    state.royal_afk,
-    runtime.now(),
-    mentionedTitles,
-    runtime.settings.labels,
-  );
-  if (!response) {
-    return false;
-  }
-
-  if (runtime.isCurrent() && isSendableChannel(message.channel)) {
-    await message.channel
-      .send({ content: response, allowedMentions: { parse: [] } })
-      .catch(() => null);
-  }
-
-  return true;
-}
-
-type PrivilegedInvictusChatIntent = NonNullable<
-  ReturnType<typeof parsePrivilegedInvictusChatIntent>
->;
-
-function canUsePrivilegedInvictusChat(
-  member: GuildMember,
-  runtime: BotRuntime,
-): boolean {
-  const hasConfiguredRole = runtime.settings.roles.privilegedChat.some(
-    (roleId) => member.roles.cache.has(roleId),
-  );
-  const isConfiguredUser = runtime.settings.championUserId === member.id;
-
-  return hasConfiguredRole || isConfiguredUser;
-}
-
-function canUseInvictusIntent(
-  intent: PrivilegedInvictusChatIntent,
-  member: GuildMember,
-  runtime: BotRuntime,
-): boolean {
-  if (isPublicInvictusChatIntent(intent)) {
-    return true;
-  }
-
-  return canUsePrivilegedInvictusChat(member, runtime);
-}
-
-function buildPrivilegedInvictusChatResponse(
-  intent: PrivilegedInvictusChatIntent,
-  member: GuildMember,
-  runtime: BotRuntime,
+  gatewayPingMs: number,
+  clientUptimeMs: number | null,
 ): string {
   const memberMention = member.toString();
-  const currentTimeText = runtime.now().toFormat("yyyy-LL-dd HH:mm");
-  const scheduledHour = String(
-    Math.max(0, Math.min(23, runtime.settings.courtSchedule.hour)),
-  ).padStart(2, "0");
-  const scheduledMinute = String(
-    Math.max(0, Math.min(59, runtime.settings.courtSchedule.minute)),
-  ).padStart(2, "0");
-  const courtChannelText = runtime.settings.channels.court
-    ? `<#${runtime.settings.channels.court}>`
-    : "not configured";
-  const invocation = runtime.settings.invocation.keyword;
+  const currentTimeText = runtime.now().toFormat("yyyy-LL-dd HH:mm ZZZZ");
+  const invocation = escapeInlineCode(runtime.settings.invocation.keyword);
 
-  switch (intent) {
+  switch (intent.type) {
     case "greeting": {
       const greetings = [
-        `At your command, ${memberMention}.`,
-        `${memberMention}, the throne is listening.`,
-        `${invocation} stands ready for your orders, ${memberMention}.`,
-        `Your will, my mandate. Speak, ${memberMention}.`,
+        `Hi ${memberMention}! What can I help with?`,
+        `Hello ${memberMention}!`,
+        `Hey ${memberMention}! How can I help?`,
       ];
       return (
         greetings[runtime.randomInt(greetings.length)] ??
-        `At your command, ${memberMention}.`
+        `Hi ${memberMention}! What can I help with?`
       );
     }
     case "help":
       return [
-        `${invocation} command phrases for ${memberMention}:`,
-        "**Public:**",
+        `Try these ${invocation} phrases:`,
         `- \`hi ${invocation}\``,
         `- \`${invocation} help\``,
+        `- \`${invocation} ping\` / \`${invocation} uptime\``,
+        `- \`${invocation} about\``,
         `- \`${invocation} flip a coin\``,
+        `- \`${invocation} roll 2d6\``,
+        `- \`${invocation} choose tea or coffee\``,
         `- \`${invocation} what time is it\``,
         `- \`thanks ${invocation}\``,
         `- \`good night ${invocation}\``,
-        ...(canUsePrivilegedInvictusChat(member, runtime)
-          ? [
-              "**Privileged:**",
-              `- \`${invocation} status report\``,
-              `- \`${invocation} what should i do\``,
-              `- \`${invocation} title me\``,
-            ]
-          : []),
       ].join("\n");
-    case "title":
-      return `${memberMention}, by decree you are now: **${randomImperialTitle(runtime.randomInt)}**.`;
     case "coinflip":
-      return runtime.randomInt(2) === 0
-        ? "The coin lands on **heads**."
-        : "The coin lands on **tails**.";
+      return runtime.randomInt(2) === 0 ? "🪙 **Heads!**" : "🪙 **Tails!**";
     case "time":
-      return `Court time is \`${currentTimeText}\`.`;
-    case "status":
-      return [
-        `Status report for ${memberMention}:`,
-        `Mode: \`${runtime.settings.courtSchedule.mode}\``,
-        `Auto-post schedule: \`${scheduledHour}:${scheduledMinute}\``,
-        `Court channel: ${courtChannelText}`,
-      ].join("\n");
-    case "counsel":
-      return [
-        `Decree: ${randomImperialVerdict(runtime.randomInt)}`,
-        `Omen: ${randomImperialOmen(runtime.randomInt)}`,
-      ].join("\n");
+      return `It is \`${currentTimeText}\` in this server's configured timezone (\`${runtime.settings.timezone}\`).`;
     case "thanks":
-      return "Always. The court stands with you.";
+      return "You're welcome!";
     case "farewell":
-      return `Rest well. ${invocation} will keep watch.`;
-    default:
-      return `${invocation} stands ready.`;
+      return "See you later!";
+    case "ping": {
+      const normalizedPing =
+        Number.isFinite(gatewayPingMs) && gatewayPingMs >= 0
+          ? Math.round(gatewayPingMs)
+          : null;
+      return normalizedPing === null
+        ? "🏓 Pong! Gateway latency is not available yet."
+        : `🏓 Pong! Gateway latency: \`${normalizedPing} ms\`.`;
+    }
+    case "uptime":
+      return clientUptimeMs === null ||
+        !Number.isFinite(clientUptimeMs) ||
+        clientUptimeMs < 0
+        ? "Uptime is not available yet."
+        : `Uptime: \`${formatSuperiorUptime(clientUptimeMs)}\`.`;
+    case "about":
+      return `Superior \`v${runtime.botVersion}\` is a configurable multi-server Discord utility and moderation bot. Say \`${invocation} help\` to see conversational utilities.`;
+    case "dice": {
+      const rolls = Array.from(
+        { length: intent.count },
+        () => runtime.randomInt(intent.sides) + 1,
+      );
+      const total = rolls.reduce((sum, roll) => sum + roll, 0);
+      return intent.count === 1
+        ? `🎲 Rolled **d${intent.sides}**: **${total}**.`
+        : `🎲 Rolled **${intent.count}d${intent.sides}**: ${rolls.join(" + ")} = **${total}**.`;
+    }
+    case "choice": {
+      const selected =
+        intent.options[runtime.randomInt(intent.options.length)] ??
+        intent.options[0];
+      return selected
+        ? `I choose **${escapeMarkdown(selected)}**.`
+        : `Give me at least two choices, such as \`${invocation} choose tea or coffee\`.`;
+    }
+    case "invalid":
+      return buildSuperiorChatValidationResponse(intent, invocation);
   }
 }
 
-async function maybeSendPrivilegedInvictusChatResponse(
+function buildSuperiorChatValidationResponse(
+  intent: Extract<SuperiorChatIntent, { type: "invalid" }>,
+  invocation: string,
+): string {
+  switch (intent.error) {
+    case "dice_format":
+      return `Use dice notation such as \`${invocation} roll 2d6\`.`;
+    case "dice_count":
+      return "Roll between 1 and 20 dice at a time.";
+    case "dice_sides":
+      return "Dice must have between 2 and 1,000 sides.";
+    case "choice_count":
+      return `Give me between 2 and 20 choices, such as \`${invocation} choose tea or coffee\`.`;
+    case "choice_length":
+      return "Keep each choice to 100 characters or fewer.";
+  }
+}
+
+function formatSuperiorUptime(uptimeMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(uptimeMs / 1_000));
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [
+    days > 0 ? `${days}d` : null,
+    hours > 0 ? `${hours}h` : null,
+    minutes > 0 ? `${minutes}m` : null,
+    seconds > 0 || totalSeconds === 0 ? `${seconds}s` : null,
+  ].filter((part): part is string => part !== null);
+  return parts.join(" ");
+}
+
+async function maybeSendSuperiorChatResponse(
   message: Message,
   member: GuildMember,
   runtime: BotRuntime,
 ): Promise<boolean> {
-  const intent = parsePrivilegedInvictusChatIntent(
-    message.content,
-    getInvocationTerms(runtime),
-  );
+  const botUserId = message.client.user?.id;
+  const intent = parseSuperiorChatIntent(message.content, [
+    ...getInvocationTerms(runtime),
+    ...(botUserId ? [`<@${botUserId}>`, `<@!${botUserId}>`] : []),
+  ]);
   if (!intent) {
-    return false;
-  }
-
-  if (!canUseInvictusIntent(intent, member, runtime)) {
     return false;
   }
 
@@ -1515,7 +1267,13 @@ async function maybeSendPrivilegedInvictusChatResponse(
     return false;
   }
 
-  const response = buildPrivilegedInvictusChatResponse(intent, member, runtime);
+  const response = buildSuperiorChatResponse(
+    intent,
+    member,
+    runtime,
+    message.client.ws.ping,
+    message.client.uptime,
+  );
 
   await message.channel
     .send({ content: response, allowedMentions: { parse: [] } })
@@ -1615,7 +1373,7 @@ async function handleReplyMuteTrigger(
   }
 
   const embed = new EmbedBuilder()
-    .setTitle("Invictus Mute")
+    .setTitle("Superior Mute")
     .setDescription(
       `${target.toString()} has been muted for \`${REPLY_MUTE_MINUTES}\` minute(s).`,
     )
@@ -1723,7 +1481,7 @@ function buildTimeoutReason(
   user: GuildMember,
   reason: string | null,
 ): string {
-  const base = `${action} by ${user.user.tag} via Invictus chat`;
+  const base = `${action} by ${user.user.tag} via Superior chat`;
   if (!reason) {
     return base;
   }

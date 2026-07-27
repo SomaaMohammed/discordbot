@@ -1,7 +1,7 @@
 {
   "name": "imperial-court-bot",
-  "version": "2.0.1",
-  "description": "Active TypeScript runtime for Imperial Court Bot",
+  "version": "4.0.0",
+  "description": "Multi-server utility and moderation runtime for Superior",
   "main": "dist/src/index.js",
   "scripts": {
     "check": "npm run format:check && npm run typecheck && npm test && npm run build",

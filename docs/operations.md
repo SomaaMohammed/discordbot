@@ -1,6 +1,8 @@
-# Imperial Court Bot Operations
+# Superior Operations
 
-This runbook covers version 2 of the TypeScript runtime and the default systemd service `imperial-court-bot`. One process serves every configured guild from one shared SQLite database. Treat that database, its sidecars, `.env`, and every backup as live operator data.
+This runbook covers the current Superior TypeScript runtime, database schema version 2, and the existing systemd service `imperial-court-bot`. One process serves every configured guild from one shared SQLite database. Treat that database, its sidecars, `.env`, and every backup as live operator data.
+
+The public product has been redesigned around utilities, moderation, greetings, activity statistics, and neutral Superior message triggers. Operational identifiers such as `court.db`, `court-*.db` backup prefixes, checkout paths, the `imperial-court-bot` service name, legacy environment keys, schema tables, and internal storage names deliberately remain unchanged. Renaming them would be a separate host/data migration and is not required for public branding.
 
 ## Safety Rules
 
@@ -35,7 +37,7 @@ SCHEDULER_CONCURRENCY=4
 LEGACY_GUILD_ID=
 ```
 
-The values above are placeholders. `BOT_OPERATOR_USER_IDS` is reserved process metadata in version 2 and currently grants no command or setup authority. Never paste a real token or guild ID into documentation, source, or shell history shared with others.
+The values above are placeholders. `BOT_OPERATOR_USER_IDS` is reserved process metadata in the current runtime and currently grants no command or setup authority. Never paste a real token or guild ID into documentation, source, or shell history shared with others.
 
 By default both the runtime and `ops.sh` load `<repository>/.env`. To select another file, export `ENV_FILE`; a relative path resolves from the repository root. Use the same `ENV_FILE` in the systemd process and every operations command so the migration and runtime cannot read different settings. Do not put `ENV_FILE` inside the file it is supposed to select. Commands that infer the database target fail closed when the selected environment file is missing unless `DB_FILE` is supplied explicitly in the shell; an explicit database argument to `ops.sh validate` remains independent of `.env`.
 
@@ -43,7 +45,7 @@ Restrict local configuration and live data to the service account: use mode `060
 
 ## v1 Migration Preparation
 
-Before pulling version 2:
+Before pulling the current release:
 
 1. Confirm the current service and database path from the host's systemd/environment configuration without printing the token.
 2. Confirm the root `court.db` and newest known-good backups remain present.
@@ -55,13 +57,13 @@ When legacy rows exist, `LEGACY_GUILD_ID` must be one valid Discord snowflake. `
 
 The compatibility loader may read these exact v1 environment keys once: `TIMEZONE`, `COURT_CHANNEL_ID`, `LOG_CHANNEL_ID`, `WEEKLY_DIGEST_CHANNEL_ID`, `ROYAL_ALERT_CHANNEL_ID`, `STAFF_ROLE_IDS`, `EMPEROR_ROLE_ID`, `EMPRESS_ROLE_ID`, `SILENT_LOCK_EXCLUDE_ROLES`, `ANON_REQUIRED_ROLE_ID`, `WEEKLY_DIGEST_WEEKDAY`, `WEEKLY_DIGEST_HOUR`, `ANON_MIN_ACCOUNT_AGE_MINUTES`, `ANON_MIN_MEMBER_AGE_MINUTES`, `ANON_COOLDOWN_SECONDS`, `ANON_ALLOW_LINKS`, `MUTEALL_TARGET_CAP`, `ANSWER_RETENTION_DAYS`, and `UNDEFEATED_USER_ID`. Keep the exact string form of legacy Discord IDs: converting them through JavaScript numbers can lose precision. Court mode, posting time, dry-run state, channel fallbacks, and history are also recovered from the legacy database where present.
 
-Keep those old keys only until migration and a full `/setup export` review are complete. Version 2 runtime behavior comes from persisted `guild_settings`, not those variables. Compatibility-only defaults remain quarantined in the migration module and never seed a new guild.
+Keep those old keys only until migration and a full `/setup export` review are complete. Current runtime behavior comes from persisted `guild_settings`, not those variables. Compatibility-only defaults remain quarantined in the migration module and never seed active behavior for a new guild.
 
-Version 1 generated per-user metric keys by converting Discord snowflakes through a JavaScript number, which could round large IDs. Version 2 preserves those legacy rows, uses them as a read-only fallback, and lazily seeds an exact-string key when that user next records or backfills the same metric. A rounded legacy key is hidden from leaderboards once an exact replacement exists, but two IDs that collided in version 1 cannot be distinguished retroactively. Use the guild-scoped backfill command where message history is available and treat any remaining pre-v2 per-user attribution as approximate; aggregate metrics and all other migrated tables are unaffected.
+Version 1 generated per-user metric keys by converting Discord snowflakes through a JavaScript number, which could round large IDs. The current schema-v2 runtime preserves those legacy rows, uses them as a read-only fallback, and lazily seeds an exact-string key when that user next records or backfills the same metric. A rounded legacy key is hidden from leaderboards once an exact replacement exists, but two IDs that collided in version 1 cannot be distinguished retroactively. Use the guild-scoped backfill command where message history is available and treat any remaining pre-v2 per-user attribution as approximate; aggregate metrics and all other migrated tables are unaffected.
 
 ## Read-Only Preflight
 
-After version 2 code is checked out, install its dependency set, then classify and validate the selected database without writing it:
+After the current code is checked out, install its dependency set, then classify and validate the selected database without writing it:
 
 ```bash
 cd ~/imperial-court-bot/tsbot
@@ -84,7 +86,7 @@ Do not run the migration until preflight succeeds and the legacy tenant ID is co
 
 Do not run `bash ./ops.sh deploy` from the old v1 checkout. Bash has already parsed that old script before its `git pull`, so it cannot acquire the new backup and migration safeguards in the same process.
 
-Start from a clean worktree, pull version 2 explicitly, and then launch the newly checked-out script:
+Start from a clean worktree, pull the current release explicitly, and then launch the newly checked-out script:
 
 ```bash
 cd ~/imperial-court-bot
@@ -98,7 +100,7 @@ Stop if `git status --short` prints anything; preserve and resolve local work be
 
 ## Subsequent Safe Deployments
 
-Once the host already has the version 2 operations script, use:
+Once the host already has the current operations script, use:
 
 ```bash
 cd ~/imperial-court-bot
@@ -192,6 +194,8 @@ Required logical primary keys are:
 
 Tenant tables reference `guilds(guild_id)`. Validation checks full `PRAGMA integrity_check`, `PRAGMA foreign_key_check`, schema version 2, required keys, and guild-scoped indexes for open posts, question answers by date, answer-message lookup, and enabled guild selection.
 
+`posts`, `answers`, `anon_cooldowns`, question/state keys, and related settings remain part of the required schema even though their old public court/question/answer features are retired. They preserve migrated live data, exports, owner purge, rollback analysis, and compatibility. Do not drop, rename, truncate, or manually rewrite them during a normal Superior deployment.
+
 Useful read-only checks are:
 
 ```bash
@@ -268,17 +272,22 @@ The order is essential: restore the v1 database before running the v1 applicatio
 
 ## Post-Migration Guild Health
 
-After version 2 starts:
+After the current Superior release starts:
 
 1. Confirm logs show global or development registration mode and command counts without secrets.
 2. Allow time for Discord global-command propagation in production.
-3. Run `/setup status` for the migrated legacy guild to review its enabled state, schedule summary, feature summary, bound channels, and configured staff count.
-4. Run `/setup export` and privately inspect the complete persisted settings and guild data, including roles, limits, labels, triggers, schedules, greetings, and features. Protect the export because it contains guild data.
-5. Run `/setup validate`, resolve any external Discord permission or hierarchy issue, and explicitly enable the guild if migration did not leave it enabled.
-6. For at least two configured guilds, verify status, manual court behavior, independent question pools, metrics, timezone/date behavior, and log destinations.
-7. Disable one test guild and confirm it has no message-trigger or background-job side effects while another enabled guild continues.
-8. Review structured job errors by guild ID; a failure in one guild must not stop work for others.
-9. Confirm the database remains at schema version 2 with `npm run db:check -- --require-current`.
+3. Run `/setup status` for the migrated guild and review only the supported public configuration.
+4. Run `/setup export` and privately inspect the full payload. Legacy court, question, answer, schedule, royal, cooldown, and metric data may still appear and must be protected; its presence does not mean those features are active.
+5. Run `/setup validate`, resolve external Discord permission or hierarchy issues, and explicitly enable the guild if needed.
+6. Configure `/setup timezone timezone:<IANA>` and verify the Superior time trigger reports the guild-local time.
+7. For at least two configured guilds, verify `/utility ping`, user/server utilities, `/fun stats`, the log destination, neutral message triggers, and independent settings/metrics.
+8. Verify the retained `/superior` moderation commands only in a controlled test channel and with non-destructive previews where available.
+9. Disable one test guild and confirm it has no message-trigger, moderation, metric, or backfill side effects while another enabled guild continues.
+10. Confirm the database remains at schema version 2 with `npm run db:check -- --require-current`.
+11. Confirm Discord exposes `/setup`, `/superior`, `/utility`, `/fun`, and `/greetings`, and stops advertising `/invictus`, `/court`, and `/questions` after global propagation.
+12. Confirm `/fun verdict`, `/fun title`, `/fun fate`, and royal `/superior` subcommands are absent.
+13. Decide whether to retain the guild's persisted invocation or run `/setup trigger keyword:superior`, resupplying every alias that should remain.
+14. Replace or repost any existing panel whose visible legacy branding should change. Stable internal component identifiers keep supported old panels functional but do not rewrite their labels.
 
 Newly joined and rejoined guilds must remain disabled until setup is reviewed and enabled. Leaving a guild retains its data. Purge must be initiated by that guild's owner with exact confirmation.
 

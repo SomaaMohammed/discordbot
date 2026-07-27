@@ -10,6 +10,7 @@ describe("guild settings", () => {
     expect(settings.enabled).toBe(false);
     expect(settings.timezone).toBe("UTC");
     expect(settings.courtSchedule.mode).toBe("off");
+    expect(settings.invocation.keyword).toBe("superior");
     expect(Object.values(settings.features).every((value) => !value)).toBe(
       true,
     );

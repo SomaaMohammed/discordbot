@@ -22,16 +22,23 @@ const FEATURE_CHOICES: Array<{
   name: string;
   value: keyof GuildSettings["features"];
 }> = [
-  { name: "court", value: "court" },
-  { name: "invictus-chat", value: "invictusChat" },
-  { name: "anonymous-answers", value: "anonymousAnswers" },
+  { name: "superior-chat", value: "invictusChat" },
   { name: "reply-moderation", value: "replyModeration" },
-  { name: "silence-lock", value: "silenceLock" },
-  { name: "royal-afk", value: "royalAfk" },
-  { name: "royal-presence", value: "royalPresence" },
-  { name: "weekly-digest", value: "weeklyDigest" },
   { name: "greetings", value: "greetings" },
 ];
+const ACTIVE_FEATURES = new Set<keyof GuildSettings["features"]>(
+  FEATURE_CHOICES.map(({ value }) => value),
+);
+const RETIRED_SETUP_MESSAGE =
+  "That Imperial/Court setup option has been retired. Its stored legacy data was not changed.";
+
+export function getFeatureDisplayName(
+  feature: keyof GuildSettings["features"],
+): string {
+  return (
+    FEATURE_CHOICES.find((choice) => choice.value === feature)?.name ?? feature
+  );
+}
 
 type ChannelPurpose = keyof GuildSettings["channels"];
 type ArrayRolePurpose =
@@ -47,7 +54,7 @@ export interface GuildSetupValidationResult {
 export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilder {
   return new SlashCommandBuilder()
     .setName("setup")
-    .setDescription("Configure Imperial Court for this server")
+    .setDescription("Configure Superior for this server")
     .setDMPermission(false)
     .addSubcommand((subcommand) =>
       subcommand.setName("status").setDescription("Show current configuration"),
@@ -69,12 +76,7 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
             .setName("purpose")
             .setDescription("Channel purpose")
             .setRequired(true)
-            .addChoices(
-              { name: "court", value: "court" },
-              { name: "log", value: "log" },
-              { name: "weekly-digest", value: "weeklyDigest" },
-              { name: "royal-alert", value: "royalAlert" },
-            ),
+            .addChoices({ name: "log", value: "log" }),
         )
         .addStringOption((option) =>
           option
@@ -99,44 +101,6 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     )
     .addSubcommand((subcommand) =>
       subcommand
-        .setName("role")
-        .setDescription("Set, add, remove, or clear a role binding")
-        .addStringOption((option) =>
-          option
-            .setName("purpose")
-            .setDescription("Role purpose")
-            .setRequired(true)
-            .addChoices(
-              { name: "staff", value: "staff" },
-              { name: "privileged-chat", value: "privilegedChat" },
-              { name: "emperor", value: "emperor" },
-              { name: "empress", value: "empress" },
-              { name: "silence-target", value: "silenceTargets" },
-              { name: "silence-exclude", value: "silenceExcludes" },
-              { name: "anonymous-required", value: "anonymousRequired" },
-            ),
-        )
-        .addStringOption((option) =>
-          option
-            .setName("action")
-            .setDescription("Mutation to apply")
-            .setRequired(true)
-            .addChoices(
-              { name: "set", value: "set" },
-              { name: "add", value: "add" },
-              { name: "remove", value: "remove" },
-              { name: "clear", value: "clear" },
-            ),
-        )
-        .addRoleOption((option) =>
-          option
-            .setName("role")
-            .setDescription("Role used by set, add, or remove")
-            .setRequired(false),
-        ),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
         .setName("feature")
         .setDescription("Enable or disable one feature")
         .addStringOption((option) =>
@@ -155,115 +119,27 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     )
     .addSubcommand((subcommand) =>
       subcommand
-        .setName("schedule")
-        .setDescription("Configure timezone and posting schedules")
-        .addStringOption((option) =>
-          option
-            .setName("target")
-            .setDescription("Schedule to configure")
-            .setRequired(true)
-            .addChoices(
-              { name: "court", value: "court" },
-              { name: "weekly-digest", value: "weeklyDigest" },
-            ),
-        )
+        .setName("timezone")
+        .setDescription("Set the timezone used by Superior responses")
         .addStringOption((option) =>
           option
             .setName("timezone")
             .setDescription("IANA timezone, such as UTC or Asia/Amman")
-            .setRequired(false),
-        )
-        .addStringOption((option) =>
-          option
-            .setName("mode")
-            .setDescription("Court schedule mode")
-            .setRequired(false)
-            .addChoices(
-              { name: "off", value: "off" },
-              { name: "manual", value: "manual" },
-              { name: "auto", value: "auto" },
-            ),
-        )
-        .addIntegerOption((option) =>
-          option
-            .setName("weekday")
-            .setDescription("Digest weekday, Sunday=0 through Saturday=6")
-            .setMinValue(0)
-            .setMaxValue(6)
-            .setRequired(false),
-        )
-        .addIntegerOption((option) =>
-          option
-            .setName("hour")
-            .setDescription("Hour from 0 through 23")
-            .setMinValue(0)
-            .setMaxValue(23)
-            .setRequired(false),
-        )
-        .addIntegerOption((option) =>
-          option
-            .setName("minute")
-            .setDescription("Court minute from 0 through 59")
-            .setMinValue(0)
-            .setMaxValue(59)
-            .setRequired(false),
-        )
-        .addBooleanOption((option) =>
-          option
-            .setName("dry_run")
-            .setDescription("Log scheduled court posts without posting")
-            .setRequired(false),
+            .setRequired(true)
+            .setMaxLength(100),
         ),
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("limits")
-        .setDescription("Configure moderation, answer, and retention limits")
-        .addIntegerOption((option) =>
-          option
-            .setName("account_age_minutes")
-            .setDescription("Minimum account age for anonymous answers")
-            .setMinValue(0)
-            .setMaxValue(10_000_000)
-            .setRequired(false),
-        )
-        .addIntegerOption((option) =>
-          option
-            .setName("member_age_minutes")
-            .setDescription("Minimum server membership age")
-            .setMinValue(0)
-            .setMaxValue(10_000_000)
-            .setRequired(false),
-        )
-        .addIntegerOption((option) =>
-          option
-            .setName("cooldown_seconds")
-            .setDescription("Anonymous-answer cooldown")
-            .setMinValue(0)
-            .setMaxValue(31_536_000)
-            .setRequired(false),
-        )
-        .addBooleanOption((option) =>
-          option
-            .setName("allow_links")
-            .setDescription("Allow links in anonymous answers")
-            .setRequired(false),
-        )
+        .setDescription("Configure bulk moderation limits")
         .addIntegerOption((option) =>
           option
             .setName("mute_target_cap")
             .setDescription("Maximum bulk moderation targets; 0 disables cap")
             .setMinValue(0)
             .setMaxValue(10_000)
-            .setRequired(false),
-        )
-        .addIntegerOption((option) =>
-          option
-            .setName("retention_days")
-            .setDescription("Anonymous-answer retention in days")
-            .setMinValue(1)
-            .setMaxValue(36_500)
-            .setRequired(false),
+            .setRequired(true),
         ),
     )
     .addSubcommand((subcommand) =>
@@ -283,42 +159,6 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
             .setDescription("Optional comma-separated aliases")
             .setRequired(false)
             .setMaxLength(500),
-        ),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("labels")
-        .setDescription("Configure Emperor and Empress display labels")
-        .addStringOption((option) =>
-          option
-            .setName("emperor")
-            .setDescription("Emperor display label")
-            .setRequired(false)
-            .setMaxLength(50),
-        )
-        .addStringOption((option) =>
-          option
-            .setName("empress")
-            .setDescription("Empress display label")
-            .setRequired(false)
-            .setMaxLength(50),
-        ),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName("champion")
-        .setDescription("Set or clear the optional undefeated champion")
-        .addUserOption((option) =>
-          option
-            .setName("user")
-            .setDescription("Champion user")
-            .setRequired(false),
-        )
-        .addBooleanOption((option) =>
-          option
-            .setName("clear")
-            .setDescription("Clear the champion binding")
-            .setRequired(false),
         ),
     )
     .addSubcommand((subcommand) =>
@@ -407,21 +247,18 @@ export async function handleSetupCommand(
         await guildRuntime.setEnabled(false);
         await interaction.reply({
           content:
-            "Imperial Court is disabled for this server. Stored data was retained.",
+            "Superior is disabled for this server. Stored data was retained.",
           ephemeral: true,
         });
         return;
       case "channel":
         await updateChannel(interaction, guildRuntime);
         return;
-      case "role":
-        await updateRole(interaction, guildRuntime);
-        return;
       case "feature":
         await updateFeature(interaction, guildRuntime);
         return;
-      case "schedule":
-        await updateSchedule(interaction, guildRuntime);
+      case "timezone":
+        await updateTimezone(interaction, guildRuntime);
         return;
       case "limits":
         await updateLimits(interaction, guildRuntime);
@@ -430,10 +267,13 @@ export async function handleSetupCommand(
         await updateTrigger(interaction, guildRuntime);
         return;
       case "labels":
-        await updateLabels(interaction, guildRuntime);
-        return;
       case "champion":
-        await updateChampion(interaction, guildRuntime);
+      case "schedule":
+      case "role":
+        await interaction.reply({
+          content: RETIRED_SETUP_MESSAGE,
+          ephemeral: true,
+        });
         return;
       case "greeting":
         await updateGreeting(interaction, guildRuntime);
@@ -496,23 +336,23 @@ async function showSetupStatus(
   settings: GuildSettings,
 ): Promise<void> {
   const enabledFeatures = Object.entries(settings.features)
-    .filter(([, enabled]) => enabled)
-    .map(([name]) => name);
-  const channelLines = Object.entries(settings.channels).map(
-    ([purpose, channelId]) =>
-      `- ${purpose}: ${channelId ? `<#${channelId}>` : "not set"}`,
-  );
+    .filter(
+      ([name, enabled]) =>
+        enabled && ACTIVE_FEATURES.has(name as keyof GuildSettings["features"]),
+    )
+    .map(([name]) =>
+      getFeatureDisplayName(name as keyof GuildSettings["features"]),
+    );
   await interaction.reply({
     content: [
-      `**Imperial Court Setup v${settings.version}**`,
+      `**Superior Setup v${settings.version}**`,
       `Enabled: \`${settings.enabled ? "yes" : "no"}\``,
       `Timezone: \`${settings.timezone}\``,
-      `Court schedule: \`${settings.courtSchedule.mode}\` at \`${formatHourMinute(settings.courtSchedule.hour, settings.courtSchedule.minute)}\``,
+      `Invocation: \`${settings.invocation.keyword}\` (${settings.invocation.aliases.length} alias(es))`,
       `Features: ${enabledFeatures.length > 0 ? enabledFeatures.map((name) => `\`${name}\``).join(", ") : "none"}`,
-      "Channels:",
-      ...channelLines,
-      `Staff roles: \`${settings.roles.staff.length}\``,
+      `Log channel: ${settings.channels.log ? `<#${settings.channels.log}>` : "not set"}`,
       `Greeting profiles: \`${settings.greetings.length}\``,
+      "Legacy court settings and data are retained but inactive.",
     ].join("\n"),
     ephemeral: true,
   });
@@ -538,15 +378,9 @@ async function enableGuild(
     return;
   }
 
-  const wasEnabled = settings.enabled;
   await runtime.setEnabled(true);
-  if (settings.features.court) {
-    await initializeCourtQuestionsWithRollback(runtime, () =>
-      runtime.setEnabled(wasEnabled),
-    );
-  }
   await interaction.reply({
-    content: "Setup is valid. Imperial Court is now enabled for this server.",
+    content: "Setup is valid. Superior is now enabled for this server.",
     ephemeral: true,
   });
 }
@@ -560,6 +394,20 @@ async function updateChannel(
     true,
   ) as ChannelPurpose;
   const action = interaction.options.getString("action", true);
+  if (purpose !== "log") {
+    await interaction.reply({
+      content: RETIRED_SETUP_MESSAGE,
+      ephemeral: true,
+    });
+    return;
+  }
+  if (action !== "set" && action !== "clear") {
+    await interaction.reply({
+      content: "Channel action must be set or clear.",
+      ephemeral: true,
+    });
+    return;
+  }
   const channel = interaction.options.getChannel("channel");
   let resolvedChannel: GuildBasedChannel | null = null;
   if (action === "set") {
@@ -599,64 +447,6 @@ async function updateChannel(
   });
 }
 
-async function updateRole(
-  interaction: ChatInputCommandInteraction,
-  runtime: GuildRuntime,
-): Promise<void> {
-  const purpose = interaction.options.getString("purpose", true) as RolePurpose;
-  const action = interaction.options.getString("action", true);
-  const roleOption = interaction.options.getRole("role");
-  let role: Role | null = null;
-  if (action !== "clear" && (!roleOption || !interaction.guild)) {
-    await interaction.reply({
-      content: "Choose a role from this server for that action.",
-      ephemeral: true,
-    });
-    return;
-  }
-  if (action !== "clear" && interaction.guild && roleOption) {
-    role = await interaction.guild.roles.fetch(roleOption.id).catch(() => null);
-    if (!role || role.guild.id !== interaction.guild.id) {
-      await interaction.reply({
-        content: "Choose a role from this server for that action.",
-        ephemeral: true,
-      });
-      return;
-    }
-  }
-
-  const settings = cloneSettings(runtime.settings);
-  if (isArrayRolePurpose(purpose)) {
-    const values = new Set(settings.roles[purpose]);
-    if (action === "clear") {
-      values.clear();
-    } else if (action === "set") {
-      values.clear();
-      values.add(role!.id);
-    } else if (action === "add") {
-      values.add(role!.id);
-    } else if (action === "remove") {
-      values.delete(role!.id);
-    }
-    settings.roles[purpose] = Array.from(values);
-  } else {
-    if (!new Set(["set", "clear"]).has(action)) {
-      await interaction.reply({
-        content: "Single-role bindings support only set or clear.",
-        ephemeral: true,
-      });
-      return;
-    }
-    settings.roles[purpose] = action === "clear" ? null : role!.id;
-  }
-
-  await runtime.saveSettings(settings);
-  await interaction.reply({
-    content: `Updated the ${purpose} role binding.`,
-    ephemeral: true,
-  });
-}
-
 async function updateFeature(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
@@ -665,32 +455,29 @@ async function updateFeature(
     "name",
     true,
   ) as keyof GuildSettings["features"];
+  if (!ACTIVE_FEATURES.has(name)) {
+    await interaction.reply({
+      content: RETIRED_SETUP_MESSAGE,
+      ephemeral: true,
+    });
+    return;
+  }
   const enabled = interaction.options.getBoolean("enabled", true);
-  const previousSettings = cloneSettings(runtime.settings);
-  const settings = cloneSettings(previousSettings);
+  const settings = cloneSettings(runtime.settings);
   settings.features[name] = enabled;
-  if (!enabled && name === "court") {
-    settings.courtSchedule.mode = "off";
-  }
   await runtime.saveSettings(settings);
-  if (enabled && name === "court") {
-    await initializeCourtQuestionsWithRollback(runtime, () =>
-      runtime.saveSettings(previousSettings),
-    );
-  }
   await interaction.reply({
-    content: `Feature ${name} is now \`${enabled ? "enabled" : "disabled"}\`.`,
+    content: `Feature ${getFeatureDisplayName(name)} is now \`${enabled ? "enabled" : "disabled"}\`.`,
     ephemeral: true,
   });
 }
 
-async function updateSchedule(
+async function updateTimezone(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
 ): Promise<void> {
-  const target = interaction.options.getString("target", true);
-  const timezone = interaction.options.getString("timezone")?.trim();
-  if (timezone && !isValidTimezone(timezone)) {
+  const timezone = interaction.options.getString("timezone", true).trim();
+  if (!isValidTimezone(timezone)) {
     await interaction.reply({
       content:
         "Timezone must be a valid IANA timezone, such as `UTC` or `Asia/Amman`.",
@@ -700,28 +487,10 @@ async function updateSchedule(
   }
 
   const settings = cloneSettings(runtime.settings);
-  if (timezone) {
-    settings.timezone = timezone;
-  }
-  const hour = interaction.options.getInteger("hour");
-  if (target === "court") {
-    const mode = interaction.options.getString("mode") as
-      GuildSettings["courtSchedule"]["mode"] | null;
-    const minute = interaction.options.getInteger("minute");
-    const dryRun = interaction.options.getBoolean("dry_run");
-    if (mode) settings.courtSchedule.mode = mode;
-    if (hour !== null) settings.courtSchedule.hour = hour;
-    if (minute !== null) settings.courtSchedule.minute = minute;
-    if (dryRun !== null) settings.courtSchedule.dryRun = dryRun;
-  } else {
-    const weekday = interaction.options.getInteger("weekday");
-    if (weekday !== null) settings.weeklyDigestSchedule.weekday = weekday;
-    if (hour !== null) settings.weeklyDigestSchedule.hour = hour;
-  }
-
+  settings.timezone = timezone;
   await runtime.saveSettings(settings);
   await interaction.reply({
-    content: `Updated the ${target} schedule in \`${settings.timezone}\`.`,
+    content: `Timezone updated to \`${settings.timezone}\`.`,
     ephemeral: true,
   });
 }
@@ -731,37 +500,15 @@ async function updateLimits(
   runtime: GuildRuntime,
 ): Promise<void> {
   const settings = cloneSettings(runtime.settings);
-  type NumericLimitKey = Exclude<
-    keyof GuildSettings["limits"],
-    "anonAllowLinks"
-  >;
-  const updates: Array<[string, NumericLimitKey]> = [
-    ["account_age_minutes", "anonMinAccountAgeMinutes"],
-    ["member_age_minutes", "anonMinMemberAgeMinutes"],
-    ["cooldown_seconds", "anonCooldownSeconds"],
-    ["mute_target_cap", "muteallTargetCap"],
-    ["retention_days", "answerRetentionDays"],
-  ];
-  let changed = false;
-  for (const [optionName, key] of updates) {
-    const value = interaction.options.getInteger(optionName);
-    if (value !== null) {
-      settings.limits[key] = value;
-      changed = true;
-    }
-  }
-  const allowLinks = interaction.options.getBoolean("allow_links");
-  if (allowLinks !== null) {
-    settings.limits.anonAllowLinks = allowLinks;
-    changed = true;
-  }
-  if (!changed) {
+  const targetCap = interaction.options.getInteger("mute_target_cap");
+  if (targetCap === null) {
     await interaction.reply({
-      content: "Provide at least one limit to update.",
+      content: RETIRED_SETUP_MESSAGE,
       ephemeral: true,
     });
     return;
   }
+  settings.limits.muteallTargetCap = targetCap;
   await runtime.saveSettings(settings);
   await interaction.reply({
     content: "Guild limits updated.",
@@ -796,62 +543,6 @@ async function updateTrigger(
   await runtime.saveSettings(settings);
   await interaction.reply({
     content: `Invocation updated to \`${keyword}\` with \`${aliases.length}\` alias(es).`,
-    ephemeral: true,
-  });
-}
-
-async function updateLabels(
-  interaction: ChatInputCommandInteraction,
-  runtime: GuildRuntime,
-): Promise<void> {
-  const emperor = interaction.options.getString("emperor")?.trim();
-  const empress = interaction.options.getString("empress")?.trim();
-  if (!emperor && !empress) {
-    await interaction.reply({
-      content: "Provide at least one non-empty display label.",
-      ephemeral: true,
-    });
-    return;
-  }
-  const settings = cloneSettings(runtime.settings);
-  if (emperor) settings.labels.emperor = emperor;
-  if (empress) settings.labels.empress = empress;
-  await runtime.saveSettings(settings);
-  await interaction.reply({
-    content: "Royal display labels updated.",
-    ephemeral: true,
-  });
-}
-
-async function updateChampion(
-  interaction: ChatInputCommandInteraction,
-  runtime: GuildRuntime,
-): Promise<void> {
-  const clear = interaction.options.getBoolean("clear") ?? false;
-  const user = interaction.options.getUser("user");
-  if (!clear && !user) {
-    await interaction.reply({
-      content: "Choose a champion user or set clear to true.",
-      ephemeral: true,
-    });
-    return;
-  }
-  if (
-    user &&
-    (!interaction.guild ||
-      !(await interaction.guild.members.fetch(user.id).catch(() => null)))
-  ) {
-    await interaction.reply({
-      content: "Champion must be a current member of this server.",
-      ephemeral: true,
-    });
-    return;
-  }
-  const settings = cloneSettings(runtime.settings);
-  settings.championUserId = clear ? null : user!.id;
-  await runtime.saveSettings(settings);
-  await interaction.reply({
-    content: clear ? "Champion binding cleared." : `Champion set to ${user}.`,
     ephemeral: true,
   });
 }
@@ -973,7 +664,7 @@ async function exportGuild(
   const payload = runtime.storage.exportGuild(guildId);
   const attachment = new AttachmentBuilder(
     Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf8"),
-    { name: `imperial-court-${guildId}.json` },
+    { name: `superior-${guildId}.json` },
   );
   await interaction.reply({
     content: "Exported configuration and data for this server only.",
@@ -1044,7 +735,7 @@ async function purgeGuild(
   const result = runtime.storage.purgeGuild(guildRuntime.guildId);
   await interaction.editReply({
     content:
-      "Purged this server's Imperial Court configuration and retained data only. " +
+      "Purged this server's Superior configuration and retained data, including legacy records. " +
       `Removal summary: \`${formatPurgeSummary(result)}\``,
   });
 }
@@ -1062,6 +753,80 @@ function formatPurgeSummary(result: GuildPurgeResult): string {
 }
 
 export async function validateGuildSetup(
+  guild: Guild,
+  settings: GuildSettings,
+): Promise<GuildSetupValidationResult> {
+  const errors: string[] = [];
+  if (!isValidTimezone(settings.timezone)) {
+    errors.push(`Timezone \`${settings.timezone}\` is invalid.`);
+  }
+  if (settings.features.invictusChat && !settings.invocation.keyword.trim()) {
+    errors.push("Superior chat requires an invocation keyword.");
+  }
+  if (settings.features.greetings && settings.greetings.length === 0) {
+    errors.push("Greetings requires at least one greeting profile.");
+  }
+
+  const me =
+    guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+  if (!me) {
+    errors.push("Could not resolve the bot member to validate permissions.");
+  }
+
+  if (settings.channels.log) {
+    const channel = await guild.channels
+      .fetch(settings.channels.log)
+      .catch(() => null);
+    if (!channel || channel.guildId !== guild.id) {
+      errors.push("The log channel no longer exists in this server.");
+    } else if (!isSendableGuildChannel(channel)) {
+      errors.push("The log channel cannot receive bot messages.");
+    } else if (me) {
+      const permissions = channel.permissionsFor(me);
+      const required = [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.EmbedLinks,
+      ];
+      const missing = required.filter(
+        (permission) => !permissions?.has(permission),
+      );
+      if (missing.length > 0) {
+        errors.push(
+          `The log channel is missing ${missing.length} required bot permission(s).`,
+        );
+      }
+    }
+  }
+
+  const greetingUserIds = new Set(
+    settings.greetings
+      .map((profile) => profile.userId)
+      .filter((userId): userId is string => Boolean(userId)),
+  );
+  for (const userId of greetingUserIds) {
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member) {
+      errors.push(
+        `Configured greeting user \`${userId}\` is not a member of this server.`,
+      );
+    }
+  }
+
+  if (
+    me &&
+    settings.features.replyModeration &&
+    !me.permissions.has(PermissionFlagsBits.ModerateMembers)
+  ) {
+    errors.push(
+      "Reply moderation requires the bot Moderate Members permission.",
+    );
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+async function validateLegacyGuildSetup(
   guild: Guild,
   settings: GuildSettings,
 ): Promise<GuildSetupValidationResult> {
@@ -1115,7 +880,7 @@ export async function validateGuildSetup(
     errors.push("Silence lock requires an Emperor role binding.");
   }
   if (settings.features.invictusChat && !settings.invocation.keyword.trim()) {
-    errors.push("Invictus chat requires an invocation keyword.");
+    errors.push("Superior chat requires an invocation keyword.");
   }
   if (settings.features.greetings && settings.greetings.length === 0) {
     errors.push("Greetings feature requires at least one greeting profile.");

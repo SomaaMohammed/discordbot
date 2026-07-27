@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createDefaultGuildSettings } from "../src/guild-settings.js";
 import {
   buildSetupCommandDefinition,
+  getFeatureDisplayName,
   handleSetupCommand,
   validateGuildSetup,
 } from "../src/discord/setup.js";
@@ -16,16 +17,21 @@ import { GuildSettingsConflictError } from "../src/storage/db.js";
 
 const GUILD_ID = "111111111111111111";
 const USER_ID = "222222222222222222";
+const RETIRED_SETUP_MESSAGE =
+  "That Imperial/Court setup option has been retired. Its stored legacy data was not changed.";
+
+interface InteractionOptions {
+  admin?: boolean;
+  owner?: boolean;
+  confirmation?: string;
+  strings?: Record<string, string>;
+  booleans?: Record<string, boolean>;
+  integers?: Record<string, number>;
+}
 
 function buildInteraction(
   subcommand: string,
-  options: {
-    admin?: boolean;
-    owner?: boolean;
-    confirmation?: string;
-    strings?: Record<string, string>;
-    booleans?: Record<string, boolean>;
-  } = {},
+  options: InteractionOptions = {},
 ): {
   interaction: ChatInputCommandInteraction;
   reply: ReturnType<typeof vi.fn>;
@@ -68,6 +74,10 @@ function buildInteraction(
             : (options.strings?.[name] ?? null),
         ),
         getBoolean: vi.fn((name: string) => options.booleans?.[name] ?? null),
+        getInteger: vi.fn((name: string) => options.integers?.[name] ?? null),
+        getChannel: vi.fn(() => null),
+        getRole: vi.fn(() => null),
+        getUser: vi.fn(() => null),
       },
       reply,
       editReply,
@@ -101,37 +111,95 @@ function buildGuildRuntime(): GuildRuntime {
 }
 
 describe("setup command definition", () => {
-  it("uses the same numeric limit bounds as persisted guild settings", () => {
+  it("registers only the active setup operations and choices", () => {
     const definition = buildSetupCommandDefinition().toJSON();
-    const limits = definition.options?.find(
-      (option) => option.name === "limits",
-    ) as
-      | {
-          options?: Array<{
-            name: string;
-            min_value?: number;
-            max_value?: number;
-          }>;
-        }
-      | undefined;
-    const bounds = Object.fromEntries(
-      (limits?.options ?? []).map((option) => [
-        option.name,
-        { minimum: option.min_value, maximum: option.max_value },
+    const subcommands = (definition.options ?? []) as Array<{
+      name: string;
+      options?: Array<{
+        name: string;
+        min_value?: number;
+        max_value?: number;
+        choices?: Array<{ name: string; value: string }>;
+      }>;
+    }>;
+    const byName = new Map(
+      subcommands.map((subcommand) => [subcommand.name, subcommand]),
+    );
+    const choices = (subcommand: string, option: string) =>
+      byName
+        .get(subcommand)
+        ?.options?.find((candidate) => candidate.name === option)?.choices;
+
+    expect(subcommands.map(({ name }) => name)).toEqual([
+      "status",
+      "enable",
+      "disable",
+      "channel",
+      "feature",
+      "timezone",
+      "limits",
+      "trigger",
+      "greeting",
+      "validate",
+      "export",
+      "purge",
+    ]);
+    expect(choices("channel", "purpose")).toEqual([
+      { name: "log", value: "log" },
+    ]);
+    expect(byName.has("role")).toBe(false);
+    expect(choices("feature", "name")).toEqual([
+      { name: "superior-chat", value: "invictusChat" },
+      { name: "reply-moderation", value: "replyModeration" },
+      { name: "greetings", value: "greetings" },
+    ]);
+    expect(byName.get("timezone")?.options?.map(({ name }) => name)).toEqual([
+      "timezone",
+    ]);
+    expect(byName.get("limits")?.options).toEqual([
+      expect.objectContaining({
+        name: "mute_target_cap",
+        min_value: 0,
+        max_value: 10_000,
+      }),
+    ]);
+
+    expect(subcommands.map(({ name }) => name)).not.toEqual(
+      expect.arrayContaining(["schedule", "labels", "champion"]),
+    );
+    const registeredChoiceValues = subcommands.flatMap((subcommand) =>
+      (subcommand.options ?? []).flatMap((option) =>
+        (option.choices ?? []).map((choice) => choice.value),
+      ),
+    );
+    expect(registeredChoiceValues).not.toEqual(
+      expect.arrayContaining([
+        "court",
+        "weeklyDigest",
+        "royalAlert",
+        "staff",
+        "privilegedChat",
+        "emperor",
+        "empress",
+        "silenceTargets",
+        "silenceExcludes",
+        "anonymousRequired",
+        "anonymousAnswers",
+        "silenceLock",
+        "royalAfk",
+        "royalPresence",
       ]),
     );
-
-    expect(bounds).toMatchObject({
-      account_age_minutes: { minimum: 0, maximum: 10_000_000 },
-      member_age_minutes: { minimum: 0, maximum: 10_000_000 },
-      cooldown_seconds: { minimum: 0, maximum: 31_536_000 },
-      mute_target_cap: { minimum: 0, maximum: 10_000 },
-      retention_days: { minimum: 1, maximum: 36_500 },
-    });
   });
 });
 
 describe("setup administration", () => {
+  it("presents active feature keys with Superior branding", () => {
+    expect(getFeatureDisplayName("invictusChat")).toBe("superior-chat");
+    expect(getFeatureDisplayName("replyModeration")).toBe("reply-moderation");
+    expect(getFeatureDisplayName("greetings")).toBe("greetings");
+  });
+
   it("rejects a non-admin who is not the guild owner", async () => {
     const { interaction, reply } = buildInteraction("status", {
       admin: false,
@@ -149,25 +217,41 @@ describe("setup administration", () => {
     expect(guildRuntime.setEnabled).not.toHaveBeenCalled();
   });
 
-  it("refuses to enable an incomplete guild", async () => {
+  it("enables zero optional features and ignores legacy stored values", async () => {
     const { interaction, reply } = buildInteraction("enable");
     const guildRuntime = buildGuildRuntime();
+    guildRuntime.settings.features.court = true;
+    guildRuntime.settings.features.anonymousAnswers = true;
+    guildRuntime.settings.features.silenceLock = true;
+    guildRuntime.settings.features.royalAfk = true;
+    guildRuntime.settings.features.royalPresence = true;
+    guildRuntime.settings.features.weeklyDigest = true;
+    guildRuntime.settings.channels.court = "444444444444444444";
+    guildRuntime.settings.channels.weeklyDigest = "455555555555555555";
+    guildRuntime.settings.channels.royalAlert = "466666666666666666";
+    guildRuntime.settings.roles.staff = ["555555555555555555"];
+    guildRuntime.settings.roles.silenceTargets = ["566666666666666666"];
+    guildRuntime.settings.roles.emperor = "577777777777777777";
+    guildRuntime.settings.championUserId = "588888888888888888";
 
     await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime);
 
-    expect(guildRuntime.setEnabled).not.toHaveBeenCalled();
-    const payload = reply.mock.calls[0]?.[0] as { content: string };
-    expect(payload.content).toContain("Setup is incomplete");
-    expect(payload.content).toContain("Enable at least one feature");
+    expect(guildRuntime.refreshSettings).toHaveBeenCalledTimes(1);
+    expect(guildRuntime.setEnabled).toHaveBeenCalledWith(true);
+    expect(
+      guildRuntime.storage.initializeCourtQuestions,
+    ).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith({
+      content: "Setup is valid. Superior is now enabled for this server.",
+      ephemeral: true,
+    });
   });
 
   it("validates the latest persisted snapshot before enabling", async () => {
     const { interaction, reply } = buildInteraction("enable");
     const guildRuntime = buildGuildRuntime();
-    guildRuntime.settings.features.court = true;
-    guildRuntime.settings.courtSchedule.mode = "manual";
-    guildRuntime.settings.channels.court = "444444444444444444";
     const latest = createDefaultGuildSettings();
+    latest.timezone = "Not/A-Timezone";
     vi.mocked(guildRuntime.refreshSettings).mockResolvedValue(latest);
 
     await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime);
@@ -176,58 +260,12 @@ describe("setup administration", () => {
     expect(guildRuntime.setEnabled).not.toHaveBeenCalled();
     const payload = reply.mock.calls[0]?.[0] as { content: string };
     expect(payload.content).toContain("Setup is incomplete");
-    expect(payload.content).toContain("Enable at least one feature");
+    expect(payload.content).toContain("Timezone `Not/A-Timezone` is invalid.");
   });
 
-  it("initializes an enabled court guild's independent question pool", async () => {
-    const { interaction } = buildInteraction("enable");
-    const guildRuntime = buildGuildRuntime();
-    guildRuntime.settings.features.court = true;
-    guildRuntime.settings.courtSchedule.mode = "manual";
-    guildRuntime.settings.channels.court = "444444444444444444";
-    const channel = {
-      id: "444444444444444444",
-      guildId: GUILD_ID,
-      type: ChannelType.GuildText,
-      isThread: vi.fn(() => false),
-      isTextBased: vi.fn(() => true),
-      send: vi.fn(),
-      permissionsFor: vi.fn(() => ({ has: vi.fn(() => true) })),
-    };
-    (
-      interaction.guild as unknown as {
-        channels: { fetch: ReturnType<typeof vi.fn> };
-      }
-    ).channels.fetch.mockResolvedValue(channel);
-
-    await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime);
-
-    expect(guildRuntime.storage.initializeCourtQuestions).toHaveBeenCalledTimes(
-      1,
-    );
-    expect(guildRuntime.setEnabled).toHaveBeenCalledWith(true);
-  });
-
-  it("fails closed when settings change during validation", async () => {
+  it("fails closed when settings change during enablement", async () => {
     const { interaction, reply } = buildInteraction("enable");
     const guildRuntime = buildGuildRuntime();
-    guildRuntime.settings.features.court = true;
-    guildRuntime.settings.courtSchedule.mode = "manual";
-    guildRuntime.settings.channels.court = "444444444444444444";
-    const channel = {
-      id: "444444444444444444",
-      guildId: GUILD_ID,
-      type: ChannelType.GuildText,
-      isThread: vi.fn(() => false),
-      isTextBased: vi.fn(() => true),
-      send: vi.fn(),
-      permissionsFor: vi.fn(() => ({ has: vi.fn(() => true) })),
-    };
-    (
-      interaction.guild as unknown as {
-        channels: { fetch: ReturnType<typeof vi.fn> };
-      }
-    ).channels.fetch.mockResolvedValue(channel);
     vi.mocked(guildRuntime.setEnabled).mockRejectedValue(
       new GuildSettingsConflictError(GUILD_ID),
     );
@@ -238,7 +276,6 @@ describe("setup administration", () => {
     expect(
       guildRuntime.storage.initializeCourtQuestions,
     ).not.toHaveBeenCalled();
-    expect(reply).toHaveBeenCalledTimes(1);
     expect(reply).toHaveBeenCalledWith({
       content:
         "This server's configuration changed during setup. Review the latest settings and try again.",
@@ -246,137 +283,100 @@ describe("setup administration", () => {
     });
   });
 
-  it("does not seed questions when enabling the court feature loses its settings CAS", async () => {
-    const { interaction, reply } = buildInteraction("feature", {
-      strings: { name: "court" },
-      booleans: { enabled: true },
-    });
+  it("shows only active settings while acknowledging retained legacy data", async () => {
+    const { interaction, reply } = buildInteraction("status");
     const guildRuntime = buildGuildRuntime();
-    vi.mocked(guildRuntime.saveSettings).mockRejectedValue(
-      new GuildSettingsConflictError(GUILD_ID),
-    );
+    guildRuntime.settings.features.invictusChat = true;
+    guildRuntime.settings.features.replyModeration = true;
+    guildRuntime.settings.features.greetings = true;
+    guildRuntime.settings.features.court = true;
+    guildRuntime.settings.features.royalPresence = true;
+    guildRuntime.settings.channels.log = "444444444444444444";
+    guildRuntime.settings.channels.court = "455555555555555555";
+    guildRuntime.settings.channels.royalAlert = "466666666666666666";
+    guildRuntime.settings.roles.privilegedChat = [
+      "555555555555555555",
+      "566666666666666666",
+    ];
+    guildRuntime.settings.roles.emperor = "577777777777777777";
+    guildRuntime.settings.championUserId = "588888888888888888";
+    guildRuntime.settings.greetings = [
+      { name: "welcome", userId: null, message: "Hello" },
+    ];
 
     await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime);
 
-    expect(guildRuntime.saveSettings).toHaveBeenCalledTimes(1);
-    expect(
-      guildRuntime.storage.initializeCourtQuestions,
-    ).not.toHaveBeenCalled();
+    const content = (reply.mock.calls[0]?.[0] as { content: string }).content;
+    const featureLine = content
+      .split("\n")
+      .find((line) => line.startsWith("Features:"));
+    expect(featureLine).toBe(
+      "Features: `superior-chat`, `reply-moderation`, `greetings`",
+    );
+    expect(content).toContain("Log channel: <#444444444444444444>");
+    expect(content).not.toContain("Privileged-chat roles:");
+    expect(content).toContain("Greeting profiles: `1`");
+    expect(content).toContain(
+      "Legacy court settings and data are retained but inactive.",
+    );
+    expect(content).not.toContain("455555555555555555");
+    expect(content).not.toContain("466666666666666666");
+    expect(content).not.toContain("577777777777777777");
+    expect(content).not.toContain("588888888888888888");
+  });
+
+  it.each([
+    ["channel", { strings: { purpose: "court", action: "set" } }],
+    ["role", { strings: { purpose: "privilegedChat", action: "add" } }],
+    ["feature", { strings: { name: "court" }, booleans: { enabled: true } }],
+    ["limits", {}],
+    ["schedule", {}],
+    ["labels", {}],
+    ["champion", {}],
+  ] as Array<[string, InteractionOptions]>)(
+    "rejects stale retired setup values for /setup %s",
+    async (subcommand, options) => {
+      const { interaction, reply } = buildInteraction(subcommand, options);
+      const guildRuntime = buildGuildRuntime();
+
+      await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime);
+
+      expect(reply).toHaveBeenCalledWith({
+        content: RETIRED_SETUP_MESSAGE,
+        ephemeral: true,
+      });
+      expect(guildRuntime.saveSettings).not.toHaveBeenCalled();
+      expect(guildRuntime.setEnabled).not.toHaveBeenCalled();
+      expect(
+        guildRuntime.storage.initializeCourtQuestions,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it("updates only the active moderation limit", async () => {
+    const { interaction, reply } = buildInteraction("limits", {
+      integers: { mute_target_cap: 25 },
+    });
+    const guildRuntime = buildGuildRuntime();
+
+    await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime);
+
+    expect(guildRuntime.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limits: expect.objectContaining({ muteallTargetCap: 25 }),
+      }),
+    );
     expect(reply).toHaveBeenCalledWith({
-      content:
-        "This server's configuration changed during setup. Review the latest settings and try again.",
+      content: "Guild limits updated.",
       ephemeral: true,
     });
-  });
-
-  it("disables a newly enabled guild when court question initialization fails", async () => {
-    const { interaction, reply } = buildInteraction("enable");
-    const guildRuntime = buildGuildRuntime();
-    guildRuntime.settings.features.court = true;
-    guildRuntime.settings.courtSchedule.mode = "manual";
-    guildRuntime.settings.channels.court = "444444444444444444";
-    const channel = {
-      id: "444444444444444444",
-      guildId: GUILD_ID,
-      type: ChannelType.GuildText,
-      isThread: vi.fn(() => false),
-      send: vi.fn(),
-      permissionsFor: vi.fn(() => ({ has: vi.fn(() => true) })),
-    };
-    (
-      interaction.guild as unknown as {
-        channels: { fetch: ReturnType<typeof vi.fn> };
-      }
-    ).channels.fetch.mockResolvedValue(channel);
-    const seedFailure = new Error("synthetic question initialization failure");
-    vi.mocked(guildRuntime.storage.initializeCourtQuestions).mockImplementation(
-      () => {
-        throw seedFailure;
-      },
-    );
-
-    await expect(
-      handleSetupCommand(interaction, {} as BotRuntime, guildRuntime),
-    ).rejects.toBe(seedFailure);
-
-    expect(vi.mocked(guildRuntime.setEnabled).mock.calls).toEqual([
-      [true],
-      [false],
-    ]);
-    expect(reply).not.toHaveBeenCalled();
-  });
-
-  it("preserves prior enablement when reseeding an enabled guild fails", async () => {
-    const { interaction, reply } = buildInteraction("enable");
-    const guildRuntime = buildGuildRuntime();
-    guildRuntime.settings.enabled = true;
-    guildRuntime.settings.features.court = true;
-    guildRuntime.settings.courtSchedule.mode = "manual";
-    guildRuntime.settings.channels.court = "444444444444444444";
-    const channel = {
-      id: "444444444444444444",
-      guildId: GUILD_ID,
-      type: ChannelType.GuildText,
-      isThread: vi.fn(() => false),
-      send: vi.fn(),
-      permissionsFor: vi.fn(() => ({ has: vi.fn(() => true) })),
-    };
-    (
-      interaction.guild as unknown as {
-        channels: { fetch: ReturnType<typeof vi.fn> };
-      }
-    ).channels.fetch.mockResolvedValue(channel);
-    const seedFailure = new Error("synthetic question initialization failure");
-    vi.mocked(guildRuntime.storage.initializeCourtQuestions).mockImplementation(
-      () => {
-        throw seedFailure;
-      },
-    );
-
-    await expect(
-      handleSetupCommand(interaction, {} as BotRuntime, guildRuntime),
-    ).rejects.toBe(seedFailure);
-
-    expect(vi.mocked(guildRuntime.setEnabled).mock.calls).toEqual([
-      [true],
-      [true],
-    ]);
-    expect(reply).not.toHaveBeenCalled();
-  });
-
-  it("restores feature settings when court question initialization fails", async () => {
-    const { interaction, reply } = buildInteraction("feature", {
-      strings: { name: "court" },
-      booleans: { enabled: true },
-    });
-    const guildRuntime = buildGuildRuntime();
-    const previousSettings = structuredClone(guildRuntime.settings);
-    const seedFailure = new Error("synthetic question initialization failure");
-    vi.mocked(guildRuntime.storage.initializeCourtQuestions).mockImplementation(
-      () => {
-        throw seedFailure;
-      },
-    );
-
-    await expect(
-      handleSetupCommand(interaction, {} as BotRuntime, guildRuntime),
-    ).rejects.toBe(seedFailure);
-
-    expect(guildRuntime.saveSettings).toHaveBeenCalledTimes(2);
-    expect(
-      vi.mocked(guildRuntime.saveSettings).mock.calls[0]?.[0].features.court,
-    ).toBe(true);
-    expect(vi.mocked(guildRuntime.saveSettings).mock.calls[1]?.[0]).toEqual(
-      previousSettings,
-    );
-    expect(reply).not.toHaveBeenCalled();
   });
 
   it("allows only the owner to reach purge confirmation", async () => {
     const { interaction, reply, editReply } = buildInteraction("purge", {
       admin: true,
       owner: false,
-      confirmation: `PURGE ${GUILD_ID}`,
+      confirmation: "PURGE " + GUILD_ID,
     });
     const guildRuntime = buildGuildRuntime();
     const previewGuildPurge = vi.fn();
@@ -397,10 +397,10 @@ describe("setup administration", () => {
     expect(editReply).not.toHaveBeenCalled();
   });
 
-  it("shows the guild-only purge preview and requires byte-for-byte confirmation", async () => {
+  it("shows the guild-only purge preview and requires exact confirmation", async () => {
     const { interaction, reply, editReply } = buildInteraction("purge", {
       owner: true,
-      confirmation: `PURGE ${GUILD_ID} `,
+      confirmation: "PURGE " + GUILD_ID + " ",
     });
     const guildRuntime = buildGuildRuntime();
     const preview = {
@@ -428,7 +428,7 @@ describe("setup administration", () => {
     expect(payload.content).toContain(
       "guild=1, settings=1, state/questions=2, posts=3, answers=4, cooldowns=6, metrics=5",
     );
-    expect(payload.content).toContain(`Type \`PURGE ${GUILD_ID}\` exactly`);
+    expect(payload.content).toContain("Type `PURGE " + GUILD_ID + "` exactly");
     expect(setGuildEnabled).not.toHaveBeenCalled();
     expect(purgeGuild).not.toHaveBeenCalled();
     expect(editReply).not.toHaveBeenCalled();
@@ -437,7 +437,7 @@ describe("setup administration", () => {
   it("purges only after the owner supplies the exact confirmation", async () => {
     const { interaction, reply, editReply } = buildInteraction("purge", {
       owner: true,
-      confirmation: `PURGE ${GUILD_ID}`,
+      confirmation: "PURGE " + GUILD_ID,
     });
     const guildRuntime = buildGuildRuntime();
     const summary = {
@@ -480,7 +480,7 @@ describe("setup administration", () => {
   it("preserves guild data when an active silence overwrite cannot be restored", async () => {
     const { interaction, editReply } = buildInteraction("purge", {
       owner: true,
-      confirmation: `PURGE ${GUILD_ID}`,
+      confirmation: "PURGE " + GUILD_ID,
     });
     const guildRuntime = buildGuildRuntime();
     (
@@ -546,7 +546,7 @@ describe("setup administration", () => {
     async (missingResult) => {
       const { interaction, editReply } = buildInteraction("purge", {
         owner: true,
-        confirmation: `PURGE ${GUILD_ID}`,
+        confirmation: "PURGE " + GUILD_ID,
       });
       if (missingResult === "404") {
         (
@@ -605,7 +605,7 @@ describe("setup administration", () => {
   it("preserves guild data when silence lease metadata is malformed", async () => {
     const { interaction, editReply } = buildInteraction("purge", {
       owner: true,
-      confirmation: `PURGE ${GUILD_ID}`,
+      confirmation: "PURGE " + GUILD_ID,
     });
     const guildRuntime = buildGuildRuntime();
     vi.mocked(guildRuntime.storage.metricsGet).mockReturnValue("{not-json");
@@ -641,11 +641,8 @@ describe("setup administration", () => {
 });
 
 describe("setup validation", () => {
-  it("detects a configured channel that is outside or missing from the guild", async () => {
+  it("accepts zero active optional features", async () => {
     const settings = createDefaultGuildSettings();
-    settings.features.court = true;
-    settings.courtSchedule.mode = "auto";
-    settings.channels.court = "444444444444444444";
     const { interaction } = buildInteraction("validate");
 
     const result = await validateGuildSetup(
@@ -653,32 +650,62 @@ describe("setup validation", () => {
       settings,
     );
 
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain(
-      "court channel no longer exists in this server.",
-    );
+    expect(result).toEqual({ valid: true, errors: [] });
   });
 
-  it("detects moderation permissions and silence-target hierarchy", async () => {
+  it("ignores every retired feature, channel, role, schedule, and binding", async () => {
     const settings = createDefaultGuildSettings();
-    const targetRoleId = "555555555555555555";
+    settings.features.court = true;
+    settings.features.anonymousAnswers = true;
     settings.features.silenceLock = true;
-    settings.features.replyModeration = true;
-    settings.roles.silenceTargets = [targetRoleId];
-    const targetRole = {
-      id: targetRoleId,
-      guild: { id: GUILD_ID },
-      toString: () => `<@&${targetRoleId}>`,
+    settings.features.royalAfk = true;
+    settings.features.royalPresence = true;
+    settings.features.weeklyDigest = true;
+    settings.channels.court = "444444444444444444";
+    settings.channels.weeklyDigest = "455555555555555555";
+    settings.channels.royalAlert = "466666666666666666";
+    settings.roles.staff = ["555555555555555555"];
+    settings.roles.privilegedChat = ["511111111111111111"];
+    settings.roles.emperor = "566666666666666666";
+    settings.roles.empress = "577777777777777777";
+    settings.roles.silenceTargets = ["588888888888888888"];
+    settings.roles.silenceExcludes = ["599999999999999999"];
+    settings.roles.anonymousRequired = "600000000000000000";
+    settings.championUserId = "611111111111111111";
+    settings.courtSchedule = {
+      mode: "auto",
+      hour: 99,
+      minute: 99,
+      dryRun: true,
     };
+    settings.weeklyDigestSchedule = { weekday: 99, hour: 99 };
+    const { interaction } = buildInteraction("validate");
+    const guild = interaction.guild as Guild;
+
+    const result = await validateGuildSetup(guild, settings);
+
+    expect(result).toEqual({ valid: true, errors: [] });
+    expect(guild.channels.fetch).not.toHaveBeenCalled();
+    expect(guild.roles.fetch).not.toHaveBeenCalled();
+    expect(guild.members.fetch).not.toHaveBeenCalled();
+  });
+
+  it("validates only active configuration dependencies and permissions", async () => {
+    const settings = createDefaultGuildSettings();
+    const logChannelId = "444444444444444444";
+    settings.timezone = "Not/A-Timezone";
+    settings.features.invictusChat = true;
+    settings.invocation.keyword = " ";
+    settings.features.greetings = true;
+    settings.features.replyModeration = true;
+    settings.channels.log = logChannelId;
     const botMember = {
       permissions: {
         has: vi.fn(
           (permission: bigint) =>
-            permission !== PermissionFlagsBits.ManageRoles &&
             permission !== PermissionFlagsBits.ModerateMembers,
         ),
       },
-      roles: { highest: { comparePositionTo: vi.fn(() => 0) } },
     };
     const guild = {
       id: GUILD_ID,
@@ -688,186 +715,71 @@ describe("setup validation", () => {
         fetch: vi.fn(async () => null),
       },
       channels: { fetch: vi.fn(async () => null) },
-      roles: {
-        cache: new Map([[targetRoleId, targetRole]]),
-        fetch: vi.fn(async () => targetRole),
-      },
+      roles: { cache: new Map(), fetch: vi.fn(async () => null) },
     } as unknown as Guild;
 
     const result = await validateGuildSetup(guild, settings);
 
-    expect(result.errors).toContain(
-      "Silence lock requires the bot Manage Roles permission.",
-    );
-    expect(result.errors).toContain(
-      `Bot role must be above silence-target role <@&${targetRoleId}>.`,
-    );
-    expect(result.errors).toContain(
-      "Reply moderation requires the bot Moderate Members permission.",
-    );
-  });
-
-  it("rejects silence lock when every configured target is excluded", async () => {
-    const settings = createDefaultGuildSettings();
-    const targetRoleId = "555555555555555555";
-    settings.features.silenceLock = true;
-    settings.roles.silenceTargets = [targetRoleId];
-    settings.roles.silenceExcludes = [targetRoleId];
-    const { interaction } = buildInteraction("validate");
-
-    const result = await validateGuildSetup(
-      interaction.guild as Guild,
-      settings,
-    );
-
-    expect(result.errors).toContain(
-      "Silence lock requires at least one non-excluded silence-target role.",
-    );
-  });
-
-  it("ignores excluded silence targets during role hierarchy validation", async () => {
-    const settings = createDefaultGuildSettings();
-    const effectiveRoleId = "555555555555555555";
-    const excludedRoleId = "666666666666666666";
-    const emperorRoleId = "777777777777777777";
-    settings.features.silenceLock = true;
-    settings.roles.emperor = emperorRoleId;
-    settings.roles.silenceTargets = [effectiveRoleId, excludedRoleId];
-    settings.roles.silenceExcludes = [excludedRoleId];
-    const roles = [effectiveRoleId, excludedRoleId, emperorRoleId].map(
-      (id) => ({
-        id,
-        guild: { id: GUILD_ID },
-        toString: () => `<@&${id}>`,
-      }),
-    );
-    const [effectiveRole, excludedRole] = roles;
-    const comparePositionTo = vi.fn((role: { id: string }) =>
-      role.id === excludedRoleId ? 0 : 1,
-    );
-    const botMember = {
-      permissions: { has: vi.fn(() => true) },
-      roles: { highest: { comparePositionTo } },
-    };
-    const roleCache = new Map(roles.map((role) => [role.id, role]));
-    const guild = {
-      id: GUILD_ID,
-      members: {
-        me: botMember,
-        fetchMe: vi.fn(async () => botMember),
-        fetch: vi.fn(async () => null),
-      },
-      channels: { fetch: vi.fn(async () => null) },
-      roles: {
-        cache: roleCache,
-        fetch: vi.fn(async (id: string) => roleCache.get(id) ?? null),
-      },
-    } as unknown as Guild;
-
-    const result = await validateGuildSetup(guild, settings);
-
-    expect(result.valid).toBe(true);
-    expect(comparePositionTo).toHaveBeenCalledTimes(1);
-    expect(comparePositionTo).toHaveBeenCalledWith(effectiveRole);
-    expect(comparePositionTo).not.toHaveBeenCalledWith(excludedRole);
-  });
-
-  it("reports cross-feature dependencies before enablement", async () => {
-    const settings = createDefaultGuildSettings();
-    settings.features.anonymousAnswers = true;
-    settings.features.royalAfk = true;
-    settings.features.silenceLock = true;
-    settings.features.greetings = true;
-    const { interaction } = buildInteraction("validate");
-
-    const result = await validateGuildSetup(
-      interaction.guild as Guild,
-      settings,
-    );
-
+    expect(result.valid).toBe(false);
     expect(result.errors).toEqual(
       expect.arrayContaining([
-        "Anonymous answers require the court feature.",
-        "Royal AFK/presence requires a royal-alert channel.",
-        "Royal AFK/presence requires an Emperor or Empress role.",
-        "Silence lock requires at least one non-excluded silence-target role.",
-        "Silence lock requires an Emperor role binding.",
-        "Greetings feature requires at least one greeting profile.",
+        "Timezone `Not/A-Timezone` is invalid.",
+        "Superior chat requires an invocation keyword.",
+        "Greetings requires at least one greeting profile.",
+        "The log channel no longer exists in this server.",
+        "Reply moderation requires the bot Moderate Members permission.",
       ]),
     );
   });
 
-  it("checks anonymous-thread permissions and configured role existence", async () => {
+  it("accepts valid active log, role, greeting, and moderation settings", async () => {
     const settings = createDefaultGuildSettings();
-    const courtChannelId = "444444444444444444";
-    const missingRoleId = "555555555555555555";
-    settings.features.court = true;
-    settings.features.anonymousAnswers = true;
-    settings.courtSchedule.mode = "manual";
-    settings.channels.court = courtChannelId;
-    settings.roles.staff = [missingRoleId];
-    const { interaction } = buildInteraction("validate");
+    const logChannelId = "444444444444444444";
+    const greetingUserId = "666666666666666666";
+    settings.features.invictusChat = true;
+    settings.features.replyModeration = true;
+    settings.features.greetings = true;
+    settings.channels.log = logChannelId;
+    settings.greetings = [
+      {
+        name: "welcome",
+        userId: greetingUserId,
+        message: "Welcome {user}",
+      },
+    ];
+    const botMember = {
+      permissions: { has: vi.fn(() => true) },
+    };
     const channel = {
-      id: courtChannelId,
+      id: logChannelId,
       guildId: GUILD_ID,
       type: ChannelType.GuildText,
-      isThread: vi.fn(() => false),
-      send: vi.fn(),
-      permissionsFor: vi.fn(() => ({
-        has: vi.fn(
-          (permission: bigint) =>
-            permission !== PermissionFlagsBits.ReadMessageHistory &&
-            permission !== PermissionFlagsBits.ManageThreads,
-        ),
-      })),
-    };
-    (
-      interaction.guild as unknown as {
-        channels: { fetch: ReturnType<typeof vi.fn> };
-      }
-    ).channels.fetch.mockResolvedValue(channel);
-
-    const result = await validateGuildSetup(
-      interaction.guild as Guild,
-      settings,
-    );
-
-    expect(result.errors).toContain(
-      "court channel is missing 2 required bot permission(s).",
-    );
-    expect(result.errors).toContain(
-      `Configured role \`${missingRoleId}\` no longer exists in this server.`,
-    );
-  });
-
-  it("rejects a persisted thread as a setup channel binding", async () => {
-    const settings = createDefaultGuildSettings();
-    const courtChannelId = "444444444444444444";
-    settings.features.court = true;
-    settings.courtSchedule.mode = "manual";
-    settings.channels.court = courtChannelId;
-    const { interaction } = buildInteraction("validate");
-    const thread = {
-      id: courtChannelId,
-      guildId: GUILD_ID,
-      type: ChannelType.PublicThread,
-      isThread: vi.fn(() => true),
       send: vi.fn(),
       permissionsFor: vi.fn(() => ({ has: vi.fn(() => true) })),
     };
-    (
-      interaction.guild as unknown as {
-        channels: { fetch: ReturnType<typeof vi.fn> };
-      }
-    ).channels.fetch.mockResolvedValue(thread);
+    const greetingMember = { id: greetingUserId };
+    const guild = {
+      id: GUILD_ID,
+      members: {
+        me: botMember,
+        fetchMe: vi.fn(async () => botMember),
+        fetch: vi.fn(async (id: string) =>
+          id === greetingUserId ? greetingMember : null,
+        ),
+      },
+      channels: {
+        fetch: vi.fn(async (id: string) =>
+          id === logChannelId ? channel : null,
+        ),
+      },
+      roles: {
+        cache: new Map(),
+        fetch: vi.fn(async () => null),
+      },
+    } as unknown as Guild;
 
-    const result = await validateGuildSetup(
-      interaction.guild as Guild,
-      settings,
-    );
+    const result = await validateGuildSetup(guild, settings);
 
-    expect(result.errors).toContain(
-      "court channel cannot receive bot messages.",
-    );
+    expect(result).toEqual({ valid: true, errors: [] });
   });
 });

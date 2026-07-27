@@ -46,7 +46,24 @@ function findOption(subcommand: JsonOption, optionName: string): JsonOption {
   return option;
 }
 
-describe("channel option compatibility", () => {
+describe("public command surface", () => {
+  it("registers only the active command families", () => {
+    const commandNames = buildCommandDefinitions().map(
+      (command) => command.toJSON().name,
+    );
+
+    expect(commandNames).toEqual([
+      "setup",
+      "superior",
+      "utility",
+      "fun",
+      "greetings",
+    ]);
+    expect(commandNames).not.toEqual(
+      expect.arrayContaining(["court", "questions", "invictus"]),
+    );
+  });
+
   it("marks every slash command unavailable in DMs", () => {
     const commands = buildCommandDefinitions().map((command) =>
       command.toJSON(),
@@ -65,8 +82,6 @@ describe("channel option compatibility", () => {
 
     const persistentTargets: Array<[string, string, string]> = [
       ["setup", "channel", "channel"],
-      ["court", "channel", "channel"],
-      ["court", "logchannel", "channel"],
     ];
     for (const [commandName, subcommandName, optionName] of persistentTargets) {
       const command = findCommand(commands, commandName);
@@ -81,10 +96,10 @@ describe("channel option compatibility", () => {
     }
 
     const transientTargets: Array<[string, string, string]> = [
-      ["invictus", "dmpanel", "channel"],
-      ["invictus", "say", "channel"],
-      ["invictus", "rolepanel", "channel"],
-      ["invictus", "rolepanelmulti", "channel"],
+      ["superior", "dmpanel", "channel"],
+      ["superior", "say", "channel"],
+      ["superior", "rolepanel", "channel"],
+      ["superior", "rolepanelmulti", "channel"],
     ];
 
     for (const [commandName, subcommandName, optionName] of transientTargets) {
@@ -97,15 +112,32 @@ describe("channel option compatibility", () => {
     }
   });
 
-  it("exposes optional message_file attachment on /invictus say", () => {
+  it("exposes optional message_file attachment on /superior say", () => {
     const commands = buildCommandDefinitions().map((command) =>
       command.toJSON(),
     ) as JsonCommand[];
 
-    const invictus = findCommand(commands, "invictus");
-    const say = findSubcommand(invictus, "say");
+    const superior = findCommand(commands, "superior");
+    const say = findSubcommand(superior, "say");
     const messageFile = findOption(say, "message_file");
 
     expect(messageFile.type).toBe(11);
+  });
+
+  it("does not register retired Superior and fun subcommands", () => {
+    const commands = buildCommandDefinitions().map((command) =>
+      command.toJSON(),
+    ) as JsonCommand[];
+    const superiorSubcommands =
+      findCommand(commands, "superior").options?.map(({ name }) => name) ?? [];
+    const funSubcommands =
+      findCommand(commands, "fun").options?.map(({ name }) => name) ?? [];
+
+    expect(superiorSubcommands).not.toEqual(
+      expect.arrayContaining(["afk", "afkstatus", "resetroyaltimer"]),
+    );
+    expect(funSubcommands).not.toEqual(
+      expect.arrayContaining(["verdict", "title", "fate"]),
+    );
   });
 });

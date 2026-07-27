@@ -1,21 +1,37 @@
-# Imperial Court Bot 2.0.1: Final Review and Handoff
+# Superior: Multi-Server and Utility Redesign Handoff
 
-Date: July 27, 2026
+Original multi-server review: July 27, 2026
 
-This document records the completed multi-server redesign, the subsequent full-codebase review and hardening pass, the release validation, and the operational boundaries observed while doing the work.
+Utility-surface update: July 28, 2026
+
+This document preserves the completed multi-server redesign and hardening record, then documents the current Superior utility/moderation surface. The utility redesign supersedes the old feature descriptions below wherever they refer to court, question, anonymous-answer, royal, scheduled-post, digest, or imperial fun behavior as active. Those sections remain historical evidence for schema-v2 migration and preservation decisions; they are not a current command reference.
 
 ## Outcome
 
-Imperial Court Bot is now a multi-tenant Discord application designed to run as one Discord application, one Node.js process, and one SQLite database while serving independently configured guilds. Configuration, mutable state, schedules, command behavior, metrics, cooldowns, posts, questions, answers, and background work are scoped to a guild.
+Superior is a multi-tenant Discord utility and moderation application designed to run as one Discord application, one Node.js process, and one SQLite database while serving independently configured guilds. Active configuration, commands, metrics, lifecycle, and backfill work remain guild-scoped. Legacy court, question, answer, schedule, cooldown, and royal records also remain guild-scoped in schema-v2 storage for migration compatibility, rollback, private export, retention, and owner-authorized purge.
 
-The work spans two commits:
+The multi-server redesign and hardening were delivered in two earlier commits:
 
 1. `28dc0a44b60e1baec55f247a442273c2438c590b` — `feat(multitenancy): support independent guild configuration`
-2. The commit containing this report — `fix(multitenancy): harden final release`
+2. `491f8c2b545602c627d25b5ba182b63f2c2daf5c` — `fix(multitenancy): harden final release`
 
-The release version moved from 1.0.1 to 2.0.0 for the architectural redesign, then to 2.0.1 for the review-discovered fixes and operator-visible hardening.
+The release version moved from 1.0.1 to 2.0.0 for the architectural redesign, then to 2.0.1 for the review-discovered fixes and operator-visible hardening. Version 4.0.0 combines the breaking user-facing rename from `/invictus` to `/superior` with retirement of the public court/royal surface and the utility redesign, without changing database schema version 2 or deleting compatible legacy data.
 
-## Multi-Server Redesign
+## Current Public Surface
+
+- `/superior` retains announcements, DM/role panels, message cleanup, locks, slowmode, individual and bulk timeouts, activity backfill, backfill status, and help.
+- `/utility` provides `ping`, `avatar`, `userinfo`, and `serverinfo`.
+- `/fun` provides `battle`, `stats`, and `leaderboard`.
+- `/greetings send` sends a configured per-guild greeting profile.
+- Public Superior message intents cover greeting, help, coin, time, thanks, farewell, ping, uptime, about, dice, and choice.
+- Administrator reply moderation remains available when explicitly enabled.
+- Active public setup choices are log channel; superior-chat, reply-moderation, and greetings features; `mute_target_cap`; timezone; invocation/aliases; greeting profiles; validation, export, and owner purge. Legacy role bindings are compatibility-only and have no active consumer.
+
+`/court`, `/questions`, `/fun verdict`, `/fun title`, `/fun fate`, royal `/superior` subcommands, anonymous-answer components, court/royal triggers, and scheduled court/digest behavior are retired. Stale Discord definitions fail closed and do not reactivate them.
+
+The following names remain intentionally stable compatibility details: `court.db`, `court-*.db` backup names, the `imperial-court-bot` service and checkout paths, `CourtStorage`/`CourtState`, schema-v2 tables and settings fields, legacy environment keys, `invictus.*` metrics, and previously posted supported panel component IDs. Renaming them requires a separate host/data migration and is not part of public branding.
+
+## Historical Multi-Server Redesign
 
 ### Process configuration and command registration
 
@@ -27,11 +43,19 @@ The release version moved from 1.0.1 to 2.0.0 for the architectural redesign, th
 - Added registration planning and synchronization tests, including stale global/guild command cleanup and partial-failure behavior.
 - Added a sanitized `.env.example` without live IDs or secrets.
 
+### Superior rebrand and compatibility
+
+- Replaced the published `/invictus` administration and moderation family with `/superior`; the old family is no longer registered or advertised.
+- Added a fail-closed retirement response for stale or in-flight `/invictus` interactions while Discord command synchronization converges; they do not execute `/superior` behavior.
+- Changed new-guild conversational defaults and user-facing setup, help, moderation, analytics, panel, and log labels to Superior.
+- Preserved existing guild invocation settings without an automatic data rewrite. Administrators opt in with `/setup trigger keyword:superior` and resupply any aliases they want to keep.
+- Preserved the stable legacy metric namespace, the existing settings field, and persistent component custom IDs as internal compatibility identifiers. New metrics continue to use that namespace while analytics relabels it for users. Existing Discord panels and messages are not rewritten automatically.
+
 ### Per-guild settings
 
 - Added a centrally validated, versioned `GuildSettings` model.
-- Made feature flags, channels, roles, display labels, Invictus triggers, schedules, limits, retention, champion binding, greeting profiles, and timezone configurable per guild.
-- Added neutral defaults: disabled guild, UTC, no Discord IDs, no enabled features, empty role lists, null channel/user bindings, court scheduling off, Imperial labels, and the `invictus` keyword.
+- Made feature flags, channels, roles, display labels, Superior triggers, schedules, limits, retention, champion binding, greeting profiles, and timezone configurable per guild.
+- Added neutral defaults: disabled guild, UTC, no Discord IDs, no enabled features, empty role lists, null channel/user bindings, court scheduling off, Imperial labels, and the `superior` keyword for new guilds.
 - Removed active-runtime dependence on server-specific hard-coded role, channel, and user IDs.
 - Kept compatibility-only legacy defaults isolated to the v1 migration module.
 
@@ -75,15 +99,15 @@ The release version moved from 1.0.1 to 2.0.0 for the architectural redesign, th
 - Restricted purge to the guild owner with exact confirmation, and scoped it to that guild only.
 - Preserved compatible `/court` configuration aliases as guild-scoped operations.
 
-### Existing Discord features
+### Historical Discord feature port
 
-- Made court status/health, question management, manual/automatic posts, thread closure, anonymous answers, role panels, moderation, Invictus chat, reply moderation, silence lock, royal AFK/presence, greetings, weekly digest, retention, analytics, metrics, backfill, and state import/export guild-aware.
+- Made court status/health, question management, manual/automatic posts, thread closure, anonymous answers, role panels, moderation, Superior chat, reply moderation, silence lock, royal AFK/presence, greetings, weekly digest, retention, analytics, metrics, backfill, and state import/export guild-aware.
 - Added configurable greeting profiles in place of fixed user presentations.
-- Made Invictus invocation keywords and royal display labels configurable.
+- Made Superior invocation keywords and royal display labels configurable.
 - Verified component interactions from the actual message guild rather than trusting custom IDs alone.
 - Prevented fallback logging and stored Discord-object lookup from crossing guild boundaries.
 
-### Background jobs
+### Historical background jobs
 
 - Reworked background loops to enumerate enabled guilds with bounded concurrency.
 - Applied each guild's timezone, configuration, local dates, schedules, and retention.
@@ -101,7 +125,10 @@ The release version moved from 1.0.1 to 2.0.0 for the architectural redesign, th
 
 ### Documentation and operations
 
-- Rewrote the root README and configuration, development, operations, capability, and trigger references for version 2.
+- Rewrote the root README and configuration, development, operations, capability, and trigger references for the 2.0 multi-server release.
+- Updated product-facing documentation for the version 4.0.0 Superior rebrand while preserving the separately maintained Invictus Empire fiction canon.
+- Added a factual Privacy Policy and Terms of Service based on the Bot's actual Discord access, SQLite schema, logs, exports, backups, retention, and purge limits.
+- Marked the operator identity, private contact, production log retention, and production backup retention as publication blockers rather than inventing legal or operational facts.
 - Documented setup, installation, command registration, schema, migration, backup, restore, rollback, validation, and post-migration checks.
 - Rebuilt `ops.sh` around read-only preflight, SQLite-consistent backups, explicit migration, post-migration verification, validation, build, service restart, and recovery.
 - Ensured operator backups are uniquely named, validated, retained, and never automatically deleted.
@@ -147,9 +174,9 @@ The final review covered storage and migration atomicity, schema compatibility, 
 | Dependencies           | The starting dependency graph reported seven audit findings.                             | Updated compatible dependencies/tooling and regenerated the lockfile; the final audit reports zero vulnerabilities.                                                                  |
 | Formatting             | The repository lacked one enforced format policy.                                        | Added Prettier configuration, safe exclusions, npm format/check scripts, LF normalization, and a CI formatting gate.                                                                 |
 
-## Test and Validation Coverage
+## Historical Test and Validation Coverage
 
-The original baseline had 39 tests across 7 files. The architectural redesign raised this to 137 tests across 16 files. The final hardening pass finishes with 206 passing tests across 25 files.
+The original baseline had 39 tests across 7 files. The architectural redesign raised this to 137 tests across 16 files, and the multi-server hardening release finished with 206 passing tests across 25 files. The final version 4.0.0 utility redesign has 235 passing and 7 skipped tests across 27 files.
 
 The suite now covers, among other behavior:
 
@@ -163,31 +190,31 @@ The suite now covers, among other behavior:
 - silence-lease overlap, persistence, restart reconciliation, corruption handling, import/export, and purge refusal;
 - background-loop lifetime, bounded concurrency, per-guild failure isolation, and graceful shutdown;
 - backfill coverage, moderation permissions/hierarchy, cross-guild Discord object rejection, and command parity;
+- `/superior` registration, absence of the retired command from published definitions, hidden stale-interaction dispatch, user-facing metric relabeling, new-guild Superior defaults, and explicit preservation of the v1 invocation during migration;
 - deployment-script environment normalization, ignored-file collision safety, and tracked-only autostash behavior.
 
-Final release commands and checks:
+The version 4.0.0 release used these commands and checks:
 
-- `npm ci` from the committed lockfile;
-- `npm audit` with zero reported vulnerabilities;
+- `npm ci` from the current lockfile;
+- `npm audit --omit=dev` with zero reported vulnerabilities;
 - `npm ls --all` with a valid dependency tree;
-- `npm run format:check`;
-- `npm run typecheck`;
-- `npm test` — 25 files and 206 tests passed;
-- `npm run build`;
+- `npm run check`, covering formatting, typecheck, 27 files, 235 passing and 7 skipped tests, and build;
 - `node --check dist/src/index.js`;
 - TypeScript unused-local/unused-parameter audit;
 - parse every tracked bootstrap JSON file;
-- `bash -n ops.sh` and ShellCheck;
-- `git diff --check` and full staged-diff review;
-- static scans for obsolete production IDs, singleton guild behavior, and unscoped tenant SQL.
+- `bash -n ops.sh` through the installed Git Bash runtime;
+- local Markdown-link resolution across the root README and every policy/reference page;
+- `git diff --check` and full working-tree diff review.
 
-No live Discord login was used for validation.
+ShellCheck is not installed in the current Windows validation environment, so it was not rerun for version 4.0.0. `ops.sh` itself is unchanged from the prior ShellCheck-clean hardening commit, and its syntax and regression suite passed.
 
-## Protected Live Data
+The automated validation and migration checks do not log in to Discord. After they passed and the live backup was revalidated, the already-authorized local deployment was gracefully restarted once as requested. Startup synchronized the global command definitions and established one gateway connection; a read-only Discord REST check then confirmed exactly `/setup`, `/superior`, `/utility`, `/fun`, and `/greetings` with their intended subcommands.
+
+## Historical Protected-Live-Data Record
 
 The ignored root database, SQLite sidecars, environment file, backups, dependencies, build output, prompts, and editor state were not staged.
 
-The live-data baseline recorded before review was:
+The following live-data baseline was recorded during the July 27 review. It is preserved as historical evidence only and is not an assertion about the later live database after an authorized migration or runtime use:
 
 | Artifact                                     |         Size | SHA-256                                                            |
 | -------------------------------------------- | -----------: | ------------------------------------------------------------------ |
@@ -196,28 +223,35 @@ The live-data baseline recorded before review was:
 | `court.db-wal`                               |      0 bytes | SHA-256 of an empty file                                           |
 | `backups/court-predeploy-20260419-231141.db` | 69,632 bytes | `E768AFF3822261EBB9DB745CEBFAC8EB27B2293C3CEA4A8C1120A516B90BF1B9` |
 
-The matching backup sidecars and the earlier `court-predeploy-20260419-231106` sidecars were preserved. The hashes are rechecked before commit and after push. No migration, restore, service restart, live database write, or live Discord connection was performed during development or validation.
+At that review point, the matching backup sidecars and earlier `court-predeploy-20260419-231106` sidecars were preserved and the listed hashes matched. Later operators must establish a new baseline through the guarded operations runbook; they must not compare a legitimately migrated or running database to these old values and assume corruption.
 
 ## Deployment Handoff
 
-For the existing production guild, follow `docs/operations.md` exactly:
+For an existing deployment, follow `docs/operations.md` exactly:
 
-1. Verify the selected environment and `LEGACY_GUILD_ID` without printing secrets.
-2. Stop version 1 before migration.
-3. Validate the exact source database read-only.
-4. Create and validate a SQLite-consistent pre-migration backup.
-5. Run the explicit v2 migration while the database is offline.
-6. Validate integrity, foreign keys, schema, keys, indexes, and required row counts.
-7. Install, typecheck, test, build, and syntax-check the locked release.
-8. Start version 2 and verify `/setup status`, `/setup export`, and `/setup validate` before enabling behavior.
+1. Verify the selected environment and database path without printing secrets.
+2. If the database is still v1, configure `LEGACY_GUILD_ID`, stop the old service, validate the exact source read-only, create a SQLite-consistent backup, and run only the explicit offline v2 migration.
+3. If the database is already valid schema v2, do not migrate or rewrite it merely to retire public features.
+4. Install, typecheck, test, build, and syntax-check the locked release against temporary test data.
+5. Stop the service through the guarded deployment flow, create and validate a current backup, deploy, then validate schema/integrity before restart.
+6. Run `/setup status`, private `/setup export`, and `/setup validate` before enabling behavior. Expect the export to retain legacy records.
+7. Set `/setup timezone timezone:<IANA>` and verify guild-local time output.
+8. Confirm Discord exposes `/setup`, `/superior`, `/utility`, `/fun`, and `/greetings` after propagation.
+9. Confirm `/invictus`, `/court`, `/questions`, retired fun commands, and royal Superior subcommands are absent.
+10. Verify neutral triggers, utilities, greetings, and moderation in a controlled guild; do not use destructive bulk commands as casual smoke tests.
+11. Decide whether to retain the migrated invocation or run `/setup trigger keyword:superior`, resupplying every desired alias.
+12. Replace/repost supported old panels only when their visible text needs changing; stable internal IDs remain compatible and old Discord messages are not automatically rewritten.
 
 Rollback to version 1 requires keeping the service stopped, restoring the exact validated pre-migration v1 backup first, reinstalling/building the prior release from its lockfile, and only then starting the old application. Never run a v1 binary against a v2 database.
 
 ## Intentional Boundaries and External Checks
 
-The repository is complete for the requested code change, but deployment still requires verification of external state:
+The implementation is complete for the requested code change, but policy publication and deployment still require external facts or verification:
 
+- Treat the policy URLs as drafts and do not publish or deploy them until the P0 blockers are resolved: removal and data-deletion behavior, policy review of per-user metrics and administrator-initiated history backfill, administrator-export disclosure, individual deletion and opt-out handling, production encryption-at-rest verification, and the actual operator, private contact, infrastructure-provider, host-log-retention, and backup-retention facts.
+- A guild owner must run `/setup purge` before removing the bot. If the bot has already been removed, the owner must re-invite it to run the purge or contact the operator through the published private contact channel.
 - Discord global commands propagate asynchronously after registration.
+- Existing guild invocation settings and already-posted Discord panels/messages are intentionally not rewritten during deployment.
 - Developer Portal intents, installation scopes, guild permissions, bot role hierarchy, accessible archived/private threads, and configured channel/role existence must be checked in Discord.
 - The external systemd unit, user/group, working directory, environment path, `UMask=0077`, sandboxing, restart policy, disk space, and off-host backup retention are outside this repository.
 - The runtime and lease coordination are intentionally designed for one Node.js process. Running multiple writers would require a distributed coordination design.

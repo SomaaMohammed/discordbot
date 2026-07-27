@@ -387,7 +387,7 @@ export function normalizeTriggerPhrase(content: string): string {
 
 export function parseReplyMuteMessage(
   content: string,
-  invocationTerms: readonly string[] = ["invictus"],
+  invocationTerms: readonly string[] = ["superior"],
 ): string | null {
   const invocationPattern = buildInvocationPattern(invocationTerms);
   if (!invocationPattern) {
@@ -422,91 +422,283 @@ export function parseReplyMuteMessage(
   return null;
 }
 
-export type PrivilegedInvictusChatIntent =
+export const SUPERIOR_CHAT_MAX_DICE = 20;
+export const SUPERIOR_CHAT_MAX_DIE_SIDES = 1_000;
+export const SUPERIOR_CHAT_MAX_CHOICES = 20;
+export const SUPERIOR_CHAT_MAX_CHOICE_LENGTH = 100;
+
+type SuperiorSimpleChatIntentType =
   | "greeting"
-  | "status"
-  | "counsel"
   | "help"
-  | "title"
   | "coinflip"
   | "time"
   | "thanks"
-  | "farewell";
+  | "farewell"
+  | "ping"
+  | "uptime"
+  | "about";
 
-export const PUBLIC_INVICTUS_CHAT_INTENTS =
-  new Set<PrivilegedInvictusChatIntent>([
-    "greeting",
-    "help",
-    "coinflip",
-    "time",
-    "thanks",
-    "farewell",
-  ]);
+type SuperiorChatValidationError =
+  | "dice_format"
+  | "dice_count"
+  | "dice_sides"
+  | "choice_count"
+  | "choice_length";
 
-export function isPublicInvictusChatIntent(
-  intent: PrivilegedInvictusChatIntent,
-): boolean {
-  return PUBLIC_INVICTUS_CHAT_INTENTS.has(intent);
+export type SuperiorChatIntent =
+  | { type: SuperiorSimpleChatIntentType }
+  | { type: "dice"; count: number; sides: number }
+  | { type: "choice"; options: string[] }
+  | {
+      type: "invalid";
+      utility: "dice" | "choice";
+      error: SuperiorChatValidationError;
+    };
+
+interface DirectInvocationRequest {
+  raw: string;
+  normalized: string;
 }
 
-export function parsePrivilegedInvictusChatIntent(
+export function parseSuperiorChatIntent(
   content: string,
-  invocationTerms: readonly string[] = ["invictus"],
-): PrivilegedInvictusChatIntent | null {
-  const normalized = normalizeTriggerPhrase(content);
-  if (!containsInvocation(normalized, invocationTerms)) {
+  invocationTerms: readonly string[] = ["superior"],
+): SuperiorChatIntent | null {
+  // Moderation-shaped requests must never be reinterpreted as casual chat
+  // merely because their reason contains words such as "ping" or "help".
+  if (parseReplyMuteMessage(content, invocationTerms) !== null) {
     return null;
   }
 
-  if (/\b(thanks|thank you|ty)\b/.test(normalized)) {
-    return "thanks";
+  const request = extractDirectInvocationRequest(content, invocationTerms);
+  if (!request) {
+    return null;
   }
 
-  if (/\b(goodnight|good night|sleep well)\b/.test(normalized)) {
-    return "farewell";
+  const normalized = stripPoliteRequestPrefix(request.normalized);
+  if (!normalized) {
+    return { type: "greeting" };
   }
 
-  if (/\b(help|commands|options|what can you do)\b/.test(normalized)) {
-    return "help";
+  const dice = parseSuperiorDiceIntent(normalized);
+  if (dice) {
+    return dice;
   }
 
-  if (
-    /\b(title me|give me a title|grant me a title|bestow a title|bestow title)\b/.test(
-      normalized,
-    )
-  ) {
-    return "title";
-  }
-
-  if (/\b(flip a coin|flip coin|coin flip|heads or tails)\b/.test(normalized)) {
-    return "coinflip";
-  }
-
-  if (/\b(what time is it|time now|current time)\b/.test(normalized)) {
-    return "time";
-  }
-
-  if (/\b(status report|status)\b/.test(normalized)) {
-    return "status";
+  const choice = parseSuperiorChoiceIntent(request.raw, normalized);
+  if (choice) {
+    return choice;
   }
 
   if (
-    /\b(advice|omen|prophecy|what should i do|what do you think)\b/.test(
+    /\b(?:thanks|thank you|thx|ty|tysm|cheers|appreciate it|much appreciated)\b/.test(
       normalized,
     )
   ) {
-    return "counsel";
+    return { type: "thanks" };
   }
 
   if (
-    /\b(hi|hello|hey|yo|sup|good morning|good afternoon|good evening)\b/.test(
+    /\b(?:goodnight|good night|sleep well|bye|goodbye|cya|see you|later)\b/.test(
       normalized,
     )
   ) {
-    return "greeting";
+    return { type: "farewell" };
+  }
+
+  if (
+    /\b(?:help|commands?|command list|show(?: me)?(?: the)? commands|what can you do|how (?:do|can) i use you|options?|features|capabilities)\b/.test(
+      normalized,
+    )
+  ) {
+    return { type: "help" };
+  }
+
+  if (
+    /\b(?:flip|toss)(?: a| the)? coin\b|\bcoin (?:flip|toss)\b|\bheads or tails\b/.test(
+      normalized,
+    )
+  ) {
+    return { type: "coinflip" };
+  }
+
+  if (
+    /\b(?:uptime|how long have you been (?:up|running|online)|when did you (?:start|come online))\b/.test(
+      normalized,
+    )
+  ) {
+    return { type: "uptime" };
+  }
+
+  if (
+    /\b(?:ping|pong|latency|response time|are you (?:online|alive|there)|you there)\b/.test(
+      normalized,
+    )
+  ) {
+    return { type: "ping" };
+  }
+
+  if (
+    /\b(?:about|about you|who are you|what are you|bot info|bot information|version|what version)\b/.test(
+      normalized,
+    )
+  ) {
+    return { type: "about" };
+  }
+
+  if (
+    /\b(?:what time is it|time now|current time|tell me the time)\b/.test(
+      normalized,
+    )
+  ) {
+    return { type: "time" };
+  }
+
+  if (
+    /\b(?:hi|hello|hey|yo|sup|howdy|greetings|good morning|good afternoon|good evening|what's up|whats up|how are you)\b/.test(
+      normalized,
+    )
+  ) {
+    return { type: "greeting" };
   }
 
   return null;
+}
+
+function extractDirectInvocationRequest(
+  content: string,
+  invocationTerms: readonly string[],
+): DirectInvocationRequest | null {
+  const invocationPattern = buildInvocationPattern(invocationTerms);
+  if (!invocationPattern) {
+    return null;
+  }
+
+  const invocationOnly = new RegExp(
+    String.raw`^\s*(?:(hi|hello|hey|yo|howdy|greetings)[\s,]+)?(?:${invocationPattern})\s*[.!?]*\s*$`,
+    "i",
+  ).exec(content);
+  if (invocationOnly) {
+    const raw = invocationOnly[1] ?? "";
+    return { raw, normalized: normalizeTriggerPhrase(raw) };
+  }
+
+  const prefixed = new RegExp(
+    String.raw`^\s*(?:(?:hi|hello|hey|yo|ok|okay)[\s,]+)?(?:${invocationPattern})(?:\s*[,!?:;\-]\s*|\s+)([\s\S]*?)\s*$`,
+    "i",
+  ).exec(content);
+  if (prefixed) {
+    const raw = prefixed[1] ?? "";
+    return { raw, normalized: normalizeTriggerPhrase(raw) };
+  }
+
+  const suffixed = new RegExp(
+    String.raw`^\s*([\s\S]*?)(?:\s*[,!?:;\-]\s*|\s+)(?:${invocationPattern})\s*[.!?]*\s*$`,
+    "i",
+  ).exec(content);
+  if (!suffixed) {
+    return null;
+  }
+
+  const raw = suffixed[1] ?? "";
+  return { raw, normalized: normalizeTriggerPhrase(raw) };
+}
+
+function stripPoliteRequestPrefix(normalized: string): string {
+  return normalized.replace(
+    /^(?:please|can you|could you|would you|will you)\s+/,
+    "",
+  );
+}
+
+function parseSuperiorDiceIntent(
+  normalized: string,
+): SuperiorChatIntent | null {
+  const notation =
+    /^(?:(?:roll|throw)\s+)?(?:a\s+)?(?:(\d+)\s*)?d\s*(\d+)$/.exec(normalized);
+  if (notation) {
+    const count = Number.parseInt(notation[1] ?? "1", 10);
+    const sides = Number.parseInt(notation[2] ?? "0", 10);
+    return validateSuperiorDice(count, sides);
+  }
+
+  const words =
+    /^(?:roll|throw)(?:\s+(\d+))?\s+(?:a\s+)?(?:die|dice)(?:\s+(?:with\s+)?(\d+)\s+sides?)?$/.exec(
+      normalized,
+    );
+  if (words) {
+    const count = Number.parseInt(words[1] ?? "1", 10);
+    const sides = Number.parseInt(words[2] ?? "6", 10);
+    return validateSuperiorDice(count, sides);
+  }
+
+  if (/^(?:roll|throw|dice)\b/.test(normalized)) {
+    return { type: "invalid", utility: "dice", error: "dice_format" };
+  }
+
+  return null;
+}
+
+function validateSuperiorDice(
+  count: number,
+  sides: number,
+): SuperiorChatIntent {
+  if (count < 1 || count > SUPERIOR_CHAT_MAX_DICE) {
+    return { type: "invalid", utility: "dice", error: "dice_count" };
+  }
+  if (sides < 2 || sides > SUPERIOR_CHAT_MAX_DIE_SIDES) {
+    return { type: "invalid", utility: "dice", error: "dice_sides" };
+  }
+  return { type: "dice", count, sides };
+}
+
+function parseSuperiorChoiceIntent(
+  raw: string,
+  normalized: string,
+): SuperiorChatIntent | null {
+  if (
+    !/^(?:choose|pick|decide|select|should i choose|which should i (?:choose|pick))\b/.test(
+      normalized,
+    )
+  ) {
+    return null;
+  }
+
+  const optionText = raw
+    .replace(/^\s*(?:please|can you|could you|would you|will you)\s+/i, "")
+    .replace(
+      /^\s*(?:(?:choose|pick|decide|select)(?:\s+for me)?(?:\s+(?:between|from))?|should i choose|which should i (?:choose|pick))\s+/i,
+      "",
+    );
+  const options = optionText
+    .split(/\s+or\s+|\s*[|,]\s*/i)
+    .map((option) =>
+      option
+        .trim()
+        .replace(/^or\s+/i, "")
+        .replace(/[.!?]+$/, "")
+        .trim(),
+    )
+    .filter(Boolean);
+  const uniqueOptions = Array.from(
+    new Map(options.map((option) => [option.toLowerCase(), option])).values(),
+  );
+
+  if (
+    uniqueOptions.length < 2 ||
+    uniqueOptions.length > SUPERIOR_CHAT_MAX_CHOICES
+  ) {
+    return { type: "invalid", utility: "choice", error: "choice_count" };
+  }
+  if (
+    uniqueOptions.some(
+      (option) => option.length > SUPERIOR_CHAT_MAX_CHOICE_LENGTH,
+    )
+  ) {
+    return { type: "invalid", utility: "choice", error: "choice_length" };
+  }
+
+  return { type: "choice", options: uniqueOptions };
 }
 
 export function isSilenceLockTrigger(content: string): boolean {

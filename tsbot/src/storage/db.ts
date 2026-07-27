@@ -311,7 +311,7 @@ export class CourtStorage {
     const schema = detectDatabaseSchema(this.db);
     if (schema === "legacy-v1") {
       throw new Error(
-        "Database uses the legacy v1 schema. Create a validated backup, set LEGACY_GUILD_ID, and run `cd tsbot && npm run migrate` before starting v2.",
+        "Database uses the legacy v1 schema. Create a validated backup, set LEGACY_GUILD_ID, and run `cd tsbot && npm run migrate` before starting the current runtime.",
       );
     }
     if (schema === "unknown") {

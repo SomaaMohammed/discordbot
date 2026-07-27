@@ -39,7 +39,7 @@ function fixtures(options: {
   return { actor, me, target };
 }
 
-describe("Invictus reply moderation eligibility", () => {
+describe("Superior reply moderation eligibility", () => {
   it("requires the bot's Moderate Members permission", () => {
     const { actor, me, target } = fixtures({
       moderateMembers: false,

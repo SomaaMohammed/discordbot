@@ -1,6 +1,6 @@
 import type { RoyalTitle } from "./types.js";
 
-export const PACKAGE_VERSION = "2.0.1";
+export const PACKAGE_VERSION = "4.0.0";
 
 export const STATE_FILE = "data/bootstrap/state.json";
 export const QUESTIONS_FILE = "data/bootstrap/questions.json";
@@ -58,7 +58,6 @@ export const USER_FUN_METRIC_FIELDS: Array<[string, string]> = [
   ["messages_sent", "Messages Sent"],
   ["reactions_sent", "Reactions Sent"],
   ["reactions_received", "Reactions Received"],
-  ["anonymous_answers_sent", "Anonymous Answers"],
   ["battles_played", "Battles Played"],
   ["battles_won", "Battles Won"],
 ];

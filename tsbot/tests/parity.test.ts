@@ -15,16 +15,15 @@ import {
   getRoyalAfkResponse,
   hasEmperorMention,
   hasEmpressMention,
-  isPublicInvictusChatIntent,
   isEmperorLockTrigger,
   isSilenceLockTrigger,
   markBackfillFinished,
   markBackfillStarted,
   mergeImportedState,
   normalizeQuestionText,
-  parsePrivilegedInvictusChatIntent,
   parseReplyMuteMessage,
   parseRoyalMentions,
+  parseSuperiorChatIntent,
 } from "../src/parity.js";
 import type { CourtState } from "../src/types.js";
 
@@ -243,7 +242,7 @@ describe("parity helpers", () => {
   });
 
   it("parses reply mute trigger", () => {
-    expect(parseReplyMuteMessage("invictus mute @user being loud")).toBe(
+    expect(parseReplyMuteMessage("superior mute @user being loud")).toBe(
       "@user being loud",
     );
     expect(parseReplyMuteMessage("hello there")).toBeNull();
@@ -257,48 +256,141 @@ describe("parity helpers", () => {
     ).toBe("@user");
   });
 
-  it("parses privileged invictus chat intents", () => {
-    expect(parsePrivilegedInvictusChatIntent("hi invictus")).toBe("greeting");
-    expect(parsePrivilegedInvictusChatIntent("invictus help")).toBe("help");
-    expect(parsePrivilegedInvictusChatIntent("invictus title me")).toBe(
-      "title",
-    );
-    expect(parsePrivilegedInvictusChatIntent("invictus flip a coin")).toBe(
-      "coinflip",
-    );
-    expect(parsePrivilegedInvictusChatIntent("invictus what time is it")).toBe(
-      "time",
-    );
-    expect(parsePrivilegedInvictusChatIntent("invictus status report")).toBe(
-      "status",
-    );
-    expect(parsePrivilegedInvictusChatIntent("invictus what should i do")).toBe(
-      "counsel",
-    );
-    expect(parsePrivilegedInvictusChatIntent("thanks invictus")).toBe("thanks");
-    expect(parsePrivilegedInvictusChatIntent("good night invictus")).toBe(
-      "farewell",
-    );
-    expect(parsePrivilegedInvictusChatIntent("invictus mute @user")).toBeNull();
-    expect(parsePrivilegedInvictusChatIntent("hello there")).toBeNull();
-    expect(
-      parsePrivilegedInvictusChatIntent("court oracle, status report", [
-        "court oracle",
-      ]),
-    ).toBe("status");
+  it.each([
+    ["hi superior", "greeting"],
+    ["Superior, howdy!", "greeting"],
+    ["superior what can you do", "help"],
+    ["superior show me the commands", "help"],
+    ["superior options", "help"],
+    ["superior can you toss a coin", "coinflip"],
+    ["superior tell me the time", "time"],
+    ["thanks superior", "thanks"],
+    ["superior, much appreciated", "thanks"],
+    ["good night superior", "farewell"],
+    ["superior cya", "farewell"],
+    ["superior are you online", "ping"],
+    ["superior response time", "ping"],
+    ["superior how long have you been running", "uptime"],
+    ["superior when did you start", "uptime"],
+    ["superior who are you", "about"],
+    ["superior what version", "about"],
+  ])("parses Superior chat phrase %s", (content, type) => {
+    expect(parseSuperiorChatIntent(content)).toEqual({ type });
   });
 
-  it("marks public versus privileged invictus intents", () => {
-    expect(isPublicInvictusChatIntent("greeting")).toBe(true);
-    expect(isPublicInvictusChatIntent("help")).toBe(true);
-    expect(isPublicInvictusChatIntent("coinflip")).toBe(true);
-    expect(isPublicInvictusChatIntent("time")).toBe(true);
-    expect(isPublicInvictusChatIntent("thanks")).toBe(true);
-    expect(isPublicInvictusChatIntent("farewell")).toBe(true);
+  it("parses bounded dice requests", () => {
+    expect(parseSuperiorChatIntent("superior roll dice")).toEqual({
+      type: "dice",
+      count: 1,
+      sides: 6,
+    });
+    expect(parseSuperiorChatIntent("superior, d20")).toEqual({
+      type: "dice",
+      count: 1,
+      sides: 20,
+    });
+    expect(parseSuperiorChatIntent("superior roll 2d100")).toEqual({
+      type: "dice",
+      count: 2,
+      sides: 100,
+    });
+    expect(parseSuperiorChatIntent("superior roll 21d6")).toEqual({
+      type: "invalid",
+      utility: "dice",
+      error: "dice_count",
+    });
+    expect(parseSuperiorChatIntent("superior roll d1")).toEqual({
+      type: "invalid",
+      utility: "dice",
+      error: "dice_sides",
+    });
+    expect(parseSuperiorChatIntent("superior roll d1001")).toEqual({
+      type: "invalid",
+      utility: "dice",
+      error: "dice_sides",
+    });
+    expect(parseSuperiorChatIntent("superior roll bananas")).toEqual({
+      type: "invalid",
+      utility: "dice",
+      error: "dice_format",
+    });
+  });
 
-    expect(isPublicInvictusChatIntent("status")).toBe(false);
-    expect(isPublicInvictusChatIntent("counsel")).toBe(false);
-    expect(isPublicInvictusChatIntent("title")).toBe(false);
+  it("parses bounded choices while preserving their display text", () => {
+    expect(
+      parseSuperiorChatIntent("superior choose Red Team or Blue Team"),
+    ).toEqual({
+      type: "choice",
+      options: ["Red Team", "Blue Team"],
+    });
+    expect(
+      parseSuperiorChatIntent("superior pick red, RED, green, or blue"),
+    ).toEqual({
+      type: "choice",
+      options: ["RED", "green", "blue"],
+    });
+    expect(parseSuperiorChatIntent("superior choose only-one")).toEqual({
+      type: "invalid",
+      utility: "choice",
+      error: "choice_count",
+    });
+    expect(
+      parseSuperiorChatIntent(
+        `superior choose ${Array.from({ length: 21 }, (_, index) => `option-${index}`).join(" | ")}`,
+      ),
+    ).toEqual({
+      type: "invalid",
+      utility: "choice",
+      error: "choice_count",
+    });
+    expect(
+      parseSuperiorChatIntent(
+        `superior choose ${"a".repeat(101)} or something else`,
+      ),
+    ).toEqual({
+      type: "invalid",
+      utility: "choice",
+      error: "choice_length",
+    });
+  });
+
+  it("requires direct address and preserves configurable invocation terms", () => {
+    expect(parseSuperiorChatIntent("This is a superior choice")).toBeNull();
+    expect(parseSuperiorChatIntent("hello there")).toBeNull();
+    expect(parseSuperiorChatIntent("superior mute @user")).toBeNull();
+    expect(parseSuperiorChatIntent("superior mute for ping spam")).toBeNull();
+    expect(
+      parseSuperiorChatIntent("superior timeout because they need help"),
+    ).toBeNull();
+    expect(
+      parseSuperiorChatIntent("superior mute for saying goodbye"),
+    ).toBeNull();
+    expect(parseReplyMuteMessage("superior mute for ping spam")).toBe(
+      "for ping spam",
+    );
+    expect(parseSuperiorChatIntent("superior status report")).toBeNull();
+    expect(parseSuperiorChatIntent("superior what should i do")).toBeNull();
+    expect(parseSuperiorChatIntent("superior title me")).toBeNull();
+    expect(
+      parseSuperiorChatIntent("court oracle, ping", ["court oracle"]),
+    ).toEqual({ type: "ping" });
+    expect(
+      parseSuperiorChatIntent("oracle.v2+: roll d20", ["oracle.v2+"]),
+    ).toEqual({ type: "dice", count: 1, sides: 20 });
+    expect(
+      parseSuperiorChatIntent("<@123456789012345678> uptime", [
+        "<@123456789012345678>",
+      ]),
+    ).toEqual({ type: "uptime" });
+  });
+
+  it("accepts an explicitly persisted Invictus invocation term", () => {
+    expect(
+      parseReplyMuteMessage("invictus mute @user being loud", ["invictus"]),
+    ).toBe("@user being loud");
+    expect(parseSuperiorChatIntent("invictus help", ["invictus"])).toEqual({
+      type: "help",
+    });
   });
 
   it("handles AFK response and reporting", () => {

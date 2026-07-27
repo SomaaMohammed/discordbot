@@ -11,7 +11,7 @@ import type { GuildSettings } from "../types.js";
 /*
  * These production-specific defaults are intentionally quarantined here. They
  * are used only by the explicit one-time v1 migration and must never seed a
- * newly joined guild or participate in normal v2 runtime behavior.
+ * newly joined guild or participate in normal current-runtime behavior.
  */
 const LEGACY_DEFAULTS = {
   staffRoles: [
@@ -81,6 +81,11 @@ export function buildLegacyGuildSettings(
   legacyState: Record<string, unknown>,
 ): GuildSettings {
   const settings = createDefaultGuildSettings();
+  // A v1 deployment used "invictus" as its invocation. Preserve that trigger
+  // during the explicit v1 migration even though new guilds default to the
+  // Superior brand. Existing live behavior must not change as a migration
+  // side effect.
+  settings.invocation.keyword = "invictus";
   settings.enabled = true;
   for (const feature of Object.keys(settings.features) as Array<
     keyof GuildSettings["features"]

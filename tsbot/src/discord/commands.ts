@@ -73,10 +73,15 @@ import type {
 import { logError } from "../logging.js";
 import {
   buildSetupCommandDefinition,
+  getFeatureDisplayName,
   handleSetupCommand,
   requireSetupAdmin,
 } from "./setup.js";
 import { KeyedSerialQueue } from "./keyed-serial-queue.js";
+import {
+  buildUtilityCommandDefinition,
+  handleUtilityCommand,
+} from "./utilities.js";
 
 type BotRuntime = GuildRuntime;
 
@@ -106,6 +111,15 @@ const COURT_COMMANDS = [
 ] as const;
 
 const QUESTIONS_COMMANDS = ["count", "unused", "audit"] as const;
+const SUPERIOR_COMMAND_NAME = "superior";
+const LEGACY_INVICTUS_COMMAND_NAME = "invictus";
+const RETIRED_COMMAND_NAMES = new Set(["court", "questions"]);
+const RETIRED_SUPERIOR_SUBCOMMANDS = new Set([
+  "afk",
+  "afkstatus",
+  "resetroyaltimer",
+]);
+const RETIRED_FUN_SUBCOMMANDS = new Set(["verdict", "title", "fate"]);
 const INVICTUS_COMMANDS = [
   "say",
   "dmpanel",
@@ -124,19 +138,9 @@ const INVICTUS_COMMANDS = [
   "unmuteall",
   "backfillstats",
   "backfillstatus",
-  "afk",
-  "afkstatus",
-  "resetroyaltimer",
   "help",
 ] as const;
-const FUN_COMMANDS = [
-  "battle",
-  "stats",
-  "leaderboard",
-  "verdict",
-  "title",
-  "fate",
-] as const;
+const FUN_COMMANDS = ["battle", "stats", "leaderboard"] as const;
 const CATEGORY_CHOICES = Object.keys(CATEGORY_DESCRIPTIONS).map((category) => ({
   name: category,
   value: category,
@@ -168,7 +172,7 @@ const INVICTUS_DM_PANEL_BUTTON_ID = "invictus:dm_panel";
 const INVICTUS_DM_PANEL_MODAL_PREFIX = "invictus:dm_panel_modal:";
 const INVICTUS_DM_PANEL_MODAL_INPUT_ID = "dm_message";
 const INVICTUS_DM_PANEL_FOOTER_PREFIX = "InvictusDmTarget:";
-const INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL = "Message Invictus";
+const INVICTUS_DM_PANEL_DEFAULT_BUTTON_LABEL = "Message Superior";
 const anonymousAnswerUserQueue = new KeyedSerialQueue();
 const anonymousAnswerQuestionQueue = new KeyedSerialQueue();
 
@@ -508,9 +512,6 @@ const INVICTUS_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
   unmuteall: handleInvictusUnmuteAll,
   rolepanelmulti: handleInvictusRolePanelMulti,
   say: handleInvictusSay,
-  resetroyaltimer: handleInvictusResetRoyalTimer,
-  afk: handleInvictusAfk,
-  afkstatus: handleInvictusAfkStatus,
   backfillstats: handleInvictusBackfillStats,
   backfillstatus: handleInvictusBackfillStatus,
   help: async (interaction) => handleInvictusHelp(interaction),
@@ -532,17 +533,11 @@ const INVICTUS_ADMIN_SUBCOMMANDS = new Set<string>([
   "unmuteall",
   "rolepanelmulti",
   "say",
-  "resetroyaltimer",
-  "afkstatus",
   "backfillstats",
   "backfillstatus",
-  "help",
 ]);
 
 const FUN_SUBCOMMAND_HANDLERS: Record<string, RuntimeCommandHandler> = {
-  verdict: handleFunVerdict,
-  title: handleFunTitle,
-  fate: handleFate,
   battle: handleFunBattle,
   stats: handleFunStats,
   leaderboard: handleFunLeaderboard,
@@ -559,9 +554,7 @@ const COMMAND_DISPATCHERS: Record<
     requiresAdmin?: Set<string>;
   }
 > = {
-  court: { handlers: COURT_SUBCOMMAND_HANDLERS },
-  questions: { handlers: QUESTIONS_SUBCOMMAND_HANDLERS },
-  invictus: {
+  [SUPERIOR_COMMAND_NAME]: {
     handlers: INVICTUS_SUBCOMMAND_HANDLERS,
     requiresAdmin: INVICTUS_ADMIN_SUBCOMMANDS,
   },
@@ -572,59 +565,13 @@ const COMMAND_DISPATCHERS: Record<
 export function buildCommandDefinitions(): Array<
   SlashCommandBuilder | SlashCommandSubcommandsOnlyBuilder
 > {
-  const court = new SlashCommandBuilder()
-    .setName("court")
-    .setDescription("Imperial Court controls")
-    .setDMPermission(false);
-  for (const name of COURT_COMMANDS) {
-    court.addSubcommand((subcommand) => {
-      subcommand.setName(name).setDescription(`Court ${name} command`);
-      const configureCourtSubcommand = COURT_SUBCOMMAND_OPTION_BUILDERS[name];
-      if (configureCourtSubcommand) {
-        configureCourtSubcommand(subcommand);
-      }
-
-      return subcommand;
-    });
-  }
-
-  const questions = new SlashCommandBuilder()
-    .setName("questions")
-    .setDescription("Question utilities")
-    .setDMPermission(false);
-  for (const name of QUESTIONS_COMMANDS) {
-    questions.addSubcommand((subcommand) => {
-      subcommand.setName(name).setDescription(`Question ${name} command`);
-      if (name === "count") {
-        subcommand.addStringOption((option) =>
-          option
-            .setName("category")
-            .setDescription("Optional category")
-            .setRequired(false)
-            .addChoices(...CATEGORY_CHOICES),
-        );
-      }
-
-      if (name === "unused") {
-        subcommand.addStringOption((option) =>
-          option
-            .setName("category")
-            .setDescription("Optional category to inspect")
-            .setRequired(false)
-            .addChoices(...CATEGORY_CHOICES),
-        );
-      }
-      return subcommand;
-    });
-  }
-
-  const invictus = new SlashCommandBuilder()
-    .setName("invictus")
+  const superior = new SlashCommandBuilder()
+    .setName(SUPERIOR_COMMAND_NAME)
     .setDescription("Server admin and moderation tools")
     .setDMPermission(false);
   for (const name of INVICTUS_COMMANDS) {
-    invictus.addSubcommand((subcommand) => {
-      subcommand.setName(name).setDescription(`Invictus ${name} command`);
+    superior.addSubcommand((subcommand) => {
+      subcommand.setName(name).setDescription(`Superior ${name} command`);
       INVICTUS_SUBCOMMAND_OPTION_BUILDERS[name]?.(subcommand);
 
       if (name === "rolepanel") {
@@ -747,17 +694,6 @@ export function buildCommandDefinitions(): Array<
               .setDescription("Whether to ping @everyone above the panel")
               .setRequired(false),
           );
-      }
-
-      if (name === "afk") {
-        subcommand.addStringOption((option) =>
-          option
-            .setName("reason")
-            .setDescription(
-              "Reason for being AFK. Leave empty to clear your AFK status",
-            )
-            .setRequired(false),
-        );
       }
 
       if (name === "purge") {
@@ -1019,14 +955,6 @@ export function buildCommandDefinitions(): Array<
           );
       }
 
-      if (name === "fate") {
-        subcommand.addIntegerOption((option) =>
-          option
-            .setName("roll")
-            .setDescription("Optional roll between 1 and 100")
-            .setRequired(false),
-        );
-      }
       return subcommand;
     });
   }
@@ -1050,9 +978,8 @@ export function buildCommandDefinitions(): Array<
 
   return [
     buildSetupCommandDefinition(),
-    court,
-    questions,
-    invictus,
+    superior,
+    buildUtilityCommandDefinition(),
     fun,
     greetings,
   ];
@@ -1125,10 +1052,38 @@ export async function handleChatInputCommand(
     return;
   }
 
+  if (command === LEGACY_INVICTUS_COMMAND_NAME) {
+    await interaction.reply({
+      content:
+        "The legacy `/invictus` command has been retired. Use `/superior` instead.",
+      ephemeral: true,
+    });
+    return;
+  }
+  if (RETIRED_COMMAND_NAMES.has(command)) {
+    await interaction.reply({
+      content:
+        "The old court and question commands have been retired. Stored legacy data was preserved.",
+      ephemeral: true,
+    });
+    return;
+  }
+  if (
+    (command === SUPERIOR_COMMAND_NAME &&
+      RETIRED_SUPERIOR_SUBCOMMANDS.has(subcommand)) ||
+    (command === "fun" && RETIRED_FUN_SUBCOMMANDS.has(subcommand))
+  ) {
+    await interaction.reply({
+      content: "That legacy subcommand has been retired.",
+      ephemeral: true,
+    });
+    return;
+  }
+
   if (!guildRuntime || !guildRuntime.settings.enabled) {
     await interaction.reply({
       content:
-        "Imperial Court is not enabled for this server. An administrator can begin with `/setup status`.",
+        "Superior is not enabled for this server. An administrator can begin with `/setup status`.",
       ephemeral: true,
     });
     return;
@@ -1137,7 +1092,7 @@ export async function handleChatInputCommand(
   const requiredFeature = getCommandFeature(command, subcommand);
   if (requiredFeature && !guildRuntime.settings.features[requiredFeature]) {
     await interaction.reply({
-      content: `The ${requiredFeature} feature is disabled in this server.`,
+      content: `The ${getFeatureDisplayName(requiredFeature)} feature is disabled in this server.`,
       ephemeral: true,
     });
     return;
@@ -1160,6 +1115,11 @@ export async function handleChatInputCommand(
         "This server's configuration changed while the command was starting. Please try again.",
       ephemeral: true,
     });
+    return;
+  }
+
+  if (command === "utility") {
+    await handleUtilityCommand(interaction, guildRuntime);
     return;
   }
 
@@ -1212,20 +1172,10 @@ function getCommandFeature(
   command: string,
   subcommand: string,
 ): keyof GuildSettings["features"] | null {
-  if (command === "court" || command === "questions") {
-    return "court";
-  }
   if (command === "greetings") {
     return "greetings";
   }
-  if (command === "invictus") {
-    if (subcommand === "afk" || subcommand === "afkstatus") {
-      return "royalAfk";
-    }
-    if (subcommand === "resetroyaltimer") {
-      return "royalPresence";
-    }
-  }
+  void subcommand;
   return null;
 }
 
@@ -1251,7 +1201,7 @@ async function resolveEnabledComponentRuntime(
   if (!guildRuntime?.settings.enabled || !guildRuntime.isCurrent()) {
     await interaction.reply({
       content:
-        "Imperial Court is disabled here. Ask an administrator to review `/setup status`.",
+        "Superior is disabled here. Ask an administrator to review `/setup status`.",
       ephemeral: true,
     });
     return null;
@@ -1325,40 +1275,11 @@ export async function handleButtonInteraction(
   if (interaction.customId !== ANON_ANSWER_BUTTON_ID) {
     return;
   }
-
-  if (
-    !guildRuntime.settings.features.court ||
-    !guildRuntime.settings.features.anonymousAnswers
-  ) {
-    await interaction.reply({
-      content: "Anonymous court answers are disabled in this server.",
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (!interaction.guild || !interaction.message) {
-    await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
-    return;
-  }
-
-  const postRecord = guildRuntime.storage.getPostRecord(interaction.message.id);
-  if (!postRecord || postRecord.channel_id !== interaction.channelId) {
-    await interaction.reply({
-      content:
-        "This button is not attached to a current court post in this server.",
-      ephemeral: true,
-    });
-    return;
-  }
-  if (postRecord.closed) {
-    await interaction.reply({ content: MSG_INQUIRY_CLOSED, ephemeral: true });
-    return;
-  }
-
-  await interaction.showModal(
-    buildAnonymousAnswerModal(interaction.message.id),
-  );
+  await interaction.reply({
+    content:
+      "Anonymous question submissions have been retired. Existing stored data was preserved.",
+    ephemeral: true,
+  });
 }
 
 export async function handleModalSubmitInteraction(
@@ -1411,242 +1332,12 @@ export async function handleModalSubmitInteraction(
     return;
   }
 
-  if (
-    !guildRuntime.settings.features.court ||
-    !guildRuntime.settings.features.anonymousAnswers
-  ) {
-    await interaction.reply({
-      content: "Anonymous court answers are disabled in this server.",
-      ephemeral: true,
-    });
-    return;
-  }
-
-  if (!interaction.guild) {
-    await interaction.reply({ content: MSG_USE_IN_SERVER, ephemeral: true });
-    return;
-  }
-
-  await interaction.deferReply({ ephemeral: true });
-
-  const member = await interaction.guild.members
-    .fetch(interaction.user.id)
-    .catch(() => null);
-  if (!member || !guildRuntime.isCurrent()) {
-    await interaction.editReply({ content: MSG_VERIFY_ROLES });
-    return;
-  }
-
-  const postRecord = guildRuntime.storage.getPostRecord(questionMessageId);
-  if (!postRecord) {
-    await interaction.editReply({
-      content: "Could not find the original court post for this server.",
-    });
-    return;
-  }
-  if (postRecord.closed) {
-    await interaction.editReply({ content: MSG_INQUIRY_CLOSED });
-    return;
-  }
-
-  const sourceMessage = await resolveCourtPostMessageForModal(
-    interaction,
-    postRecord,
-    questionMessageId,
-  );
-  if (!sourceMessage) {
-    await interaction.editReply({
-      content: "Could not find the original court post.",
-    });
-    return;
-  }
-  if (!guildRuntime.isCurrent()) {
-    await interaction.editReply({
-      content:
-        "This answer was cancelled because this server's configuration changed.",
-    });
-    return;
-  }
-
-  const answerText = interaction.fields
-    .getTextInputValue(ANON_MODAL_INPUT_ID)
-    .trim();
-  if (!answerText) {
-    await interaction.editReply({
-      content: "Answer cannot be empty.",
-    });
-    return;
-  }
-
-  const validationError = validateAnonymousAnswerSubmission(
-    member,
-    answerText,
-    guildRuntime,
-  );
-  if (validationError) {
-    await interaction.editReply({ content: validationError });
-    return;
-  }
-
-  if (guildRuntime.storage.hasUserAnswered(questionMessageId, member.id)) {
-    await interaction.editReply({
-      content: "You already answered this court inquiry.",
-    });
-    return;
-  }
-
-  const question = extractQuestionFromMessage(sourceMessage);
-  const submitAnswer = async () => {
-    if (!guildRuntime.isCurrent()) {
-      return {
-        posted: false as const,
-        content:
-          "This answer was cancelled because this server's configuration changed.",
-      };
-    }
-
-    const freshPostRecord =
-      guildRuntime.storage.getPostRecord(questionMessageId);
-    if (!freshPostRecord) {
-      return {
-        posted: false as const,
-        content: "Could not find the original court post for this server.",
-      };
-    }
-    if (freshPostRecord.closed) {
-      return { posted: false as const, content: MSG_INQUIRY_CLOSED };
-    }
-
-    const freshValidationError = validateAnonymousAnswerSubmission(
-      member,
-      answerText,
-      guildRuntime,
-    );
-    if (freshValidationError) {
-      return { posted: false as const, content: freshValidationError };
-    }
-    if (guildRuntime.storage.hasUserAnswered(questionMessageId, member.id)) {
-      return {
-        posted: false as const,
-        content: "You already answered this court inquiry.",
-      };
-    }
-
-    const thread = await getOrCreateAnswerThread(
-      sourceMessage,
-      question,
-      guildRuntime,
-    );
-    if (!guildRuntime.isCurrent()) {
-      return {
-        posted: false as const,
-        content:
-          "This answer was cancelled because this server's configuration changed.",
-      };
-    }
-    if (!thread) {
-      return {
-        posted: false as const,
-        content:
-          "Could not create or find the reply thread. Check the bot's thread permissions.",
-      };
-    }
-
-    const postBeforeSend =
-      guildRuntime.storage.getPostRecord(questionMessageId);
-    if (!postBeforeSend || postBeforeSend.closed || thread.locked) {
-      return { posted: false as const, content: MSG_INQUIRY_CLOSED };
-    }
-    if (guildRuntime.storage.hasUserAnswered(questionMessageId, member.id)) {
-      return {
-        posted: false as const,
-        content: "You already answered this court inquiry.",
-      };
-    }
-
-    const answerNumber =
-      guildRuntime.storage.nextAnswerNumber(questionMessageId);
-    const embed = new EmbedBuilder()
-      .setTitle(`Anonymous Answer #${answerNumber}`)
-      .setDescription(answerText)
-      .setColor(ROLE_COLOR)
-      .setTimestamp(guildRuntime.now().toJSDate())
-      .setFooter({ text: "Submitted anonymously" });
-
-    const sent = await thread.send({ embeds: [embed] }).catch(() => null);
-    if (!sent) {
-      return {
-        posted: false as const,
-        content: "Failed to post your anonymous answer.",
-      };
-    }
-
-    const deleteUntrackedAnswer = async (reason: string): Promise<boolean> => {
-      return sent
-        .delete()
-        .then(() => true)
-        .catch((error) => {
-          logError("anonymous-answer", "Failed to delete untracked answer", {
-            guildId: guildRuntime.guildId,
-            questionMessageId,
-            answerMessageId: sent.id,
-            reason,
-            error,
-          });
-          return false;
-        });
-    };
-
-    if (!guildRuntime.isCurrent()) {
-      await deleteUntrackedAnswer("runtime_invalidated");
-      return {
-        posted: false as const,
-        content:
-          "This answer was cancelled because this server's configuration changed.",
-      };
-    }
-
-    const postAfterSend = guildRuntime.storage.getPostRecord(questionMessageId);
-    if (!postAfterSend || postAfterSend.closed || thread.locked) {
-      await deleteUntrackedAnswer("inquiry_closed");
-      return { posted: false as const, content: MSG_INQUIRY_CLOSED };
-    }
-
-    try {
-      guildRuntime.storage.markUserAnswered(
-        questionMessageId,
-        member.id,
-        sent.id,
-      );
-    } catch (error) {
-      const deleted = await deleteUntrackedAnswer("persistence_failed");
-      logError("anonymous-answer", "Failed to persist anonymous answer", {
-        guildId: guildRuntime.guildId,
-        questionMessageId,
-        answerMessageId: sent.id,
-        error,
-      });
-      return {
-        posted: false as const,
-        content: deleted
-          ? "Failed to save your anonymous answer. The posted message was removed; please try again."
-          : "Failed to save your anonymous answer, and I could not remove the untracked message. Please contact an administrator.",
-      };
-    }
-    return { posted: true as const, thread };
-  };
-  const result = await runAnonymousAnswerAdmission(
-    guildRuntime.guildId,
-    member.id,
-    questionMessageId,
-    submitAnswer,
-  );
-
-  await interaction.editReply({
-    content: result.posted
-      ? `Your anonymous answer has been posted in ${result.thread.toString()}.`
-      : result.content,
+  await interaction.reply({
+    content:
+      "Anonymous question submissions have been retired. Existing stored data was preserved.",
+    ephemeral: true,
   });
+  return;
 }
 
 async function handleCourtStatus(
@@ -1874,7 +1565,15 @@ async function handleCourtAnalytics(
       .map(([category, count]) => `- \`${category}\`: \`${count}\``)
       .join("\n") || "No data yet.";
 
-  const topCommands = Object.entries(metrics.command_usage)
+  const displayedCommandUsage = new Map<string, number>();
+  for (const [commandName, count] of Object.entries(metrics.command_usage)) {
+    const displayName = commandName.replace(/^invictus\./, "superior.");
+    displayedCommandUsage.set(
+      displayName,
+      (displayedCommandUsage.get(displayName) ?? 0) + count,
+    );
+  }
+  const topCommands = Array.from(displayedCommandUsage.entries())
     .sort((left, right) => right[1] - left[1])
     .slice(0, 8);
   const commandLines =
@@ -3040,7 +2739,7 @@ async function handleInvictusDmPanel(
   await sendLog(
     interaction,
     runtime,
-    "Invictus DM Panel Created",
+    "Superior DM Panel Created",
     `**By:** ${interaction.user.toString()}\n**Channel:** ${targetChannel.toString()}\n**Recipient:** ${interaction.user.toString()} (\`${interaction.user.id}\`)\n**Button:** ${buttonLabel}\n**Mention Everyone:** \`${mentionEveryone ? "Yes" : "No"}\``,
   );
 }
@@ -3176,7 +2875,7 @@ async function handleInvictusDmPanelModalSubmit(
     ? interaction.channel.toString()
     : "Unknown";
   const dmEmbed = new EmbedBuilder()
-    .setTitle("Invictus Panel Message")
+    .setTitle("Superior Panel Message")
     .setDescription(messageContent)
     .setColor(ROLE_COLOR)
     .setTimestamp(runtime.now().toJSDate())
@@ -3225,14 +2924,14 @@ async function handleInvictusDmPanelModalSubmit(
 
   runtime.storage.recordCommandMetric("invictus.dmpanel.forward");
   await interaction.reply({
-    content: "Your message has been sent privately.",
+    content: "Your message has been sent.",
     ephemeral: true,
   });
 
   await sendLog(
     interaction,
     runtime,
-    "Invictus DM Panel Message Forwarded",
+    "Superior DM Panel Message Forwarded",
     `**From:** ${interaction.user.toString()} (\`${interaction.user.id}\`)\n**To:** ${recipient.toString()} (\`${recipient.id}\`)\n**Channel:** ${sourceChannel}\n**Message:** ${messageContent}`,
   );
 }
@@ -3955,29 +3654,24 @@ async function handleInvictusHelp(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   const helpText = [
-    "**Imperial Court Bot Commands**",
+    "**Superior Commands**",
     "",
-    "**Court Control**",
-    "`/court status`, `/court health`, `/court analytics`, `/court dryrun`, `/court exportstate`, `/court importstate`",
-    "`/court mode`, `/court channel`, `/court logchannel`, `/court schedule`",
+    "**Utilities**",
+    "`/utility ping`, `/utility avatar`, `/utility userinfo`, `/utility serverinfo`",
     "",
-    "**Questions**",
-    "`/court listcategories`, `/court addquestion`, `/court deletequestion`, `/court editquestion`, `/court resethistory`",
-    "`/questions count`, `/questions unused`, `/questions audit`",
+    "**Administration and moderation**",
+    "`/superior say`, `/superior dmpanel`, `/superior rolepanel`, `/superior rolepanelmulti`, `/superior purge`, `/superior purgeuser`, `/superior lock`, `/superior unlock`",
+    "`/superior slowmode`, `/superior timeout`, `/superior untimeout`, `/superior mutemany`, `/superior unmutemany`, `/superior muteall`, `/superior unmuteall`",
+    "`/superior backfillstats`, `/superior backfillstatus`, `/superior help`",
     "",
-    "**Court Posts**",
-    "`/court post`, `/court custom`, `/court close`, `/court listopen`, `/court extend`, `/court reopen`, `/court removeanswer`",
+    "**Community**",
+    "`/fun battle`, `/fun stats`, `/fun leaderboard`",
+    "`/greetings send profile:<name>`",
     "",
-    "**Invictus**",
-    "`/invictus say`, `/invictus dmpanel`, `/invictus rolepanel`, `/invictus rolepanelmulti`, `/invictus purge`, `/invictus purgeuser`, `/invictus lock`, `/invictus unlock`",
-    "`/invictus slowmode`, `/invictus timeout`, `/invictus untimeout`, `/invictus mutemany`, `/invictus unmutemany`, `/invictus muteall`, `/invictus unmuteall`",
-    "`/invictus resetroyaltimer`, `/invictus afk`, `/invictus afkstatus`, `/invictus backfillstats`, `/invictus backfillstatus`",
+    "**Conversational triggers**",
+    "Address the bot by its configured name (normally `superior`) for greetings, help, coin flips, time, ping, uptime, about, dice rolls, choices, thanks, and farewells.",
     "",
-    "**Fun**",
-    "`/fun battle`, `/fun stats`, `/fun leaderboard`, `/fun verdict`, `/fun title`, `/fun fate`",
-    "",
-    "**Greetings**",
-    "`/greetings send profile:<name>` (profiles are configured per server with `/setup greeting`)",
+    "Administrators configure this server with `/setup`.",
   ].join("\n");
 
   const embed = new EmbedBuilder()
@@ -4039,17 +3733,7 @@ async function handleFunBattle(
     return;
   }
 
-  const unbeatable = runtime.settings.championUserId;
-  let winner: GuildMember;
-  if (challenger.id === unbeatable) {
-    winner = challenger;
-  } else if (opponent.id === unbeatable) {
-    winner = opponent;
-  } else if (runtime.randomInt(2) === 0) {
-    winner = challenger;
-  } else {
-    winner = opponent;
-  }
+  const winner = runtime.randomInt(2) === 0 ? challenger : opponent;
   const loser = winner.id === challenger.id ? opponent : challenger;
 
   runtime.storage.metricsIncrement(
@@ -4063,16 +3747,10 @@ async function handleFunBattle(
   );
 
   const challengerStats = Object.fromEntries(
-    BOSS_STATS.map((statName) => [
-      statName,
-      challenger.id === unbeatable ? 100 : runtime.randomInt(100) + 1,
-    ]),
+    BOSS_STATS.map((statName) => [statName, runtime.randomInt(100) + 1]),
   );
   const opponentStats = Object.fromEntries(
-    BOSS_STATS.map((statName) => [
-      statName,
-      opponent.id === unbeatable ? 100 : runtime.randomInt(100) + 1,
-    ]),
+    BOSS_STATS.map((statName) => [statName, runtime.randomInt(100) + 1]),
   );
 
   let battleText = `**${challenger.toString()} vs ${opponent.toString()}**\n\n**${challenger.displayName}'s Arsenal:**\n`;
@@ -4134,7 +3812,7 @@ async function handleFunStats(
 
   const stats = runtime.storage.getUserFunMetrics(target.id);
   const embed = new EmbedBuilder()
-    .setTitle(`${target.displayName}'s Court Activity`)
+    .setTitle(`${target.displayName}'s Community Activity`)
     .setDescription("Just-for-fun community activity tracking.")
     .setColor(ROLE_COLOR)
     .setTimestamp(runtime.now().toJSDate())
@@ -4337,7 +4015,7 @@ async function handleInvictusLock(
 
   const reason =
     interaction.options.getString("reason") ??
-    "Channel locked via /invictus lock";
+    "Channel locked via /superior lock";
   const everyone = interaction.guild.roles.everyone;
   if (!runtime.isCurrent()) {
     await interaction.reply({
@@ -4398,7 +4076,7 @@ async function handleInvictusUnlock(
 
   const reason =
     interaction.options.getString("reason") ??
-    "Channel unlocked via /invictus unlock";
+    "Channel unlocked via /superior unlock";
   const everyone = interaction.guild.roles.everyone;
   if (!runtime.isCurrent()) {
     await interaction.reply({
@@ -5092,7 +4770,7 @@ function buildTimeoutReason(
   user: GuildMember,
   reason: string | null,
 ): string {
-  const base = `${action} by ${user.user.tag} via /invictus`;
+  const base = `${action} by ${user.user.tag} via /superior`;
   return reason ? `${base} | ${reason}` : base;
 }
 
@@ -5696,7 +5374,7 @@ function buildRolePanelEmbed(
   runtime: BotRuntime,
 ): EmbedBuilder {
   const panelRoles = roles.slice(0, ROLE_PANEL_MAX_BUTTONS);
-  const panelTitle = (title ?? "").trim() || "Imperial Role Panel";
+  const panelTitle = (title ?? "").trim() || "Superior Role Panel";
 
   const defaultDescription =
     panelRoles.length === 1
@@ -6694,7 +6372,7 @@ function buildInvictusDmPanelEmbed(
   description: string | null,
   runtime: BotRuntime,
 ): EmbedBuilder {
-  const panelTitle = (title ?? "").trim() || "Message Invictus";
+  const panelTitle = (title ?? "").trim() || "Message Superior";
   const defaultDescription =
     `Press the button below to send a private message to <@${targetUserId}>. ` +
     "Your message is relayed by DM with sender and source context.";
@@ -6710,7 +6388,7 @@ function buildInvictusDmPanelEmbed(
       {
         name: "Privacy",
         value:
-          "Messages are forwarded privately and include sender identity plus channel context.",
+          "The recipient receives your message, sender identity, and source channel. If this server has a configured audit-log channel, the same details and full message are copied there.",
         inline: false,
       },
     );
@@ -6767,10 +6445,12 @@ function buildInvictusDmPanelModal(targetUserId: string): ModalBuilder {
 
   return new ModalBuilder()
     .setCustomId(`${INVICTUS_DM_PANEL_MODAL_PREFIX}${targetUserId}`)
-    .setTitle("Message Invictus")
+    .setTitle("Message Superior")
     .setLabelComponents({
       type: ComponentType.Label,
       label: "Your message",
+      description:
+        "Sent to the recipient; full text, sender, and source are copied to the server audit log, if set.",
       component: input.toJSON(),
     });
 }

@@ -357,6 +357,30 @@ describe("v1 to v2 migration", () => {
     }
   });
 
+  it("seeds the legacy Invictus invocation during v1 migration", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "legacy-invocation.db");
+    createLegacyDatabase(dbFile);
+
+    migrateDatabase({
+      dbFile,
+      legacyGuildId: LEGACY_GUILD,
+      environment: migrationEnvironment(),
+    });
+
+    const db = new Database(dbFile, { readonly: true, fileMustExist: true });
+    try {
+      const row = db
+        .prepare("SELECT settings_json FROM guild_settings WHERE guild_id = ?")
+        .get(LEGACY_GUILD) as { settings_json: string };
+      const settings = parseGuildSettingsJson(row.settings_json);
+
+      expect(settings.invocation.keyword).toBe("invictus");
+    } finally {
+      db.close();
+    }
+  });
+
   it("preserves migrated unknown state fields through later runtime updates", () => {
     const root = makeRoot();
     const dbFile = path.join(root, "preserved-state.db");

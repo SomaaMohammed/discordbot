@@ -1,15 +1,16 @@
 import { DateTime } from "luxon";
 import { describe, expect, it, vi } from "vitest";
 import {
-  PermissionFlagsBits,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type GuildMember,
+  type ModalSubmitInteraction,
 } from "discord.js";
 import {
-  __findMissingChannelPermissionsForTests,
+  buildCommandDefinitions,
   handleButtonInteraction,
   handleChatInputCommand,
+  handleModalSubmitInteraction,
 } from "../src/discord/commands.js";
 import { createDefaultGuildSettings } from "../src/guild-settings.js";
 import { buildRolePanelButtonCustomId } from "../src/parity.js";
@@ -87,25 +88,6 @@ type StorageMock = {
   >;
 };
 
-function buildPost(
-  messageId: string,
-  postedAt: string,
-  closed = false,
-): PostRecord {
-  return {
-    message_id: messageId,
-    thread_id: null,
-    channel_id: "123456789",
-    category: "general",
-    question: `Question ${messageId}`,
-    posted_at: postedAt,
-    close_after_hours: 24,
-    closed,
-    closed_at: null,
-    close_reason: null,
-  };
-}
-
 function createStorageMock(
   initialState: CourtState,
   metrics: MetricsShape,
@@ -144,15 +126,7 @@ function createRuntimeMock(storage: StorageMock, now: DateTime): RuntimeMock {
   };
   const settings = createDefaultGuildSettings();
   settings.enabled = true;
-  settings.features.court = true;
-  settings.channels.court = "123456789012345679";
   settings.roles.staff = ["123456789012345777"];
-  settings.courtSchedule = {
-    mode: "auto",
-    hour: 20,
-    minute: 15,
-    dryRun: false,
-  };
 
   const guildRuntime = {
     guildId: GUILD_ID,
@@ -380,39 +354,103 @@ describe("command parity dispatch", () => {
     expect(fetchMember).not.toHaveBeenCalled();
   });
 
-  it("rejects a bot-authored anonymous button without a scoped post record", async () => {
-    const now = DateTime.fromISO("2026-04-19T12:00:00Z");
+  it("opens Superior modals from legacy DM-panel button metadata", async () => {
+    const now = DateTime.fromISO("2026-04-19T11:55:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
-    runtime.guildRuntime.settings.features.anonymousAnswers = true;
-    const reply = vi.fn(async () => undefined);
-    const showModal = vi.fn(async () => undefined);
     const botId = "888888888888888888";
-    const messageId = "999999999999999999";
-    const channelId = "444444444444444444";
+    const targetUserId = "777777777777777777";
+
+    for (const [customId, embeds] of [
+      [`invictus:dm_panel:${targetUserId}`, []],
+      [
+        "invictus:dm_panel",
+        [{ footer: { text: `InvictusDmTarget:${targetUserId}` } }],
+      ],
+    ] as const) {
+      const showModal = vi.fn(async (_modal: unknown) => undefined);
+      const interaction = {
+        guildId: GUILD_ID,
+        guild: { id: GUILD_ID },
+        client: { user: { id: botId } },
+        message: {
+          id: "999999999999999999",
+          guildId: GUILD_ID,
+          author: { id: botId },
+          embeds,
+        },
+        customId,
+        reply: vi.fn(async () => undefined),
+        showModal,
+      } as unknown as ButtonInteraction;
+
+      await handleButtonInteraction(interaction, runtime);
+
+      const modal = showModal.mock.calls[0]?.[0] as {
+        toJSON: () => {
+          custom_id: string;
+          title: string;
+          components?: Array<{ description?: string }>;
+        };
+      };
+      const modalJson = modal.toJSON();
+      expect(modalJson).toMatchObject({
+        custom_id: `invictus:dm_panel_modal:${targetUserId}`,
+        title: "Message Superior",
+      });
+      expect(modalJson.components?.[0]?.description).toContain(
+        "server audit log",
+      );
+    }
+  });
+
+  it("handles a legacy DM-panel modal with Superior visible output", async () => {
+    const now = DateTime.fromISO("2026-04-19T11:57:00Z");
+    const storage = createStorageMock(buildState(), buildMetrics(), []);
+    const runtime = createRuntimeMock(storage, now);
+    const targetUserId = "777777777777777777";
+    const recipientSend = vi.fn(async (_payload: unknown) => undefined);
+    const recipient = {
+      id: targetUserId,
+      toString: () => `<@${targetUserId}>`,
+      send: recipientSend,
+    };
+    const reply = vi.fn(async () => undefined);
     const interaction = {
       guildId: GUILD_ID,
-      guild: { id: GUILD_ID },
-      channelId,
-      client: { user: { id: botId } },
-      message: {
-        id: messageId,
-        guildId: GUILD_ID,
-        channelId,
-        author: { id: botId },
+      guild: {
+        id: GUILD_ID,
+        name: "Guild",
+        members: {
+          fetch: vi.fn(async () => ({ user: recipient })),
+        },
       },
-      customId: "court:anonymous_answer",
+      channel: {
+        isTextBased: () => true,
+        toString: () => "<#444444444444444444>",
+      },
+      user: {
+        id: "555555555555555555",
+        toString: () => "<@555555555555555555>",
+      },
+      customId: `invictus:dm_panel_modal:${targetUserId}`,
+      fields: {
+        getTextInputValue: vi.fn(() => "Legacy panel message"),
+      },
       reply,
-      showModal,
-    } as unknown as ButtonInteraction;
+    } as unknown as ModalSubmitInteraction;
 
-    await handleButtonInteraction(interaction, runtime);
+    await handleModalSubmitInteraction(interaction, runtime);
 
-    expect(storage.getPostRecord).toHaveBeenCalledWith(messageId);
-    expect(showModal).not.toHaveBeenCalled();
+    const dmPayload = recipientSend.mock.calls[0]?.[0] as {
+      embeds: Array<{ toJSON: () => { title?: string } }>;
+    };
+    expect(dmPayload.embeds[0]?.toJSON().title).toBe("Superior Panel Message");
+    expect(storage.recordCommandMetric).toHaveBeenCalledWith(
+      "invictus.dmpanel.forward",
+    );
     expect(reply).toHaveBeenCalledWith({
-      content:
-        "This button is not attached to a current court post in this server.",
+      content: "Your message has been sent.",
       ephemeral: true,
     });
   });
@@ -454,198 +492,67 @@ describe("command parity dispatch", () => {
     );
   });
 
-  it("cancels /court health when channel resolution invalidates the guild", async () => {
-    const now = DateTime.fromISO("2026-04-19T12:15:00Z");
-    const storage = createStorageMock(buildState(), buildMetrics(), []);
-    const runtime = createRuntimeMock(storage, now);
-    const { interaction, reply } = createInteractionMock({
-      commandName: "court",
-      subcommand: "health",
-      isAdmin: true,
-    });
-    let current = true;
-    runtime.guildRuntime.isCurrent = () => current;
-    const guild = interaction.guild as NonNullable<
-      ChatInputCommandInteraction["guild"]
-    >;
-    (
-      guild.channels.fetch as unknown as ReturnType<typeof vi.fn>
-    ).mockImplementation(async () => {
-      current = false;
-      return null;
-    });
-
-    await handleChatInputCommand(interaction, runtime);
-
-    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith(
-      "court.health",
+  it("does not register retired command families", () => {
+    const registeredNames = buildCommandDefinitions().map(
+      (command) => command.toJSON().name,
     );
-    expect(reply).toHaveBeenLastCalledWith({
-      content:
-        "Action cancelled because this server was disabled, removed, purged, or its configuration changed.",
-      ephemeral: true,
-    });
+    expect(registeredNames).not.toContain("invictus");
+    expect(registeredNames).not.toContain("court");
+    expect(registeredNames).not.toContain("questions");
   });
 
-  it("handles /court status with python parity fields and records metric", async () => {
-    const now = DateTime.fromISO("2026-04-19T12:00:00Z");
-    const state = buildState();
-    const posts = [
-      buildPost("1", now.minus({ hours: 2 }).toISO() ?? now.toISO() ?? ""),
-      buildPost("2", now.minus({ hours: 4 }).toISO() ?? now.toISO() ?? ""),
-    ];
-    const storage = createStorageMock(state, buildMetrics(), posts);
-    const runtime = createRuntimeMock(storage, now);
-    const { interaction, reply } = createInteractionMock({
-      commandName: "court",
-      subcommand: "status",
-      isAdmin: true,
-    });
+  it.each([
+    [
+      "court",
+      "status",
+      "The old court and question commands have been retired. Stored legacy data was preserved.",
+    ],
+    [
+      "questions",
+      "audit",
+      "The old court and question commands have been retired. Stored legacy data was preserved.",
+    ],
+    [
+      "invictus",
+      "help",
+      "The legacy `/invictus` command has been retired. Use `/superior` instead.",
+    ],
+    ["superior", "afk", "That legacy subcommand has been retired."],
+    ["fun", "title", "That legacy subcommand has been retired."],
+  ])(
+    "retires stale /%s %s interactions without mutations",
+    async (commandName, subcommand, expectedMessage) => {
+      const now = DateTime.fromISO("2026-04-19T13:19:00Z");
+      const storage = createStorageMock(buildState(), buildMetrics(), []);
+      const runtime = createRuntimeMock(storage, now);
+      const { interaction, reply } = createInteractionMock({
+        commandName,
+        subcommand,
+        isAdmin: true,
+      });
 
-    await handleChatInputCommand(interaction, runtime);
+      await handleChatInputCommand(interaction, runtime);
 
-    expect(storage.recordCommandMetric).toHaveBeenCalledWith("court.status");
-    expect(reply).toHaveBeenCalledTimes(1);
-
-    const payload = reply.mock.calls[0]?.[0] as {
-      content: string;
-      ephemeral: boolean;
-    };
-    expect(payload.ephemeral).toBe(true);
-    expect(payload.content).toContain("**Version:** `0.2.0-test`");
-    expect(payload.content).toContain("**Mode:** `auto`");
-    expect(payload.content).toContain("**Auto Time:** `20:15`");
-    expect(payload.content).not.toContain("UTC");
-    expect(payload.content).toContain("**Recent Memory Size:** `3`");
-    expect(payload.content).toContain("**Used Pool Size:** `2`");
-    expect(payload.content).toContain("**Open Court Threads:** `2`");
-  });
-
-  it("handles /court health without exposing shared database size", async () => {
-    const now = DateTime.fromISO("2026-04-19T13:15:00Z");
-    const state = buildState();
-    const posts = [
-      buildPost("1", now.minus({ hours: 26 }).toISO() ?? now.toISO() ?? ""),
-    ];
-    const storage = createStorageMock(state, buildMetrics(), posts);
-    const runtime = createRuntimeMock(storage, now);
-    const { interaction, reply } = createInteractionMock({
-      commandName: "court",
-      subcommand: "health",
-      isAdmin: true,
-    });
-
-    await handleChatInputCommand(interaction, runtime);
-
-    expect(storage.recordCommandMetric).toHaveBeenCalledWith("court.health");
-    expect(reply).toHaveBeenCalledTimes(1);
-
-    const payload = reply.mock.calls[0]?.[0] as {
-      embeds: Array<{
-        toJSON: () => {
-          description?: string;
-          fields?: Array<{ name: string; value: string }>;
-        };
-      }>;
-      ephemeral: boolean;
-    };
-    expect(payload.ephemeral).toBe(true);
-
-    const embedJson = payload.embeds[0]?.toJSON();
-    expect(embedJson?.description).toContain(
-      `**Now:** \`${now.toFormat("yyyy-LL-dd HH:mm:ss")}\``,
-    );
-    expect(embedJson?.description).not.toContain("Timezone");
-    expect(embedJson?.description).not.toContain("UTC");
-
-    const schedulingField = embedJson?.fields?.find(
-      (field) => field.name === "Scheduling",
-    );
-    expect(schedulingField?.value).toContain("**Auto Time:** `20:15`");
-    expect(schedulingField?.value).not.toContain("UTC");
-
-    const dataField = embedJson?.fields?.find((field) => field.name === "Data");
-    expect(dataField?.value).toContain("**Tenant Storage:** `available`");
-    expect(dataField?.value).not.toContain("KB");
-
-    const warningsField = embedJson?.fields?.find(
-      (field) => field.name === "Warnings",
-    );
-    expect(warningsField?.value).toContain(
-      "Could not resolve the bot member to validate permissions",
-    );
-  });
-
-  it("matches setup permissions when anonymous answers are disabled or enabled", () => {
-    const granted = new Set<bigint>([
-      PermissionFlagsBits.ViewChannel,
-      PermissionFlagsBits.SendMessages,
-      PermissionFlagsBits.EmbedLinks,
-    ]);
-    const channel = {
-      isThread: vi.fn(() => false),
-      permissionsFor: vi.fn(() => ({
-        has: (permission: bigint) => granted.has(permission),
-      })),
-    };
-
-    expect(__findMissingChannelPermissionsForTests(channel, {}, false)).toEqual(
-      ["Read Message History"],
-    );
-    expect(__findMissingChannelPermissionsForTests(channel, {}, true)).toEqual([
-      "Read Message History",
-      "Create Public Threads",
-      "Send Messages In Threads",
-      "Manage Threads",
-    ]);
-  });
-
-  it("reports a thread court target as incompatible with anonymous answers", async () => {
-    const now = DateTime.fromISO("2026-04-19T13:18:00Z");
-    const storage = createStorageMock(buildState(), buildMetrics(), []);
-    const runtime = createRuntimeMock(storage, now);
-    runtime.guildRuntime.settings.features.anonymousAnswers = true;
-    const { interaction, reply } = createInteractionMock({
-      commandName: "court",
-      subcommand: "health",
-      isAdmin: true,
-    });
-    const targetId = "123456789012345679";
-    const target = {
-      id: targetId,
-      guildId: GUILD_ID,
-      isThread: vi.fn(() => true),
-      permissionsFor: vi.fn(() => ({ has: vi.fn(() => true) })),
-      toString: vi.fn(() => "<#123456789012345679>"),
-    };
-    const guild = interaction.guild as NonNullable<
-      ChatInputCommandInteraction["guild"]
-    >;
-    (guild.channels.cache as Map<string, unknown>).set(targetId, target);
-    (guild.members as unknown as { me: GuildMember | null }).me =
-      {} as GuildMember;
-
-    await handleChatInputCommand(interaction, runtime);
-
-    const payload = reply.mock.calls.at(-1)?.[0] as {
-      embeds: Array<{
-        toJSON: () => { fields?: Array<{ name: string; value: string }> };
-      }>;
-    };
-    const warnings = payload.embeds[0]
-      ?.toJSON()
-      .fields?.find((field) => field.name === "Warnings")?.value;
-    expect(warnings).toContain(
-      "Court channel must be a text or announcement channel while anonymous answers are enabled",
-    );
-  });
+      expect(reply).toHaveBeenCalledOnce();
+      expect(reply).toHaveBeenCalledWith({
+        content: expectedMessage,
+        ephemeral: true,
+      });
+      for (const operation of Object.values(storage)) {
+        expect(operation).not.toHaveBeenCalled();
+      }
+      expect(runtime.guildRuntime.saveSettings).not.toHaveBeenCalled();
+      expect(runtime.guildRuntime.setEnabled).not.toHaveBeenCalled();
+      expect(interaction.guild?.members.fetch).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not mark a backfill running when the acknowledgement fails", async () => {
     const now = DateTime.fromISO("2026-04-19T13:20:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, reply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "backfillstats",
       isAdmin: true,
     });
@@ -669,7 +576,7 @@ describe("command parity dispatch", () => {
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "backfillstats",
       isAdmin: true,
     });
@@ -691,183 +598,12 @@ describe("command parity dispatch", () => {
     );
   });
 
-  it("handles /court analytics and includes top command/category lines", async () => {
-    const now = DateTime.fromISO("2026-04-19T15:30:00Z");
-    const todayIso = now.toISO() ?? "";
-    const yesterdayIso = now.minus({ days: 1 }).toISO() ?? "";
-    const state = buildState();
-    const posts = [
-      buildPost("1", todayIso),
-      buildPost("2", yesterdayIso),
-      buildPost("3", yesterdayIso, true),
-    ];
-
-    const metrics = buildMetrics({
-      posts_total: 9,
-      posts_auto: 5,
-      posts_manual: 3,
-      custom_posts: 1,
-      answers_total: 12,
-      posts_by_category: {
-        general: 4,
-        gaming: 2,
-      },
-      command_usage: {
-        "court.status": 10,
-        "court.post": 7,
-      },
-    });
-
-    const storage = createStorageMock(state, metrics, posts);
-    const runtime = createRuntimeMock(storage, now);
-    const { interaction, reply } = createInteractionMock({
-      commandName: "court",
-      subcommand: "analytics",
-      isAdmin: true,
-    });
-
-    await handleChatInputCommand(interaction, runtime);
-
-    expect(storage.recordCommandMetric).toHaveBeenCalledWith("court.analytics");
-    expect(reply).toHaveBeenCalledTimes(1);
-
-    const payload = reply.mock.calls[0]?.[0] as {
-      embeds: Array<{
-        toJSON: () => { fields?: Array<{ name: string; value: string }> };
-      }>;
-      ephemeral: boolean;
-    };
-    expect(payload.ephemeral).toBe(true);
-
-    const embedJson = payload.embeds[0]?.toJSON();
-    const topCommands = embedJson?.fields?.find(
-      (field) => field.name === "Top Commands",
-    );
-    const topCategories = embedJson?.fields?.find(
-      (field) => field.name === "Top Categories",
-    );
-
-    expect(topCommands?.value).toContain("`court.status`: `10`");
-    expect(topCategories?.value).toContain("`general`: `4`");
-  });
-
-  it("handles /court dryrun lifecycle mutation and records metric", async () => {
-    const now = DateTime.fromISO("2026-04-19T16:00:00Z");
-    const state = buildState({
-      last_dry_run_date: "2026-04-18",
-    });
-    const storage = createStorageMock(state, buildMetrics(), []);
-    const runtime = createRuntimeMock(storage, now);
-    const { interaction, reply } = createInteractionMock({
-      commandName: "court",
-      subcommand: "dryrun",
-      isAdmin: true,
-      boolOptions: { enabled: true },
-    });
-
-    await handleChatInputCommand(interaction, runtime);
-
-    expect(runtime.guildRuntime.saveSettings).toHaveBeenCalledTimes(1);
-    expect(storage.updateStateAtomic).toHaveBeenCalledTimes(1);
-    expect(storage.recordCommandMetric).toHaveBeenCalledWith("court.dryrun");
-
-    expect(runtime.guildRuntime.settings.courtSchedule.dryRun).toBe(true);
-
-    const payload = reply.mock.calls[0]?.[0] as {
-      content: string;
-      ephemeral: boolean;
-    };
-    expect(payload.ephemeral).toBe(true);
-    expect(payload.content).toContain("`enabled`");
-  });
-
-  it("does not mutate court state after a settings save is invalidated", async () => {
-    const now = DateTime.fromISO("2026-04-19T16:05:00Z");
-    const storage = createStorageMock(buildState(), buildMetrics(), []);
-    const runtime = createRuntimeMock(storage, now);
-    const { interaction, reply } = createInteractionMock({
-      commandName: "court",
-      subcommand: "dryrun",
-      isAdmin: true,
-      boolOptions: { enabled: true },
-    });
-    let current = true;
-    runtime.guildRuntime.isCurrent = () => current;
-    vi.mocked(runtime.guildRuntime.saveSettings).mockImplementation(
-      async (settings) => {
-        runtime.guildRuntime.settings = structuredClone(settings);
-        current = false;
-        return runtime.guildRuntime.settings;
-      },
-    );
-
-    await handleChatInputCommand(interaction, runtime);
-
-    expect(storage.updateStateAtomic).not.toHaveBeenCalled();
-    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith(
-      "court.dryrun",
-    );
-    expect(reply).toHaveBeenLastCalledWith({
-      content:
-        "Action cancelled because this server was disabled, removed, purged, or its configuration changed.",
-      ephemeral: true,
-    });
-  });
-
-  it("does not record a manual-post command after post completion invalidates the guild", async () => {
-    const now = DateTime.fromISO("2026-04-19T16:10:00Z");
-    const storage = createStorageMock(buildState(), buildMetrics(), []);
-    const runtime = createRuntimeMock(storage, now);
-    const { interaction, editReply } = createInteractionMock({
-      commandName: "court",
-      subcommand: "post",
-      isAdmin: true,
-    });
-    let current = true;
-    runtime.guildRuntime.isCurrent = () => current;
-    const send = vi.fn(async () => ({ id: "900000000000000001" }));
-    const targetChannel = {
-      id: runtime.guildRuntime.settings.channels.court,
-      guildId: GUILD_ID,
-      isThread: vi.fn(() => true),
-      send,
-      toString: vi.fn(() => "<#123456789012345679>"),
-    };
-    const guild = interaction.guild as NonNullable<
-      ChatInputCommandInteraction["guild"]
-    >;
-    (
-      guild.channels.fetch as unknown as ReturnType<typeof vi.fn>
-    ).mockResolvedValue(targetChannel);
-    Object.assign(storage, {
-      pickQuestion: vi.fn(() => ["general", "A"]),
-      upsertPostRow: vi.fn(),
-      registerUsedQuestion: vi.fn(),
-      recordPostMetric: vi.fn(),
-    });
-    storage.updateStateAtomic.mockImplementation((mutator) => {
-      const state = storage.getState();
-      mutator(state);
-      current = false;
-      return state;
-    });
-
-    await handleChatInputCommand(interaction, runtime);
-
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith("court.post");
-    expect(editReply).toHaveBeenLastCalledWith({
-      content:
-        "Action cancelled because this server was disabled, removed, purged, or its configuration changed.",
-    });
-  });
-
-  it("blocks /invictus lock for non-admin members", async () => {
+  it("blocks /superior lock for non-admin members", async () => {
     const now = DateTime.fromISO("2026-04-19T18:00:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, reply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "lock",
       isAdmin: false,
       ownerId: "another-owner",
@@ -894,7 +630,7 @@ describe("command parity dispatch", () => {
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, reply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "timeout",
       isAdmin: true,
     });
@@ -924,46 +660,6 @@ describe("command parity dispatch", () => {
     await handleChatInputCommand(interaction, runtime);
 
     expect(interaction.options.getUser).not.toHaveBeenCalled();
-    expect(reply).toHaveBeenLastCalledWith({
-      content:
-        "Action cancelled because this server was disabled, removed, purged, or its configuration changed.",
-      ephemeral: true,
-    });
-  });
-
-  it("does not update royal AFK state after the role lookup invalidates the guild", async () => {
-    const now = DateTime.fromISO("2026-04-19T18:57:00Z");
-    const storage = createStorageMock(buildState(), buildMetrics(), []);
-    const runtime = createRuntimeMock(storage, now);
-    runtime.guildRuntime.settings.features.royalAfk = true;
-    runtime.guildRuntime.settings.roles.emperor = "777777777777777777";
-    const { interaction, reply } = createInteractionMock({
-      commandName: "invictus",
-      subcommand: "afk",
-    });
-    let current = true;
-    runtime.guildRuntime.isCurrent = () => current;
-    const royalActor = {
-      id: "1001",
-      roles: { cache: { has: vi.fn(() => true) } },
-      toString: vi.fn(() => "<@1001>"),
-    } as unknown as GuildMember;
-    const guild = interaction.guild as NonNullable<
-      ChatInputCommandInteraction["guild"]
-    >;
-    (
-      guild.members.fetch as unknown as ReturnType<typeof vi.fn>
-    ).mockImplementation(async () => {
-      current = false;
-      return royalActor;
-    });
-
-    await handleChatInputCommand(interaction, runtime);
-
-    expect(storage.updateStateAtomic).not.toHaveBeenCalled();
-    expect(storage.recordCommandMetric).not.toHaveBeenCalledWith(
-      "invictus.afk",
-    );
     expect(reply).toHaveBeenLastCalledWith({
       content:
         "Action cancelled because this server was disabled, removed, purged, or its configuration changed.",
@@ -1021,12 +717,12 @@ describe("command parity dispatch", () => {
     });
   });
 
-  it("handles /invictus rolepanel with missing channel context", async () => {
+  it("handles /superior rolepanel with missing channel context", async () => {
     const now = DateTime.fromISO("2026-04-19T19:00:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, reply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "rolepanel",
       isAdmin: true,
     });
@@ -1044,12 +740,12 @@ describe("command parity dispatch", () => {
     );
   });
 
-  it("handles /invictus dmpanel with missing channel context", async () => {
+  it("handles /superior dmpanel with missing channel context", async () => {
     const now = DateTime.fromISO("2026-04-19T19:10:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, reply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "dmpanel",
       isAdmin: true,
     });
@@ -1067,12 +763,70 @@ describe("command parity dispatch", () => {
     );
   });
 
-  it("opens the /invictus say modal when no message_file attachment is provided", async () => {
+  it("creates a Superior-branded DM panel with audit-log disclosure", async () => {
+    const now = DateTime.fromISO("2026-04-19T19:15:00Z");
+    const storage = createStorageMock(buildState(), buildMetrics(), []);
+    const runtime = createRuntimeMock(storage, now);
+    const { interaction, reply } = createInteractionMock({
+      commandName: "superior",
+      subcommand: "dmpanel",
+      isAdmin: true,
+    });
+    const send = vi.fn(async (_payload: unknown) => ({ id: "panel-message" }));
+    const targetChannel = {
+      id: "123456789012345670",
+      guildId: GUILD_ID,
+      isThread: vi.fn(() => true),
+      permissionsFor: vi.fn(() => ({ has: vi.fn(() => true) })),
+      toString: vi.fn(() => "<#123456789012345670>"),
+      send,
+    };
+    const getChannel = interaction.options.getChannel as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    getChannel.mockImplementation((name: string) =>
+      name === "channel" ? targetChannel : null,
+    );
+    const guild = interaction.guild as NonNullable<
+      ChatInputCommandInteraction["guild"]
+    >;
+    (guild.members as unknown as { me: GuildMember | null }).me =
+      {} as GuildMember;
+
+    await handleChatInputCommand(interaction, runtime);
+
+    const sentPayload = send.mock.calls[0]?.[0] as {
+      embeds: Array<{
+        toJSON: () => {
+          title?: string;
+          fields?: Array<{ name: string; value: string }>;
+        };
+      }>;
+      components: Array<{
+        toJSON: () => { components?: Array<{ label?: string }> };
+      }>;
+    };
+    const embed = sentPayload.embeds[0]?.toJSON();
+    expect(embed?.title).toBe("Message Superior");
+    expect(
+      embed?.fields?.find((field) => field.name === "Privacy")?.value,
+    ).toContain("full message are copied there");
+    expect(sentPayload.components[0]?.toJSON().components?.[0]?.label).toBe(
+      "Message Superior",
+    );
+    expect(reply).toHaveBeenCalledWith({
+      content:
+        "DM panel posted in <#123456789012345670>. Button clicks will relay messages to your DMs.",
+      ephemeral: true,
+    });
+  });
+
+  it("opens the /superior say modal when no message_file attachment is provided", async () => {
     const now = DateTime.fromISO("2026-04-19T19:20:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, showModal, deferReply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "say",
       isAdmin: true,
     });
@@ -1100,13 +854,13 @@ describe("command parity dispatch", () => {
     );
   });
 
-  it("supports /invictus say message_file and chunks long content", async () => {
+  it("supports /superior say message_file and chunks long content", async () => {
     const now = DateTime.fromISO("2026-04-19T19:25:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, showModal, deferReply, editReply } =
       createInteractionMock({
-        commandName: "invictus",
+        commandName: "superior",
         subcommand: "say",
         isAdmin: true,
       });
@@ -1159,12 +913,12 @@ describe("command parity dispatch", () => {
     expect(payload.content).toContain("in 2 parts");
   });
 
-  it("rejects an /invictus say channel owned by another guild", async () => {
+  it("rejects a /superior say channel owned by another guild", async () => {
     const now = DateTime.fromISO("2026-04-19T19:27:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, reply, showModal } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "say",
       isAdmin: true,
     });
@@ -1187,12 +941,12 @@ describe("command parity dispatch", () => {
     });
   });
 
-  it("blocks /invictus timeout when target is self", async () => {
+  it("blocks /superior timeout when target is self", async () => {
     const now = DateTime.fromISO("2026-04-19T19:30:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, reply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "timeout",
       isAdmin: true,
     });
@@ -1247,7 +1001,7 @@ describe("command parity dispatch", () => {
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, reply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "timeout",
       isAdmin: true,
     });
@@ -1307,7 +1061,7 @@ describe("command parity dispatch", () => {
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, editReply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "muteall",
       isAdmin: true,
       boolOptions: { dry_run: true },
@@ -1368,13 +1122,13 @@ describe("command parity dispatch", () => {
     ["muteall", "no server-wide timeout was attempted"],
     ["unmuteall", "no server-wide timeout removal was attempted"],
   ])(
-    "stops /invictus %s when the complete member fetch fails",
+    "stops /superior %s when the complete member fetch fails",
     async (subcommand, expectedMessage) => {
       const now = DateTime.fromISO("2026-04-19T19:34:00Z");
       const storage = createStorageMock(buildState(), buildMetrics(), []);
       const runtime = createRuntimeMock(storage, now);
       const { interaction, editReply } = createInteractionMock({
-        commandName: "invictus",
+        commandName: "superior",
         subcommand,
         isAdmin: true,
       });
@@ -1424,12 +1178,12 @@ describe("command parity dispatch", () => {
     },
   );
 
-  it("cancels /invictus timeout when the guild generation changes during member lookup", async () => {
+  it("cancels /superior timeout when the guild generation changes during member lookup", async () => {
     const now = DateTime.fromISO("2026-04-19T19:35:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, reply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "timeout",
       isAdmin: true,
     });
@@ -1496,12 +1250,12 @@ describe("command parity dispatch", () => {
     );
   });
 
-  it("stops /invictus mutemany after invalidation during the first timeout", async () => {
+  it("stops /superior mutemany after invalidation during the first timeout", async () => {
     const now = DateTime.fromISO("2026-04-19T19:40:00Z");
     const storage = createStorageMock(buildState(), buildMetrics(), []);
     const runtime = createRuntimeMock(storage, now);
     const { interaction, editReply } = createInteractionMock({
-      commandName: "invictus",
+      commandName: "superior",
       subcommand: "mutemany",
       isAdmin: true,
     });

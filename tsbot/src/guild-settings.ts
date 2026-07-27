@@ -205,7 +205,7 @@ export function createDefaultGuildSettings(): GuildSettings {
       empress: "Empress",
     },
     invocation: {
-      keyword: "invictus",
+      keyword: "superior",
       aliases: [],
     },
     courtSchedule: {

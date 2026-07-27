@@ -153,6 +153,10 @@ describe("guild-scoped storage", () => {
     storage.ensureGuild(GUILD_A);
     const a = storage.forGuild(GUILD_A);
     a.setQuestions({ general: ["Retained?"] });
+    const legacyBrandedSettings = a.getSettings();
+    legacyBrandedSettings.invocation.keyword = "invictus";
+    legacyBrandedSettings.invocation.aliases = ["legacy court"];
+    a.saveSettings(legacyBrandedSettings);
     storage.setGuildEnabled(
       GUILD_A,
       true,
@@ -173,6 +177,10 @@ describe("guild-scoped storage", () => {
     expect(storage.forGuild(GUILD_A).getQuestions().general).toEqual([
       "Retained?",
     ]);
+    expect(storage.forGuild(GUILD_A).getSettings().invocation).toEqual({
+      keyword: "invictus",
+      aliases: ["legacy court"],
+    });
   });
 
   it("purges only the selected guild and rejects cross-guild imports", () => {
@@ -590,7 +598,7 @@ describe("guild-scoped storage", () => {
     guild.metricsSet("custom", 7);
 
     const transformedSettings = structuredClone(guild.exportData());
-    transformedSettings.settings.invocation.keyword = "  INVICTUS  ";
+    transformedSettings.settings.invocation.keyword = "  SUPERIOR  ";
     expect(() => guild.importData(transformedSettings)).toThrow(/normalized/i);
 
     const ignoredPostSnapshot = structuredClone(guild.exportData());
