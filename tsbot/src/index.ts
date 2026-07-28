@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadProcessConfig } from "./config.js";
+import { loadProcessConfig, resolveApplicationRoot } from "./config.js";
 import { createDiscordClient } from "./discord/bot.js";
 import { logError, logInfo } from "./logging.js";
 import { createRuntime } from "./runtime.js";
@@ -19,7 +19,7 @@ if (path.basename(tsbotRoot) === "dist") {
   tsbotRoot = path.resolve(tsbotRoot, "..");
 }
 
-const repoRoot = path.resolve(tsbotRoot, "..");
+const repoRoot = resolveApplicationRoot(path.resolve(tsbotRoot, ".."));
 
 async function main(): Promise<void> {
   const config = loadProcessConfig(repoRoot);

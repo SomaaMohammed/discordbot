@@ -45,7 +45,7 @@ Then configure and enable each guild with `/setup`.
 
 ## Upgrade from schema v2
 
-Build version 5.0.0 first, but do not start it against v2. A dry run performs classification and conversion checks without committing:
+Build version 5.0.1 first, but do not start it against v2. A dry run performs classification and conversion checks without committing:
 
 ```bash
 cd tsbot
@@ -77,7 +77,7 @@ Review `/setup status` for every guild before enabling anything marked for revie
 
 ### Schema v1 boundary
 
-Version 5.0.0 does not migrate schema v1. Upgrade that database with the final 4.0.0 release until it validates as schema v2, stop the old process, retain its validated backup, and only then follow the v2-to-v3 procedure above. Never rename an old database and assume that changes its schema.
+Version 5 does not migrate schema v1. Upgrade that database with the final 4.0.0 release until it validates as schema v2, stop the old process, retain its validated backup, and only then follow the v2-to-v3 procedure above. Never rename an old database and assume that changes its schema.
 
 ## Backup and restore
 

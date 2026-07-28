@@ -31,7 +31,7 @@ describe("Windows portable packaging", () => {
 
     expect(packageJson).toMatchObject({
       name: "superior-discord-bot",
-      version: "5.0.0",
+      version: "5.0.1",
       private: true,
     });
     expect(packageLock).toMatchObject({
@@ -77,6 +77,8 @@ describe("Windows portable packaging", () => {
     const smokeTest = read("windows/test-portable.ps1");
     const reproducibilityTest = read("windows/test-reproducible.ps1");
     const launcher = read("windows/launcher/Program.cs");
+    const standaloneLauncher = read("windows/standalone/Program.cs");
+    const standaloneSmokeTest = read("windows/test-standalone.ps1");
     const fallback = read("windows/templates/Start Superior Bot.cmd");
 
     expect(builder).toContain('$NodeVersion = "22.12.0"');
@@ -105,8 +107,13 @@ describe("Windows portable packaging", () => {
     expect(builder).toContain('"better_sqlite3.node"');
     expect(builder).toContain("write-deterministic-zip.mjs");
     expect(builder).toContain("MANIFEST.sha256");
+    expect(builder).toContain("SuperiorBot.Payload.zip");
+    expect(builder).toContain("$StandaloneOutput");
     expect(reproducibilityTest).toContain(
       "Portable rebuild was not byte-for-byte reproducible",
+    );
+    expect(reproducibilityTest).toContain(
+      "Standalone rebuild was not byte-for-byte reproducible",
     );
 
     for (const source of [launcher, fallback]) {
@@ -117,6 +124,12 @@ describe("Windows portable packaging", () => {
     expect(smokeTest).toContain("no Discord login was attempted");
     expect(smokeTest).toContain("better_sqlite3.node");
     expect(smokeTest).toContain("MANIFEST.sha256");
+    expect(standaloneLauncher).toContain("SUPERIOR_APPLICATION_ROOT");
+    expect(standaloneLauncher).toContain("ExtractArchiveSafely");
+    expect(standaloneLauncher).toContain("LocalApplicationData");
+    expect(standaloneSmokeTest).toContain(
+      "Standalone executable, application-root, and native SQLite smoke checks passed.",
+    );
   });
 
   it("writes identical ZIP bytes across source paths, mtimes, and creation order", () => {
@@ -182,6 +195,7 @@ describe("Windows portable packaging", () => {
     expect(workflow).toContain("Build Windows portable artifact");
     expect(workflow).toContain("npm run package:win:verify");
     expect(workflow).toContain("windows/test-portable.ps1");
+    expect(workflow).toContain("windows/test-standalone.ps1");
     expect(workflow).toContain("actions/upload-artifact@v4");
   });
 });

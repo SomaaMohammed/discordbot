@@ -1,6 +1,6 @@
 {
   "name": "superior-discord-bot",
-  "version": "5.0.0",
+  "version": "5.0.1",
   "description": "Multi-server utility and moderation runtime for Superior",
   "private": true,
   "main": "dist/src/index.js",
@@ -15,7 +15,7 @@
     "format": "prettier --write .. --config ../.prettierrc.json --ignore-path ../.prettierignore",
     "format:check": "prettier --check .. --config ../.prettierrc.json --ignore-path ../.prettierignore",
     "migrate": "tsx src/storage/migrate-cli.ts",
-    "package:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ../windows/build-portable.ps1",
+    "package:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ../windows/build-portable.ps1 -StandaloneOutput SuperiorBot.exe",
     "package:win:verify": "powershell -NoProfile -ExecutionPolicy Bypass -File ../windows/test-reproducible.ps1",
     "start": "node dist/src/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",

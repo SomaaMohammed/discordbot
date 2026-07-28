@@ -34,6 +34,16 @@ export function loadEnvironmentFile(repoRoot: string): void {
   }
 }
 
+export function resolveApplicationRoot(defaultRoot: string): string {
+  const configured = String(process.env.SUPERIOR_APPLICATION_ROOT ?? "").trim();
+  if (!configured) {
+    return defaultRoot;
+  }
+  return path.isAbsolute(configured)
+    ? path.normalize(configured)
+    : path.resolve(defaultRoot, configured);
+}
+
 export function resolveEnvironmentFile(repoRoot: string): string {
   const configured = String(process.env.ENV_FILE ?? "").trim();
   if (!configured) {

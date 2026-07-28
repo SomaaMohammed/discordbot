@@ -1,2 +1,2 @@
 /** Package version reported by runtime health and portable launchers. */
-export const PACKAGE_VERSION = "5.0.0";
+export const PACKAGE_VERSION = "5.0.1";

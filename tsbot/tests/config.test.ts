@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   loadProcessConfig,
+  resolveApplicationRoot,
   resolveDatabaseFile,
   resolveEnvironmentFile,
 } from "../src/config.js";
@@ -15,6 +16,7 @@ const ENV_KEYS = [
   "DEV_GUILD_IDS",
   "DISCORD_TOKEN",
   "ENV_FILE",
+  "SUPERIOR_APPLICATION_ROOT",
 ] as const;
 
 let environmentSnapshot: Record<string, string | undefined>;
@@ -44,6 +46,14 @@ afterEach(() => {
 });
 
 describe("configuration", () => {
+  it("uses an explicit application root for a self-extracting launcher", () => {
+    const defaultRoot = makeRoot();
+    const standaloneRoot = path.join(defaultRoot, "standalone-data");
+    process.env.SUPERIOR_APPLICATION_ROOT = standaloneRoot;
+
+    expect(resolveApplicationRoot(defaultRoot)).toBe(standaloneRoot);
+  });
+
   it("defaults fresh installs to superior.db", () => {
     const root = makeRoot();
     expect(resolveDatabaseFile(root)).toBe(path.join(root, "superior.db"));

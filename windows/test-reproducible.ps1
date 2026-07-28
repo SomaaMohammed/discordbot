@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$OutputDirectory = "release"
+    [string]$OutputDirectory = "release",
+    [string]$StandaloneOutput = "SuperiorBot.exe"
 )
 
 Set-StrictMode -Version Latest
@@ -19,17 +20,29 @@ else {
     [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot $OutputDirectory))
 }
 $Artifact = Join-Path $OutputRoot $ArtifactName
+$StandaloneArtifact = if ([System.IO.Path]::IsPathRooted($StandaloneOutput)) {
+    [System.IO.Path]::GetFullPath($StandaloneOutput)
+}
+else {
+    [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot $StandaloneOutput))
+}
 
 Write-Host "Building the first portable artifact..."
-& $BuildScript -OutputDirectory $OutputDirectory
+& $BuildScript -OutputDirectory $OutputDirectory -StandaloneOutput $StandaloneArtifact
 $FirstHash = (Get-FileHash -LiteralPath $Artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+$FirstStandaloneHash = (Get-FileHash -LiteralPath $StandaloneArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
 
 Write-Host "Rebuilding from clean staging to verify byte-for-byte reproducibility..."
-& $BuildScript -OutputDirectory $OutputDirectory
+& $BuildScript -OutputDirectory $OutputDirectory -StandaloneOutput $StandaloneArtifact
 $SecondHash = (Get-FileHash -LiteralPath $Artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+$SecondStandaloneHash = (Get-FileHash -LiteralPath $StandaloneArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
 
 if ($FirstHash -ne $SecondHash) {
     throw "Portable rebuild was not byte-for-byte reproducible: $FirstHash != $SecondHash"
 }
+if ($FirstStandaloneHash -ne $SecondStandaloneHash) {
+    throw "Standalone rebuild was not byte-for-byte reproducible: $FirstStandaloneHash != $SecondStandaloneHash"
+}
 
 Write-Host "Reproducible portable SHA-256: $SecondHash"
+Write-Host "Reproducible standalone SHA-256: $SecondStandaloneHash"

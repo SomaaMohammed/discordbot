@@ -4,14 +4,13 @@ Superior is a neutral, multi-server Discord utility and moderation bot. One proc
 
 ## Windows quick start
 
-The portable Windows x64 release includes its own Node.js runtime and native SQLite dependency, so Node does not need to be installed.
+The repository-root `SuperiorBot.exe` is a self-extracting Windows x64 build. It includes its own Node.js runtime and native SQLite dependency, so no ZIP extraction or separate Node installation is needed.
 
-1. Download `SuperiorBot-5.0.0-win-x64.zip` from the CI artifact or release and extract the whole folder.
-2. Copy `.env.example` to `.env` beside `SuperiorBot.exe`, then add the Discord token.
-3. Run `SuperiorBot.exe --check`. This validates configuration and native SQLite without logging in to Discord or creating a database.
-4. Double-click `SuperiorBot.exe` to start. `Start Superior Bot.cmd` is provided as a fallback launcher.
+1. Copy `.env.example` to `.env` beside `SuperiorBot.exe`, then add the Discord token.
+2. Run `SuperiorBot.exe --check`. This validates configuration and native SQLite without logging in to Discord or creating a database.
+3. Double-click `SuperiorBot.exe` to start.
 
-The default database is `superior.db` beside the launcher. Keep the complete extracted directory together. See the [Windows guide](docs/windows.md) for Discord setup, upgrades, backups, and troubleshooting.
+The first launch places the immutable bundled runtime in the current Windows user's local application-data cache. Configuration and the default `superior.db` remain beside the visible executable. The versioned portable ZIP is still produced for advanced maintenance that needs the bundled database tools. See the [Windows guide](docs/windows.md) for Discord setup, upgrades, backups, and troubleshooting.
 
 ## Active capabilities
 
@@ -63,4 +62,4 @@ Do not use `npm run dev` or `npm start` as a smoke test: both can log in to Disc
 
 The policy documents are publication drafts. Replace their operator and contact placeholders, verify hosting and retention facts, and obtain appropriate review before linking them from a public Discord application.
 
-Local `.env` files, SQLite databases and sidecars, backups, dependencies, build output, portable artifacts, logs, and editor state are ignored and must not be committed.
+Local `.env` files, SQLite databases and sidecars, backups, dependencies, intermediate build output, versioned portable ZIPs, logs, and editor state are ignored and must not be committed. The repository-root `SuperiorBot.exe` is the deliberate tracked release artifact.

@@ -8,6 +8,7 @@ param(
     [string]$ReferenceAssembliesVersion = "1.0.3",
     [string]$ReferenceAssembliesPackageSha256 = "8a7e348538e7eb91351696911689f49e3d4f63f8bab517432bbe159b8b1104a2",
     [string]$BetterSqlite3BinarySha256 = "8c041ef57dd1bb55b0032306594310625b7a7a374bc48956e0858645f56919c4",
+    [string]$StandaloneOutput = "",
     [switch]$KeepStaging
 )
 
@@ -163,6 +164,16 @@ else {
 $FinalArchive = Join-Path $OutputRoot "$ArtifactName.zip"
 $FinalChecksum = "$FinalArchive.sha256"
 $WorkArchive = Join-Path $WorkRoot "$ArtifactName.zip"
+$StandaloneWorkOutput = Join-Path $WorkRoot "SuperiorBot-standalone.exe"
+$StandaloneTarget = if ([string]::IsNullOrWhiteSpace($StandaloneOutput)) {
+    $null
+}
+elseif ([System.IO.Path]::IsPathRooted($StandaloneOutput)) {
+    [System.IO.Path]::GetFullPath($StandaloneOutput)
+}
+else {
+    [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot $StandaloneOutput))
+}
 
 New-Item -ItemType Directory -Path $WorkRoot, $CacheRoot, $OutputRoot -Force | Out-Null
 Remove-WorkItem -Path $StageRoot
@@ -172,6 +183,9 @@ Remove-WorkItem -Path $ReferenceAssembliesExtractRoot
 Remove-WorkItem -Path $LauncherSourceRoot
 if (Test-Path -LiteralPath $WorkArchive) {
     Remove-Item -LiteralPath $WorkArchive -Force
+}
+if (Test-Path -LiteralPath $StandaloneWorkOutput) {
+    Remove-Item -LiteralPath $StandaloneWorkOutput -Force
 }
 
 try {
@@ -296,7 +310,9 @@ try {
     $CompilerReferences = @(
         (Join-Path $ReferenceRoot "mscorlib.dll"),
         (Join-Path $ReferenceRoot "System.dll"),
-        (Join-Path $ReferenceRoot "System.Core.dll")
+        (Join-Path $ReferenceRoot "System.Core.dll"),
+        (Join-Path $ReferenceRoot "System.IO.Compression.dll"),
+        (Join-Path $ReferenceRoot "System.IO.Compression.FileSystem.dll")
     )
     $MissingCompilerReferences = @(
         $CompilerReferences | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }
@@ -397,6 +413,50 @@ try {
         $Utf8NoBom
     )
 
+    if ($null -ne $StandaloneTarget) {
+        $StandaloneSource = Join-Path $WindowsDirectory "standalone\Program.cs"
+        if (-not (Test-Path -LiteralPath $StandaloneSource -PathType Leaf)) {
+            throw "Cannot find the standalone launcher source: $StandaloneSource"
+        }
+        $CanonicalStandaloneSource = Join-Path $LauncherSourceRoot "StandaloneProgram.cs"
+        $StandaloneText = [System.IO.File]::ReadAllText($StandaloneSource)
+        $StandaloneText = $StandaloneText.Replace("`r`n", "`n").Replace("`r", "`n")
+        [System.IO.File]::WriteAllText($CanonicalStandaloneSource, $StandaloneText, $Utf8NoBom)
+
+        Invoke-NativeChecked -Executable $Compiler -Arguments @(
+            "/nologo",
+            "/noconfig",
+            "/nostdlib+",
+            "/deterministic+",
+            "/debug-",
+            "/optimize+",
+            "/langversion:7.3",
+            "/platform:x64",
+            "/target:exe",
+            "/pathmap:$LauncherSourceRoot=/_/windows/standalone",
+            "/reference:$($CompilerReferences[0])",
+            "/reference:$($CompilerReferences[1])",
+            "/reference:$($CompilerReferences[2])",
+            "/reference:$($CompilerReferences[3])",
+            "/reference:$($CompilerReferences[4])",
+            "/resource:$FinalArchive,SuperiorBot.Payload.zip",
+            "/out:$StandaloneWorkOutput",
+            $CanonicalStandaloneSource
+        ) -WorkingDirectory $RepositoryRoot
+
+        $StandaloneParent = Split-Path -Parent $StandaloneTarget
+        if (-not (Test-Path -LiteralPath $StandaloneParent -PathType Container)) {
+            New-Item -ItemType Directory -Path $StandaloneParent -Force | Out-Null
+        }
+        if (Test-Path -LiteralPath $StandaloneTarget) {
+            Remove-Item -LiteralPath $StandaloneTarget -Force
+        }
+        Move-Item -LiteralPath $StandaloneWorkOutput -Destination $StandaloneTarget
+        $StandaloneHash = (Get-FileHash -LiteralPath $StandaloneTarget -Algorithm SHA256).Hash.ToLowerInvariant()
+        Write-Host "Standalone executable: $StandaloneTarget"
+        Write-Host "Standalone SHA-256: $StandaloneHash"
+    }
+
     Write-Host "Portable artifact: $FinalArchive"
     Write-Host "SHA-256: $ArchiveHash"
 }
@@ -414,6 +474,9 @@ finally {
         Remove-WorkItem -Path $LauncherSourceRoot
         if (Test-Path -LiteralPath $WorkArchive) {
             Remove-Item -LiteralPath $WorkArchive -Force
+        }
+        if (Test-Path -LiteralPath $StandaloneWorkOutput) {
+            Remove-Item -LiteralPath $StandaloneWorkOutput -Force
         }
     }
 }

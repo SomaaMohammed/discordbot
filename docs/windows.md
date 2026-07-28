@@ -1,12 +1,12 @@
-# Windows portable guide
+# Windows guide
 
-The Windows x64 ZIP is designed for a laptop or desktop and includes `SuperiorBot.exe`, a command-file fallback, an exact Node.js runtime, compiled application files, production dependencies, `.env.example`, a guide, and checksums. It does not require a separate Node.js installation.
+The repository-root `SuperiorBot.exe` is designed for a Windows x64 laptop or desktop. It contains the exact Node.js runtime, compiled application, production dependencies, and native SQLite module in one self-extracting file. It does not require ZIP extraction or a separate Node.js installation.
 
 ## First run
 
-1. Extract the entire `SuperiorBot-5.0.0-win-x64` folder to a writable location. Do not run directly inside the ZIP.
+1. Put `SuperiorBot.exe` and a copy of `.env.example` in a writable folder.
 2. In the Discord Developer Portal, enable Server Members Intent and Message Content Intent and install the application with the permissions described in [Configuration](configuration.md).
-3. Copy `.env.example` to `.env` in the extracted folder.
+3. Rename the copied `.env.example` to `.env` beside `SuperiorBot.exe`.
 4. Add `DISCORD_TOKEN` and leave `DB_FILE=superior.db` unless an absolute path is intentional.
 5. Open PowerShell in that folder and run:
 
@@ -23,11 +23,11 @@ Start the bot with:
 .\SuperiorBot.exe
 ```
 
-You can also double-click the executable. If local application-control policy blocks it, use `Start Superior Bot.cmd`; both launchers run the same bundled application. The executable is not code-signed, so Windows SmartScreen may require an operator decision. Verify the ZIP SHA-256 and `MANIFEST.sha256` before approving it.
+You can also double-click the executable. The executable is not code-signed, so Windows SmartScreen may require an operator decision. Verify that it came from the repository or CI artifact before approving it.
 
 ## Files and persistence
 
-Keep `SuperiorBot.exe`, `Start Superior Bot.cmd`, `runtime/`, `app/`, and `tools/` together. The launcher always uses its own directory as the application root, regardless of the current shell directory.
+The first run extracts the immutable application payload into `%LOCALAPPDATA%\SuperiorBot\payloads`. Do not put credentials or databases in that cache. The launcher always uses the directory containing the visible `SuperiorBot.exe` as the writable application root, regardless of its private runtime location or the current shell directory.
 
 By default these writable files sit beside the launcher:
 
@@ -37,11 +37,13 @@ By default these writable files sit beside the launcher:
 
 Back up the database and any sidecars only through a SQLite-aware backup while the bot is running, or after fully stopping the bot. Do not synchronize a live database through a consumer cloud-drive folder.
 
-The bot runs only while the process and laptop are awake. Disable sleep or use a dedicated always-on host for continuous service. Keep Windows, the ZIP, and Discord credentials patched and access-controlled.
+The bot runs only while the process and laptop are awake. Disable sleep or use a dedicated always-on host for continuous service. Keep Windows and the executable patched, and keep Discord credentials access-controlled.
 
-## Upgrade an existing schema-v2 database
+## Portable ZIP and schema-v2 upgrades
 
-Version 5 refuses schema v2 during normal startup. Close every process that can write the source database, copy it into the extracted v5 folder as `superior.db`, and keep the original untouched. Then run the bundled offline tools from PowerShell:
+The versioned portable ZIP remains available from CI for offline database maintenance. It exposes the bundled `runtime`, `app`, and `tools` directories plus their manifest and checksums; the single-file launcher intentionally exposes only start, version, and configuration-check operations.
+
+Version 5 refuses schema v2 during normal startup. Close every process that can write the source database, extract the current portable ZIP, copy the database into that folder as `superior.db`, and keep the original untouched. Then run the bundled offline tools from PowerShell:
 
 ```powershell
 New-Item -ItemType Directory -Path .\backups -Force
@@ -56,14 +58,14 @@ Do not continue if backup, dry-run, migration, or validation fails. A transactio
 
 A schema-v1 database must first be upgraded to v2 with the final 4.0.0 source release. Renaming a database file never upgrades its contents.
 
-## Updating the portable folder
+## Updating
 
 1. Stop the existing bot and confirm no `SuperiorBot.exe` or bundled `node.exe` remains running.
 2. Back up and validate the current database.
-3. Extract the new release to a new folder.
-4. Copy only `.env` and the validated active database into the new folder. Do not merge old `app/`, `runtime/`, or `tools/` directories.
-5. Verify the new archive/checksum, run `--version` and `--check`, then start it.
-6. Keep the previous complete folder and backup until verification succeeds.
+3. Place the new `SuperiorBot.exe` in a new writable folder.
+4. Copy only `.env` and the validated active database into the new folder.
+5. Run `--version` and `--check`, then start it.
+6. Keep the previous executable and backup until verification succeeds. Old private runtime caches can be removed after the new version is verified and stopped.
 
 For a v5 rollback, stop the process and return to a known-good v5 folder with a compatible schema-v3 backup. Returning to v4 also requires restoring the matching pre-migration schema-v2 backup; never mix application and schema generations.
 
@@ -71,7 +73,7 @@ For a v5 rollback, stop the process and return to a known-good v5 folder with a 
 
 - **Missing `.env`:** copy `.env.example` beside the launcher and provide the token.
 - **Configuration check fails:** read the single reported selector error; check guild registration mode and IDs without posting `.env` contents.
-- **Native SQLite check fails:** re-extract the full x64 ZIP. Do not copy `node_modules` from another Node version or operating system.
+- **Native SQLite check fails:** remove the matching private payload directory under `%LOCALAPPDATA%\SuperiorBot\payloads` and rerun the trusted executable. Do not copy `node_modules` from another Node version or operating system.
 - **Commands look stale:** global Discord commands can take time to propagate. Confirm version and registration mode before changing configuration.
 - **A prior database exists under another name:** set `DB_FILE` explicitly and follow the schema workflow. Do not let a fresh database hide the existing one.
-- **Window closes immediately:** run either launcher from an already-open PowerShell or Command Prompt window so the error remains visible.
+- **Window closes immediately:** run the executable from an already-open PowerShell or Command Prompt window so the error remains visible.

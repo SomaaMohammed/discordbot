@@ -65,10 +65,12 @@ cd tsbot
 npm ci
 npm run package:win:verify
 cd ..
-.\windows\test-portable.ps1 -Artifact .\release\SuperiorBot-5.0.0-win-x64.zip
+$archive = Get-ChildItem .\release\SuperiorBot-*-win-x64.zip
+.\windows\test-portable.ps1 -Artifact $archive.FullName
+.\windows\test-standalone.ps1 -Executable .\SuperiorBot.exe
 ```
 
-The builder verifies SHA-256-pinned copies of the official Windows Node runtime, Microsoft C# compiler toolset, .NET Framework reference assemblies, and native SQLite binary. It normalizes the launcher source, compiles against only the pinned references with deterministic path mapping, creates an ordinal per-file manifest, and uses the pinned Node runtime to emit the versioned ZIP with fixed entry metadata. `package:win:verify` performs two clean-staging builds and fails unless their ZIP bytes are identical. Use `package:win` when one build is sufficient during local iteration. Cache, staging, and release output are ignored.
+The builder verifies SHA-256-pinned copies of the official Windows Node runtime, Microsoft C# compiler toolset, .NET Framework reference assemblies, and native SQLite binary. It normalizes the launcher source, compiles against only the pinned references with deterministic path mapping, creates an ordinal per-file manifest, and uses the pinned Node runtime to emit the versioned ZIP with fixed entry metadata. It also embeds that ZIP into the repository-root self-extracting `SuperiorBot.exe`. `package:win:verify` performs two clean-staging builds and fails unless both the ZIP and standalone executable are byte-for-byte reproducible. Use `package:win` when one build is sufficient during local iteration. Cache, staging, and release output are ignored; the requested standalone executable is tracked.
 
 ## Change rules
 

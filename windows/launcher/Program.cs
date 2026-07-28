@@ -74,12 +74,14 @@ internal static class Program
             return 1;
         }
 
-        ProcessStartInfo start = new ProcessStartInfo();
-        start.FileName = node;
-        start.Arguments = QuoteArgument(script);
-        start.WorkingDirectory = root;
-        start.UseShellExecute = false;
-        start.CreateNoWindow = false;
+        ProcessStartInfo start = new ProcessStartInfo
+        {
+            FileName = node,
+            Arguments = QuoteArgument(script),
+            WorkingDirectory = root,
+            UseShellExecute = false,
+            CreateNoWindow = false
+        };
 
         using (Process process = Process.Start(start))
         {

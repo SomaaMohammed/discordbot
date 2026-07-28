@@ -89,13 +89,24 @@ jobs:
 
       - name: Smoke-test launchers and native SQLite
         shell: pwsh
-        run: ./windows/test-portable.ps1 -Artifact ./release/SuperiorBot-5.0.0-win-x64.zip
+        run: |
+          $archive = Get-ChildItem -LiteralPath ./release -Filter 'SuperiorBot-*-win-x64.zip'
+          if (@($archive).Count -ne 1) { throw "Expected exactly one portable ZIP." }
+          ./windows/test-portable.ps1 -Artifact $archive.FullName
+
+      - name: Smoke-test standalone executable
+        shell: pwsh
+        run: ./windows/test-standalone.ps1 -Executable ./SuperiorBot.exe
+
+      - name: Verify committed executable is reproducible
+        run: git diff --exit-code -- SuperiorBot.exe
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SuperiorBot-5.0.0-win-x64
+          name: SuperiorBot-win-x64
           path: |
-            release/SuperiorBot-5.0.0-win-x64.zip
-            release/SuperiorBot-5.0.0-win-x64.zip.sha256
+            SuperiorBot.exe
+            release/SuperiorBot-*-win-x64.zip
+            release/SuperiorBot-*-win-x64.zip.sha256
           if-no-files-found: error

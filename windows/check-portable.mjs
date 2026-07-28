@@ -19,13 +19,13 @@ async function main() {
     ),
   ).href;
 
-  const { loadProcessConfig, resolveEnvironmentFile } = await import(
-    configModuleUrl
-  );
-  const config = loadProcessConfig(portableRoot);
+  const { loadProcessConfig, resolveApplicationRoot, resolveEnvironmentFile } =
+    await import(configModuleUrl);
+  const applicationRoot = resolveApplicationRoot(portableRoot);
+  const config = loadProcessConfig(applicationRoot);
 
   const expectedRoot = process.env.SUPERIOR_PORTABLE_EXPECT_ROOT;
-  if (expectedRoot && path.resolve(expectedRoot) !== portableRoot) {
+  if (expectedRoot && path.resolve(expectedRoot) !== applicationRoot) {
     throw new Error(
       "Portable configuration was not resolved from the launcher directory.",
     );
@@ -38,7 +38,8 @@ async function main() {
   }
   if (
     expectedRoot &&
-    resolveEnvironmentFile(portableRoot) !== path.join(portableRoot, ".env")
+    resolveEnvironmentFile(applicationRoot) !==
+      path.join(applicationRoot, ".env")
   ) {
     throw new Error(
       "The environment file did not resolve beside the launcher.",
