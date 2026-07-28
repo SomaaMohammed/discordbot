@@ -3,25 +3,17 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { CourtStorage } from "../src/storage/db.js";
+import { BotStorage } from "../src/storage/db.js";
 import { validateDatabaseFile } from "../src/storage/migration.js";
 import {
-  GUILDS_ENABLED_LEFT_AT_INDEX_SQL,
-  GUILDS_TABLE_SQL,
-  POSTS_GUILD_CLOSED_POSTED_AT_INDEX_SQL,
-  POSTS_GUILD_POSTED_AT_INDEX_SQL,
-  POSTS_TABLE_SQL,
   detectDatabaseSchema,
-  validateV2Schema,
+  validateV3Schema,
+  V3_EXPLICIT_INDEX_NAMES,
+  V3_TABLE_NAMES,
 } from "../src/storage/schema.js";
+import { createV2FixtureDatabase } from "./helpers/v2-fixture.js";
 
 const roots: string[] = [];
-
-function makePaths(): { root: string; dbFile: string } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "court-schema-"));
-  roots.push(root);
-  return { root, dbFile: path.join(root, "synthetic.db") };
-}
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
@@ -29,169 +21,122 @@ afterEach(() => {
   }
 });
 
-describe("v2 schema", () => {
-  it("initializes a fresh database with all current constraints", () => {
-    const { root, dbFile } = makePaths();
-    const storage = new CourtStorage({ dbFile }, root);
-    storage.initStorage();
-    storage.close();
-
-    expect(validateDatabaseFile(dbFile, { requireCurrent: true })).toEqual({
-      schema: "current-v2",
+describe("schema v3", () => {
+  it("creates only the exact active tables and required index", () => {
+    const dbFile = freshDatabase();
+    const validation = validateDatabaseFile(dbFile, { expect: 3 });
+    expect(validation).toEqual({
+      schema: "current-v3",
+      schemaVersion: 3,
       integrity: "ok",
-      schemaVersion: 2,
+      foreignKeyViolations: 0,
     });
+
     const db = new Database(dbFile, { readonly: true });
     try {
-      expect(validateV2Schema(db)).toEqual([]);
-      const answerPk = (
-        db.pragma("table_info(answers)") as Array<{
-          name: string;
-          pk: number;
-        }>
-      )
-        .filter((column) => column.pk > 0)
-        .sort((left, right) => left.pk - right.pk)
-        .map((column) => column.name);
-      expect(answerPk).toEqual(["guild_id", "question_message_id", "user_id"]);
-      for (const table of ["guilds", "guild_settings"]) {
-        const guildIdColumn = (
-          db.pragma(`table_info(${table})`) as Array<{
-            name: string;
-            type: string;
-            notnull: number;
-            pk: number;
-          }>
-        ).find((column) => column.name === "guild_id");
-        expect(guildIdColumn).toMatchObject({
-          type: "TEXT",
-          notnull: 1,
-          pk: 1,
-        });
-      }
-      const retentionIndex = db.pragma(
-        "index_info(idx_answers_guild_created_at)",
-      ) as Array<{
-        name: string | null;
-        seqno: number;
-      }>;
+      const objects = db
+        .prepare(
+          `SELECT type, name FROM sqlite_master
+           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`,
+        )
+        .all() as Array<{ type: string; name: string }>;
       expect(
-        retentionIndex
-          .sort((left, right) => left.seqno - right.seqno)
-          .map((column) => column.name),
-      ).toEqual(["guild_id", null]);
-      const postDateIndex = db.pragma(
-        "index_info(idx_posts_guild_posted_at)",
-      ) as Array<{ name: string | null; seqno: number }>;
+        objects.filter((row) => row.type === "table").map(rowName),
+      ).toEqual([...V3_TABLE_NAMES].sort());
       expect(
-        postDateIndex
-          .sort((left, right) => left.seqno - right.seqno)
-          .map((column) => column.name),
-      ).toEqual(["guild_id", null]);
+        objects.filter((row) => row.type === "index").map(rowName),
+      ).toEqual([...V3_EXPLICIT_INDEX_NAMES].sort());
+      expect(objects.some((row) => row.type === "view")).toBe(false);
+      expect(objects.some((row) => row.type === "trigger")).toBe(false);
+      expect(validateV3Schema(db)).toEqual([]);
     } finally {
       db.close();
     }
   });
 
-  it("classifies a damaged v2 schema as unknown", () => {
-    const { root, dbFile } = makePaths();
-    const storage = new CourtStorage({ dbFile }, root);
-    storage.initStorage();
-    storage.close();
-    const db = new Database(dbFile);
-    db.exec("DROP INDEX idx_answers_guild_message_id");
-    expect(detectDatabaseSchema(db)).toBe("unknown");
-    expect(validateV2Schema(db)).toContain(
-      "missing index idx_answers_guild_message_id",
-    );
-    db.close();
-    expect(() => validateDatabaseFile(dbFile)).toThrow("unknown");
-  });
-
-  it("rejects unsafe tenant column declarations and spoofed date indexes", () => {
-    const { root, dbFile } = makePaths();
-    const storage = new CourtStorage({ dbFile }, root);
-    storage.initStorage();
-    storage.close();
-
+  it.each([
+    ["table", "CREATE TABLE unexpected_table (value TEXT)"],
+    ["view", "CREATE VIEW unexpected_view AS SELECT guild_id FROM guilds"],
+    [
+      "trigger",
+      "CREATE TRIGGER unexpected_trigger AFTER INSERT ON guilds BEGIN SELECT 1; END",
+    ],
+    ["index", "CREATE INDEX unexpected_index ON metrics (updated_at)"],
+  ])("rejects every extra explicit %s", (_kind, sql) => {
+    const dbFile = freshDatabase();
     const db = new Database(dbFile);
     try {
-      db.exec(`
-        DROP TABLE guild_settings;
-        CREATE TABLE guild_settings (
-          guild_id INTEGER PRIMARY KEY,
-          settings_version INTEGER NOT NULL,
-          settings_json TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-        );
-        DROP INDEX idx_answers_guild_created_at;
-        CREATE INDEX idx_answers_guild_created_at
-          ON answers (guild_id, length(created_at));
-      `);
-
-      const issues = validateV2Schema(db);
-      expect(issues).toContain(
-        "guild_settings.guild_id type is INTEGER, expected TEXT",
-      );
-      expect(issues).toContain(
-        "guild_settings.guild_id NOT NULL is false, expected true",
-      );
-      expect(issues).toContain(
-        "idx_answers_guild_created_at SQL does not match the required definition",
-      );
+      db.exec(sql);
       expect(detectDatabaseSchema(db)).toBe("unknown");
     } finally {
       db.close();
     }
   });
 
-  it("rejects v2 tables whose required defaults or checks were removed", () => {
-    const { root, dbFile } = makePaths();
-    const storage = new CourtStorage({ dbFile }, root);
+  it("rejects data-level settings inconsistencies", () => {
+    const dbFile = freshDatabase();
+    const storage = new BotStorage({ dbFile });
     storage.initStorage();
+    storage.ensureGuild("111111111111111111");
     storage.close();
 
     const db = new Database(dbFile);
     try {
-      db.pragma("foreign_keys = OFF");
-      db.exec("DROP TABLE guilds");
-      db.exec(
-        GUILDS_TABLE_SQL.replace(
-          "enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1))",
-          "enabled INTEGER NOT NULL",
-        ),
-      );
-      db.exec(GUILDS_ENABLED_LEFT_AT_INDEX_SQL);
-      db.exec("DROP TABLE posts");
-      db.exec(
-        POSTS_TABLE_SQL.replace(
-          "closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1))",
-          "closed INTEGER NOT NULL",
-        ),
-      );
-      db.exec(POSTS_GUILD_CLOSED_POSTED_AT_INDEX_SQL);
-      db.exec(POSTS_GUILD_POSTED_AT_INDEX_SQL);
+      db.prepare(
+        "UPDATE guild_settings SET settings_json = '{malformed' WHERE guild_id = ?",
+      ).run("111111111111111111");
+      expect(detectDatabaseSchema(db)).toBe("unknown");
+      expect(validateV3Schema(db).join(" ")).toMatch(/settings are invalid/);
     } finally {
       db.close();
     }
+  });
 
-    const reopened = new Database(dbFile, {
-      readonly: true,
-      fileMustExist: true,
-    });
-    try {
-      const issues = validateV2Schema(reopened);
-      expect(issues).toContain(
-        "guilds SQL does not match the required definition",
-      );
-      expect(issues).toContain(
-        "posts SQL does not match the required definition",
-      );
-      expect(detectDatabaseSchema(reopened)).toBe("unknown");
-    } finally {
-      reopened.close();
-    }
-    expect(() => validateDatabaseFile(dbFile)).toThrow("unknown");
+  it("normal startup read-only classifies and refuses schema v2 unchanged", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "v2.db");
+    createV2FixtureDatabase(dbFile).close();
+    const before = fs.readFileSync(dbFile);
+
+    const storage = new BotStorage({ dbFile });
+    expect(() => storage.initStorage()).toThrow(/explicit migration/);
+    storage.close();
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 2 }).schema).toBe(
+      "legacy-v2",
+    );
+  });
+
+  it("normal startup refuses an unknown database unchanged", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "unknown.db");
+    const db = new Database(dbFile);
+    db.exec("CREATE TABLE partial (value TEXT)");
+    db.close();
+    const before = fs.readFileSync(dbFile);
+
+    const storage = new BotStorage({ dbFile });
+    expect(() => storage.initStorage()).toThrow(/unknown or incomplete/);
+    storage.close();
+    expect(fs.readFileSync(dbFile)).toEqual(before);
   });
 });
+
+function rowName(row: { name: string }): string {
+  return row.name;
+}
+
+function freshDatabase(): string {
+  const root = makeRoot();
+  const dbFile = path.join(root, "fresh.db");
+  const storage = new BotStorage({ dbFile });
+  storage.initStorage();
+  storage.close();
+  return dbFile;
+}
+
+function makeRoot(): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "superior-schema-"));
+  roots.push(root);
+  return root;
+}

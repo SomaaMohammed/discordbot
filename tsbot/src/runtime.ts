@@ -1,19 +1,13 @@
 import { DateTime } from "luxon";
-import { DEFAULT_BACKFILL_STATUS } from "./parity.js";
 import { getNow } from "./time.js";
-import type {
-  BackfillStatusSnapshot,
-  GuildSettings,
-  ProcessConfig,
-} from "./types.js";
-import { CourtStorage, type GuildStorage } from "./storage/db.js";
+import type { GuildSettings, ProcessConfig } from "./types.js";
+import { BotStorage, type GuildStorage } from "./storage/db.js";
 
 export interface GuildRuntime {
   readonly guildId: string;
   readonly botVersion: string;
   readonly storage: GuildStorage;
   settings: GuildSettings;
-  readonly backfillStatus: BackfillStatusSnapshot;
   readonly generation: number;
   now: () => DateTime;
   randomInt: (maxExclusive: number) => number;
@@ -26,23 +20,18 @@ export interface GuildRuntime {
 
 export interface BotRuntime {
   readonly processConfig: ProcessConfig;
-  readonly storage: CourtStorage;
+  readonly storage: BotStorage;
   readonly randomInt: (maxExclusive: number) => number;
   forGuild: (guildId: string) => Promise<GuildRuntime | null>;
-  invalidateGuild: (
-    guildId: string,
-    options?: { forgetBackfillStatus?: boolean },
-  ) => void;
+  invalidateGuild: (guildId: string) => void;
 }
 
 export function createRuntime(
   processConfig: ProcessConfig,
-  repoRoot: string,
+  _repoRoot?: string,
 ): BotRuntime {
-  const storage = new CourtStorage(processConfig, repoRoot);
+  const storage = new BotStorage({ dbFile: processConfig.dbFile });
   storage.initStorage();
-
-  const backfillStatuses = new Map<string, BackfillStatusSnapshot>();
   const guildGenerations = new Map<string, number>();
   const randomInt = (maxExclusive: number): number =>
     Math.floor(Math.random() * Math.max(maxExclusive, 1));
@@ -53,33 +42,22 @@ export function createRuntime(
     randomInt,
     async forGuild(guildId: string): Promise<GuildRuntime | null> {
       const normalizedGuildId = String(guildId).trim();
-      if (!/^\d+$/.test(normalizedGuildId)) {
-        return null;
-      }
-
-      const initialExpectation = await Promise.resolve(
-        storage.getGuildEnableExpectation(normalizedGuildId),
-      );
-      if (!initialExpectation) {
-        return null;
-      }
+      if (!/^\d{17,20}$/.test(normalizedGuildId)) return null;
+      const initialExpectation =
+        storage.getGuildEnableExpectation(normalizedGuildId);
+      if (!initialExpectation) return null;
 
       let persistedSettings = structuredClone(initialExpectation.settings);
       let persistedLifecycleJoinedAt = initialExpectation.lifecycleJoinedAt;
       let settings = structuredClone(initialExpectation.settings);
       const guildStorage = storage.forGuild(normalizedGuildId);
       let generation = guildGenerations.get(normalizedGuildId) ?? 0;
-      const backfillStatus = backfillStatuses.get(normalizedGuildId) ?? {
-        ...DEFAULT_BACKFILL_STATUS,
-      };
-      backfillStatuses.set(normalizedGuildId, backfillStatus);
 
       const guildRuntime: GuildRuntime = {
         guildId: normalizedGuildId,
         botVersion: processConfig.botVersion,
         storage: guildStorage,
         settings,
-        backfillStatus,
         get generation(): number {
           return generation;
         },
@@ -94,7 +72,8 @@ export function createRuntime(
           return Boolean(
             record?.enabled &&
             record.leftAt === null &&
-            currentSettings?.enabled,
+            currentSettings?.enabled &&
+            !currentSettings.reviewRequired,
           );
         },
         invalidate(): void {
@@ -130,9 +109,6 @@ export function createRuntime(
           return settings;
         },
         async setEnabled(enabled: boolean): Promise<GuildSettings> {
-          // Enabling is conditional on the exact configuration the caller
-          // reviewed. Disabling is unconditional and changes only the flag, so
-          // an emergency disable cannot be defeated by a concurrent edit.
           const saved = storage.setGuildEnabled(
             normalizedGuildId,
             enabled,
@@ -151,23 +127,15 @@ export function createRuntime(
           return settings;
         },
       };
-
       return guildRuntime;
     },
-    invalidateGuild(
-      guildId: string,
-      options: { forgetBackfillStatus?: boolean } = {},
-    ): void {
+    invalidateGuild(guildId: string): void {
       const normalizedGuildId = String(guildId);
       guildGenerations.set(
         normalizedGuildId,
         (guildGenerations.get(normalizedGuildId) ?? 0) + 1,
       );
-      if (options.forgetBackfillStatus) {
-        backfillStatuses.delete(normalizedGuildId);
-      }
     },
   };
-
   return runtime;
 }

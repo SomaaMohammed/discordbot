@@ -1,53 +1,132 @@
 import { describe, expect, it } from "vitest";
 import {
   createDefaultGuildSettings,
+  DEFAULT_BULK_MODERATION_TARGET_CAP,
+  GUILD_SETTINGS_VERSION,
   sanitizeGuildSettings,
 } from "../src/guild-settings.js";
 
-describe("guild settings", () => {
-  it("uses disabled, neutral defaults with no Discord IDs", () => {
-    const settings = createDefaultGuildSettings();
-    expect(settings.enabled).toBe(false);
-    expect(settings.timezone).toBe("UTC");
-    expect(settings.courtSchedule.mode).toBe("off");
-    expect(settings.invocation.keyword).toBe("superior");
-    expect(Object.values(settings.features).every((value) => !value)).toBe(
-      true,
-    );
-    expect(JSON.stringify(settings)).not.toMatch(/\d{17,20}/);
-  });
-
-  it("normalizes safe multiword invocations and de-duplicates IDs", () => {
-    const settings = createDefaultGuildSettings();
-    settings.invocation.keyword = "  Imperial Court  ";
-    settings.invocation.aliases = [" Your Majesty ", "your majesty"];
-    settings.roles.staff = ["111111111111111111", "111111111111111111"];
-    const parsed = sanitizeGuildSettings(settings);
-    expect(parsed.invocation).toEqual({
-      keyword: "imperial court",
-      aliases: ["your majesty"],
+describe("guild settings v2", () => {
+  it("uses active-only, disabled defaults with a finite moderation cap", () => {
+    expect(createDefaultGuildSettings()).toEqual({
+      version: GUILD_SETTINGS_VERSION,
+      enabled: false,
+      reviewRequired: true,
+      timezone: "UTC",
+      features: {
+        chat: false,
+        replyModeration: false,
+        greetings: false,
+        activityMetrics: false,
+      },
+      channels: { log: null },
+      invocation: { keyword: "superior", aliases: [] },
+      limits: {
+        bulkModerationTargetCap: DEFAULT_BULK_MODERATION_TARGET_CAP,
+      },
+      greetings: [],
     });
-    expect(parsed.roles.staff).toEqual(["111111111111111111"]);
+    expect(DEFAULT_BULK_MODERATION_TARGET_CAP).toBeGreaterThan(0);
   });
 
-  it("rejects invalid timezone, IDs, control characters, and unknown keys", () => {
+  it("normalizes invocation names and universal greeting metadata", () => {
     const settings = createDefaultGuildSettings();
-    settings.timezone = "Not/A-Timezone";
-    expect(() => sanitizeGuildSettings(settings)).toThrow();
+    settings.invocation = {
+      keyword: "  SUPERIOR  ",
+      aliases: [" Helper   Bot ", "helper bot"],
+    };
+    settings.greetings = [
+      { name: "  Friendly  ", message: "  Hello {user}!  " },
+    ];
+    expect(sanitizeGuildSettings(settings)).toMatchObject({
+      invocation: { keyword: "superior", aliases: ["helper bot"] },
+      greetings: [{ name: "Friendly", message: "Hello {user}!" }],
+    });
+  });
 
-    const invalidId = createDefaultGuildSettings();
-    invalidId.channels.court = "123";
-    expect(() => sanitizeGuildSettings(invalidId)).toThrow();
-
-    const invalidTrigger = createDefaultGuildSettings();
-    invalidTrigger.invocation.keyword = "bad\ntrigger";
-    expect(() => sanitizeGuildSettings(invalidTrigger)).toThrow();
-
+  it("rejects fixed targets, mass mentions, and direct Discord mentions", () => {
+    const settings = createDefaultGuildSettings();
     expect(() =>
       sanitizeGuildSettings({
-        ...createDefaultGuildSettings(),
-        unexpected: true,
+        ...settings,
+        greetings: [
+          {
+            name: "hello",
+            message: "Hello {user}",
+            userId: "111111111111111111",
+          },
+        ],
       }),
     ).toThrow();
+
+    for (const message of [
+      "Hello @everyone",
+      "Hello @here",
+      "Hello <@111111111111111111>",
+      "Hello <@&111111111111111111>",
+    ]) {
+      expect(() =>
+        sanitizeGuildSettings({
+          ...settings,
+          greetings: [{ name: "hello", message }],
+        }),
+      ).toThrow(/\{user\}/);
+    }
+  });
+
+  it("rejects greetings whose worst-case rendered content exceeds Discord's limit", () => {
+    const settings = createDefaultGuildSettings();
+    settings.greetings = [{ name: "full", message: "a".repeat(2_000) }];
+    expect(sanitizeGuildSettings(settings).greetings[0]?.message).toHaveLength(
+      2_000,
+    );
+
+    for (const message of ["{user}".repeat(87), "~".repeat(1_001)]) {
+      expect(() =>
+        sanitizeGuildSettings({
+          ...settings,
+          greetings: [{ name: "too-long", message }],
+        }),
+      ).toThrow(/render to at most 2000 Discord characters/);
+    }
+  });
+
+  it("rejects unsafe enabled/review combinations and unbounded caps", () => {
+    const settings = createDefaultGuildSettings();
+    expect(() =>
+      sanitizeGuildSettings({
+        ...settings,
+        enabled: true,
+        reviewRequired: true,
+      }),
+    ).toThrow(/requiring review/);
+    expect(() =>
+      sanitizeGuildSettings({
+        ...settings,
+        limits: { bulkModerationTargetCap: 0 },
+      }),
+    ).toThrow();
+  });
+
+  it("requires valid tenant IDs, timezones, and unique profile names", () => {
+    const settings = createDefaultGuildSettings();
+    expect(() =>
+      sanitizeGuildSettings({
+        ...settings,
+        channels: { log: "not-an-id" },
+      }),
+    ).toThrow();
+    expect(() =>
+      sanitizeGuildSettings({ ...settings, timezone: "Moon/Base" }),
+    ).toThrow();
+    expect(() =>
+      sanitizeGuildSettings({
+        ...settings,
+        greetings: [
+          { name: "Hello", message: "One" },
+          { name: "hello", message: "Two" },
+        ],
+      }),
+    ).toThrow(/unique/);
   });
 });

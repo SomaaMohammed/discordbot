@@ -1,30 +1,9 @@
 import { config as loadDotEnv } from "dotenv";
+import fs from "node:fs";
 import path from "node:path";
 import { PACKAGE_VERSION } from "./constants.js";
 import { assertDiscordSnowflake } from "./guild-settings.js";
 import type { CommandRegistrationMode, ProcessConfig } from "./types.js";
-
-function envInt(
-  name: string,
-  defaultValue: number,
-  minimum: number,
-  maximum: number,
-): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw.trim() === "") {
-    return defaultValue;
-  }
-  if (!/^-?\d+$/.test(raw.trim())) {
-    throw new TypeError(`${name} must be an integer in .env`);
-  }
-  const parsed = Number.parseInt(raw.trim(), 10);
-  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
-    throw new RangeError(
-      `${name} must be between ${minimum} and ${maximum} in .env`,
-    );
-  }
-  return parsed;
-}
 
 function envSnowflakeList(name: string): string[] {
   const raw = process.env[name];
@@ -66,9 +45,25 @@ export function resolveEnvironmentFile(repoRoot: string): string {
 }
 
 export function resolveDatabaseFile(repoRoot: string): string {
-  const configured = String(process.env.DB_FILE ?? "court.db").trim();
-  const dbFile = configured || "court.db";
-  return path.isAbsolute(dbFile) ? dbFile : path.join(repoRoot, dbFile);
+  const configured = String(process.env.DB_FILE ?? "").trim();
+  if (configured) {
+    return path.isAbsolute(configured)
+      ? configured
+      : path.resolve(repoRoot, configured);
+  }
+
+  // This legacy filename is intentionally retained only as an upgrade-safety
+  // sentinel. Never silently create a fresh database beside an installation
+  // that may still depend on the v4 default.
+  const legacyDatabase = path.resolve(repoRoot, "court.db");
+  if (fs.existsSync(legacyDatabase)) {
+    throw new Error(
+      `DB_FILE must be set explicitly because a legacy database exists at ${legacyDatabase}. ` +
+        "Do not rename it in place; follow the documented v4-to-v5 migration workflow.",
+    );
+  }
+
+  return path.resolve(repoRoot, "superior.db");
 }
 
 export function loadDatabaseConfig(
@@ -116,7 +111,5 @@ export function loadProcessConfig(repoRoot: string): ProcessConfig {
     dbFile: resolveDatabaseFile(repoRoot),
     commandRegistrationMode,
     devGuildIds,
-    botOperatorUserIds: envSnowflakeList("BOT_OPERATOR_USER_IDS"),
-    schedulerConcurrency: envInt("SCHEDULER_CONCURRENCY", 4, 1, 32),
   };
 }

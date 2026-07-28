@@ -1,30 +1,71 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { loadLegacyMigrationConfig } from "./legacy-v1-settings.js";
-import { migrateDatabase } from "./migration.js";
+import { migrateDatabase, type MigrationFailurePoint } from "./migration.js";
 
-function main(): void {
-  const repoRoot = path.resolve(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "../../..",
-  );
-  const config = loadLegacyMigrationConfig(repoRoot);
-  if (config.legacyGuildIdSource === "TEST_GUILD_ID") {
-    console.warn(
-      "[migration] TEST_GUILD_ID is deprecated; use LEGACY_GUILD_ID for future migration attempts.",
+const FAILURE_POINTS = new Set<MigrationFailurePoint>([
+  "after-source-read",
+  "after-rename",
+  "after-create",
+  "after-copy",
+  "after-verify",
+  "after-drop",
+  "after-version",
+  "before-commit",
+]);
+
+interface MigrateArguments {
+  dbFile: string;
+  dryRun: boolean;
+  failurePoint?: MigrationFailurePoint;
+}
+
+function parseArguments(argv: string[]): MigrateArguments {
+  let dbFile: string | null = null;
+  let dryRun = false;
+  let failurePoint: MigrationFailurePoint | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    const value = argv[index + 1];
+    if (argument === "--db" && value) {
+      dbFile = value;
+      index += 1;
+      continue;
+    }
+    if (argument === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (
+      argument === "--inject-failure" &&
+      value &&
+      FAILURE_POINTS.has(value as MigrationFailurePoint)
+    ) {
+      failurePoint = value as MigrationFailurePoint;
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown or incomplete migration option: ${argument}`);
+  }
+  if (!dbFile) {
+    throw new Error(
+      "Usage: migrate --db <path> [--dry-run] [--inject-failure <stage>]",
     );
   }
+  return failurePoint === undefined
+    ? { dbFile, dryRun }
+    : { dbFile, dryRun, failurePoint };
+}
 
-  const result = migrateDatabase({
-    dbFile: config.dbFile,
-    legacyGuildId: config.legacyGuildId,
-    environment: config.environment,
-  });
-  const copied = Object.entries(result.copiedRows)
-    .map(([table, count]) => `${table}=${count}`)
-    .join(", ");
+function main(): void {
+  const options = parseArguments(process.argv.slice(2));
+  const migrationOptions = {
+    dbFile: options.dbFile,
+    dryRun: options.dryRun,
+    ...(options.failurePoint === undefined
+      ? {}
+      : { failurePoint: options.failurePoint }),
+  };
+  const result = migrateDatabase(migrationOptions);
   console.log(
-    `[migration] ${result.status}; schema v${result.schemaVersion}${copied ? `; copied ${copied}` : ""}`,
+    `[migration] status=${result.status}; from=${result.fromSchema}; to=${result.toSchema}; guilds=${result.guilds}; review_required=${result.settingsRequiringReview}; metrics_preserved=${result.metricsPreserved}; metrics_dropped=${result.metricsDropped}; warnings=${result.warnings}`,
   );
 }
 

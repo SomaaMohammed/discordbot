@@ -1,56 +1,34 @@
-# Superior Member Capabilities
+# Member capabilities
 
-Capabilities are scoped to the current guild. The guild must be active, configured, and enabled, and any relevant feature flag must be on. A channel or role configured in one guild never grants access or receives output in another.
+All features are guild-scoped. Superior ignores DMs and refuses work when the guild is disabled, inactive, unconfigured, purged, or invalidated during an asynchronous operation.
 
-## Before Guild Enablement
+## Guild members
 
-New and rejoined guilds are disabled. They do not receive message-trigger replies, moderation actions, activity metrics, or backfill work.
+- Deliberately address the bot through the configured invocation, a bot mention, or a reply to the bot for natural chat, factual status replies, coin flips, bounded dice, and bounded choices.
+- Use `/utility ping`, `avatar`, `userinfo`, `serverinfo`, `roleinfo`, `channelinfo`, `snowflake`, and `timestamp`. Responses are private where the information is primarily for the caller.
+- Use `/fun battle`, `/fun stats`, and `/fun leaderboard` when the relevant feature is enabled.
+- Use `/greetings send` with any configured profile. `{user}` resolves to the member sending the greeting and does not mass-mention the guild.
+- Interact with administrator-posted role panels when the role remains safe and manageable.
 
-The guild owner and members with Discord Administrator permission can use `/setup` to inspect and configure the guild. Other command families return a setup-required response until setup validates and an administrator enables the guild.
+Utilities disclose only information available from the current guild or the supplied public Discord ID. A requested member, role, or channel must belong to the current guild. Inputs are bounded and validated before a response or metric write.
 
-## Any Member
+## Administrators
 
-When the relevant feature is enabled, ordinary members can use:
+Guild owners and members with Administrator permission can configure the guild with `/setup`, validate before enabling, manage feature flags and greeting profiles, and export/import active guild data. Only the guild owner can permanently purge the guild's active database rows through the exact confirmation flow.
 
-- Public Superior message intents for greetings, help, coin flips, local time, thanks, farewell, ping, uptime, bot information, dice, and choices.
-- `/utility ping`, `/utility avatar`, `/utility userinfo`, and `/utility serverinfo`.
-- `/fun battle`, `/fun stats`, and `/fun leaderboard`.
-- `/superior help` for the current command and feature summary.
-- `/greetings send profile:<name>` for a profile configured in that guild.
-- Role-panel buttons for configured self-assignable roles. Discord managed roles and `@everyone` cannot be self-assigned, and the bot still needs Manage Roles and sufficient hierarchy.
-- DM-panel buttons created by an administrator. Forwarding can fail when the recipient blocks DMs; when a log channel is configured, the submission and sender identity are copied there as disclosed by the panel.
+Authorized administrators can use `/superior` to:
 
-Component interactions validate the message guild as well as their stable custom ID. User-install and unsupported DM command contexts are rejected.
+- send an announcement or create DM and role panels;
+- clean recent messages with `/superior purge` or filter cleanup by member with `/superior purgeuser`;
+- lock a channel, unlock only a matching lock tracked by the running process, or set slow mode;
+- apply/remove timeouts and perform bounded multi-member moderation;
+- backfill or inspect enabled activity statistics; and
+- view built-in command help.
 
-## Legacy Role Bindings
+Cleanup preflights View Channel, Read Message History, and Manage Messages. It respects Discord's 100-message bulk limit and the age restriction for bulk deletion, then reports requested, scanned, deleted, and skipped counts instead of claiming filtered messages were removed. Other moderation actions validate bot permissions, actor authority, role hierarchy, the current guild, configured caps, and cancellation state.
 
-`/setup role` is retired and is not published. All supported conversational intents are public to guild members when `superior-chat` is enabled. Reply moderation requires the guild owner or Discord Administrator permission. Persisted privileged-chat and other legacy role bindings can remain in storage and exports for compatibility and rollback, but they have no active runtime consumer.
+## Operator
 
-## Administrators and Guild Owner
+The process operator controls credentials, registration mode, database path, releases, backups, migration, host access, logging, and service availability.
 
-The following operations require the guild owner or Discord Administrator permission and remain subject to the bot's Discord permissions and role hierarchy:
-
-- `/setup` mutations, validation, enablement, disablement, and export;
-- `/superior say`, `dmpanel`, `rolepanel`, and `rolepanelmulti`;
-- `/superior purge`, `purgeuser`, `lock`, `unlock`, and `slowmode`;
-- `/superior timeout`, `untimeout`, `mutemany`, `unmutemany`, `muteall`, and `unmuteall`;
-- `/superior backfillstats` and `backfillstatus`;
-- text-triggered reply moderation when enabled.
-
-Announcements, panels, moderation targets, channel objects, and role objects are re-resolved in the current guild. Timeout and role actions enforce Discord ownership, permission, managed-role, and hierarchy rules at execution time. Bulk actions honor the configured `mute_target_cap` and their confirmation/dry-run controls.
-
-`/setup validate` checks the log channel, supported feature dependencies, timezone, moderation permission, and configuration shape. It does not reactivate or require old role, court, question, answer, royal, schedule, or staff settings retained in legacy data.
-
-## Guild Owner Only
-
-`/setup purge` is restricted to the server owner. It previews the current guild's removal scope and requires exact `PURGE <guildId>` confirmation. A successful purge deletes only that guild's active-database rows; it does not delete the shared database file, another guild's rows, previously downloaded exports, Discord content, host logs, or operator backups.
-
-## Retired Surfaces and Retained Data
-
-`/court`, `/questions`, anonymous court-answer components, royal AFK/presence commands and triggers, `/fun verdict`, `/fun title`, and `/fun fate` are retired. A stale Discord command or component does not restore them.
-
-Schema-v2 storage and private exports can still contain legacy questions, posts, answer mappings, cooldowns, schedules, royal state, and metrics for compatibility, rollback, retention, and owner-authorized purge. Their presence in storage does not make them active member capabilities.
-
-## Guild Lifecycle
-
-`/setup disable` stops guild behavior without deleting data. If the bot leaves, the guild is marked inactive and retained. Rejoining restores the record but does not auto-enable it; an administrator must review, validate, and enable it again.
+Host access does not replace in-guild authorization. Operators must follow the [operations runbook](../operations.md), protect credentials and backups, and complete the policy publication prerequisites before public operation.

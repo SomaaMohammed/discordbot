@@ -4,7 +4,9 @@
 .obsidian/
 .vscode/
 backups/
-lore/
+release/
+windows/.cache/
+windows/.work/
 **/coverage/
 **/dist/
 **/node_modules/

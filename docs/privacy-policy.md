@@ -1,314 +1,103 @@
-# Superior Privacy Policy
+# Superior privacy policy
 
-**Effective date:** July 27, 2026<br>
+**Effective date:** NOT YET EFFECTIVE<br>
 **Last updated:** July 28, 2026
 
-> **Unpublished draft — do not use this URL in the Discord Developer Portal.**
-> The current implementation and this draft are not suitable for public
-> deployment or publication until every prerequisite below is implemented,
-> verified in production, and reflected accurately in the final policy.
+> **Unpublished draft. Do not link this document from the Discord Developer Portal or represent it as an effective policy.** Replace every placeholder, verify the actual hosted deployment, complete the safeguards listed below, and obtain appropriate legal and Discord-policy review first.
 
-Before publication, the Operator must:
+Before publication, the operator must document and verify:
 
-- replace `OPERATOR LEGAL NAME` and `PRIVACY/SUPPORT EMAIL` with a real
-  controller identity and monitored private contact address;
-- identify the actual hosting, storage, backup, and monitoring providers,
-  processing locations, and written service-provider restrictions;
-- encrypt Discord API data at rest, including credentials, the live database,
-  SQLite sidecars, host logs, and backups, using a verified production control;
-- adopt and enforce concrete host-log and backup retention, restoration, and
-  erasure periods;
-- adopt justified automatic expiration for retained legacy answer mappings, cooldowns, and
-  per-user metrics, with cleanup that does not stop merely because a feature is
-  disabled;
-- implement and test prompt guild-removal, service-termination, and verified
-  individual-deletion workflows, including prevention of unwanted
-  re-collection;
-- resolve the Discord-policy risks created by passive per-user activity
-  tracking, public user leaderboards, and history backfills that scan messages,
-  reactions, and archived threads; and
-- restrict or redact administrator exports and other disclosures so Discord API
-  data is shared only with a contracted service provider, as legally required,
-  or when the applicable user expressly directs the disclosure.
+- `OPERATOR LEGAL NAME`, a monitored `PRIVACY/SUPPORT EMAIL`, and the countries in which the service is offered;
+- hosting provider, processing locations, vendors, access controls, encryption, incident response, and international-transfer arrangements;
+- fixed retention and deletion periods for application logs, inactive guild data, backups, and incident records;
+- prompt deletion after confirmed guild removal, individual access/deletion handling, and any required opt-out or re-collection controls;
+- whether optional per-member activity metrics, history backfill, leaderboards, guild exports, and DM-panel delivery comply with Discord's current developer requirements and applicable law; and
+- clear in-product disclosures for features that send content to another member or an administrator-visible log channel.
 
-## 1. Who This Policy Covers
+## 1. Operator and scope
 
-This Privacy Policy explains how **OPERATOR LEGAL NAME** (the "Operator," "we,"
-"us," or "our") processes information through the official hosted deployment
-of Superior (the "Bot"). You can contact the Operator at
-**PRIVACY/SUPPORT EMAIL**.
+Superior (the “Bot”) is operated by **OPERATOR LEGAL NAME** (“we,” “us,” or “our”). Contact **PRIVACY/SUPPORT EMAIL** for privacy, deletion, security, or support requests.
 
-The Bot is an independently operated Discord application. Discord is a
-separate service with its own [Privacy Policy](https://discord.com/privacy) and
-[Terms of Service](https://discord.com/terms).
+This draft describes the official hosted Bot. An independent operator of the source code controls a separate deployment and must publish an accurate policy for that deployment.
 
-If a person or organization lawfully operates an independent deployment of the
-source code, that operator controls its deployment and must provide its own
-accurate privacy notice, contact method, retention schedule, and legally
-required disclosures. This policy does not automatically cover an independent
-deployment or grant rights to use the source code.
+Discord separately processes account, server, message, and interaction data under [Discord's Privacy Policy](https://discord.com/privacy). This policy covers only processing controlled by the Bot operator.
 
-## 2. Summary
+## 2. Data the Bot processes
 
-- The Bot processes Discord events, messages, members, roles, interactions, and
-  reactions needed for enabled features.
-- The Bot stores guild configuration, Discord identifiers, greeting profiles,
-  and usage metrics in a guild-scoped SQLite database. It processes moderation
-  and panel inputs to carry out requested Discord actions and, when configured,
-  sends relevant content to a guild log channel. Migrated or previously created
-  court, question, answer, cooldown, schedule, and royal records may also remain
-  in SQLite for compatibility and rollback.
-- The retired "anonymous answer" feature was pseudonymous, not untraceable.
-  Retained mappings can associate an author's Discord user ID with an answer
-  message ID and can appear in an administrator export until deleted under the
-  applicable retention, verified-request, or guild-purge process.
-- The Bot does not sell API data, use it for advertising or data brokering, or
-  use message content to train artificial-intelligence models.
-- Removing the Bot from a server does not automatically delete retained data.
-  The server owner can purge current live guild data with `/setup purge`, and
-  individuals can submit a privacy request to the Operator.
+Depending on enabled features, the Bot processes:
 
-## 3. Information We Process
+- **Guild metadata:** guild ID, guild name, enabled state, and join/leave timestamps.
+- **Guild settings:** feature flags, log-channel ID, IANA timezone, invocation keyword and aliases, finite moderation limit, and greeting profile names/messages.
+- **Command and interaction data:** guild, channel, user, member, role, message, and interaction identifiers and the options needed to validate and complete a request.
+- **Message and reaction events:** content and metadata needed in memory to recognize a deliberately addressed request, perform authorized moderation or cleanup, send a panel submission, or update enabled activity metrics.
+- **Metrics:** guild-scoped command counters and, when activity metrics are enabled, member-ID-scoped counts for messages, reactions, and game results. Activity backfill reads eligible Discord history to reconstruct selected counts.
+- **Operational records:** startup, shutdown, command failure, migration, security, and diagnostic information written by the host. Exact log fields and retention must be verified before publication.
 
-The exact data depends on which features a server administrator enables and
-which commands members use.
+The active schema contains only `schema_migrations`, `guilds`, `guild_settings`, and `metrics`. It does not persist ordinary message content. A DM panel delivers submitted content through Discord only to the selected recipient; it does not copy the content, sender, or recipient to the configured guild log channel. A successful delivery increments a guild-scoped aggregate command counter that contains none of those details. The Discord-hosted direct message is governed by the visibility and retention of that destination.
 
-| Category                              | Examples                                                                                                                                                                           | Why it is processed                                                                                                                                                           |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Guild and installation data           | Guild ID and name; enabled state; Bot join, leave, and record timestamps                                                                                                           | Route data to the correct guild, isolate tenants, manage setup, and restore a rejoined guild safely                                                                           |
-| Discord identifiers and configuration | User, guild, channel, role, message, and thread IDs; timezone; supported and legacy feature flags; invocation keyword and aliases; greeting profiles                               | Deliver configured features, enforce permissions, target Discord resources, keep tenants isolated, and preserve compatible guild settings                                     |
-| Member and account context            | User ID; role membership; permissions and role hierarchy; Discord account and server-join timestamps when returned by Discord                                                      | Authorize commands, resolve utilities, apply moderation, attribute activity metrics, and enforce Discord hierarchy                                                            |
-| Content and command input             | Greeting text, announcements, panel text, DM-panel submissions, moderation reasons, utility targets, and choice input                                                              | Perform the action requested by a member or administrator and maintain the resulting supported state                                                                          |
-| Message and reaction activity         | Message content, authors, replies, mentions, timestamps, reactions, reactor IDs, and accessible message/thread history                                                             | Run neutral conversational triggers, reply moderation, activity metrics, and administrator-requested backfills                                                                |
-| Retained legacy feature data          | Court questions and posts; answer-to-user/message mappings; cooldowns; schedules; royal/AFK state; old labels, channels, roles, and metrics                                        | Preserve migrated or previously created data for compatibility, rollback, private export, retention cleanup, and owner-authorized purge; these are not active public features |
-| Usage and operational data            | Per-user message, reaction, and game counts; command counts; backfill initiator/status; legacy anonymous-answer/post metrics; silence-lease recovery state; error and service logs | Provide statistics and leaderboards, recover prior permission changes, troubleshoot, secure, and improve reliability                                                          |
-| Exports, migrations, and backups      | Portable guild exports, internal legacy-migration data, SQLite database copies, and operational backups                                                                            | Let authorized administrators inspect guild data and support compatibility migration, rollback, and disaster recovery                                                         |
+Do not submit passwords, tokens, payment data, government identifiers, health information, or other sensitive information to the Bot.
 
-The Bot receives this information from Discord's API, from members and server
-administrators, and from actions the Bot performs. It does not use cookies or
-independent web tracking. The application code does not intentionally collect
-IP addresses, email addresses, phone numbers, payment details, or precise
-physical location.
+## 3. Why data is used
 
-The Bot is not designed or authorized to process protected health information,
-financial or payment-account information, government identifiers,
-authentication credentials, or other sensitive information regulated by law.
-Do not submit such information. If the Operator receives unauthorized Discord
-API data in error, the Operator must notify Discord and delete the data as
-required by Discord's Developer Terms.
+Data is used to:
 
-### Transient API data and caches
+- provide requested commands, conversational replies, greetings, utilities, panels, and moderation actions;
+- enforce guild configuration, permissions, role hierarchy, input limits, cooldowns, and tenant isolation;
+- maintain optional activity statistics and leaderboards selected by guild administrators;
+- diagnose failures, prevent abuse, secure the service, and meet legal or Discord obligations; and
+- respond to support, privacy, and security requests.
 
-Discord API payloads and Discord.js objects—including members, messages,
-reactions, channels, and roles—may be held temporarily in process memory until
-eviction or restart. These transient caches are not the SQLite database.
-Ordinary message bodies are not intentionally persisted to SQLite solely
-because the Bot observed them, although limited identifiers and error details
-may enter operational logs.
+The operator must identify and document the lawful basis for each processing purpose in every applicable jurisdiction before publication. The Bot must not be used for advertising profiles, sale of personal data, or automated decisions with legal or similarly significant effects.
 
-### Message access and history scans
+## 4. Who receives data
 
-In an enabled guild, the Bot counts messages from non-bot members and may inspect
-message content for enabled neutral triggers and reply-moderation phrases.
-Reaction events are used to update
-per-user reaction counts. Ordinary message bodies are not saved to the local
-SQLite database merely because the Bot observes them, but content deliberately
-submitted to a supported stored feature—such as a greeting, announcement,
-panel, DM forwarding, or moderation reason—can be retained or copied to a
-configured guild log as described below.
+Data may be received by:
 
-An administrator can start an activity backfill. A backfill may fetch accessible
-text and announcement channels and active or archived threads, including
-private threads the Bot is permitted to access. It can scan all available
-history if the administrator does not set a lookback limit. The Bot retains
-per-user counts and scan status, not a separate local copy of every scanned
-message body.
+- Discord, as the platform carrying commands, messages, interactions, and responses;
+- `HOSTING PROVIDER` and verified infrastructure vendors needed to operate and secure the Bot;
+- guild members or administrators who can see the relevant Discord channel, response, panel destination, leaderboard, log channel, or authorized guild export;
+- personnel authorized by the operator under least-privilege access controls; and
+- authorities or other parties when disclosure is lawfully required, necessary to protect rights and safety, or part of a properly disclosed business transfer.
 
-### Retained legacy answers are pseudonymous, not untraceable
+The operator does not sell personal data. Vendor identities, processing locations, contracts, and transfer safeguards remain publication blockers until completed.
 
-Superior no longer offers new anonymous court-answer submissions. A migrated or
-previously created record can still map a member's user ID to a question message,
-answer message, and submission time. The local database did not store the
-answer body, but the mapping was never anonymous to the Bot, its Operator, or a
-guild owner or Administrator who can use `/setup export`. A separate cooldown
-timestamp or per-user legacy anonymous-answer count may also remain. Discord
-controls retention of the already-posted message independently. Public-feature
-retirement did not delete or anonymize these retained records.
+## 5. Retention
 
-### Guild logs and administrator exports
+Current application behavior is not yet a public retention commitment:
 
-When a guild configures a log channel, people who can view that channel may see
-actor and target identities, IDs, moderation reasons, announcement text,
-DM-panel content, panel changes, and operational details. Older logs or backups
-may also contain events produced by retired features.
-A DM-panel submission is sent to the named recipient and its sender identity,
-source channel, and complete message are also copied to the configured log
-channel, when one is available.
+- Active schema rows remain until an authorized guild-owner purge or operator deletion. Removing the Bot marks a guild inactive but does not currently delete its rows automatically.
+- A guild-owner purge removes that guild's active metadata, settings, and metrics from the live database. It does not securely erase SQLite free pages or delete Discord messages, host logs, downloaded exports, or backups.
+- Host logs and backups do not have an enforced repository-level expiry. The operator must set, document, test, and monitor fixed schedules before publication.
+- A migration backup can contain information that is no longer present in the active schema and must receive the same or stronger access, retention, and deletion controls.
+- Downloaded exports are controlled by the administrator or Discord client that receives them.
 
-Guild owners and authorized administrators can request an ephemeral, portable
-export containing that guild's current settings and activity data plus retained
-legacy state, questions, posts, answer mappings, metrics, and cooldowns. The
-export deliberately excludes the Bot's
-internal live silence-lease recovery record. Anyone who downloads an export is
-responsible for protecting and deleting their copy.
+When required by Discord or law, API data must be deleted promptly after an applicable user request, when no longer needed, or when the hosted Bot stops operating, unless retention is legally required. The operator must implement verified deletion across live data, logs, backups, and vendors before publication.
 
-## 4. How We Use Information
+## 6. Choices and requests
 
-We process information to:
+Guild administrators can disable individual features or the guild. The guild owner can use the exact-confirmation `/setup purge` flow. Members can ask guild staff to address Discord-hosted content and can contact **PRIVACY/SUPPORT EMAIL** to request access, correction, deletion, restriction, objection, portability, or other rights available under applicable law.
 
-- provide, configure, and route Bot commands and automated features;
-- provide utilities, greetings, neutral conversational replies, announcements,
-  panels, activity statistics, and leaderboards;
-- enforce permissions, moderation, and anti-abuse controls;
-- provide member statistics, leaderboards, and administrator analytics;
-- keep each guild's data isolated and recover temporary channel-permission
-  changes;
-- respond to support, privacy, safety, and security requests;
-- diagnose failures, preserve service integrity, and maintain backups; and
-- comply with Discord's requirements and applicable law.
+Include the relevant Discord user ID and guild ID, but never send a password or bot token. We may verify control of the account and request only the context necessary to locate data. Deleting Bot data does not delete a copy hosted by Discord; use Discord controls or contact the relevant guild administrators for that copy.
 
-Where applicable law requires a legal basis, the basis will depend on the
-processing and jurisdiction. It may include providing functionality requested
-by users or server administrators, the Operator's legitimate interests in
-running and securing the Bot, consent where required, and compliance with legal
-obligations. You may contact the Operator for details about a particular use.
+The current implementation does not yet provide a tested end-to-end individual export, deletion, and re-collection opt-out workflow. It must not be described as doing so.
 
-The Bot's rule-based eligibility and moderation features can automatically
-allow, reject, time out, or otherwise act on Discord interactions according to
-server configuration. They are not intended to make legal or similarly
-significant decisions. Server administrators control the applicable settings
-and can review or disable the features.
+## 7. Security and incidents
 
-## 5. When Information Is Disclosed
+The code provides guild scoping, lifecycle invalidation, permission checks, bounded inputs, explicit database migration, integrity checks, private backup guidance, and secret exclusions. The deployment must separately verify encryption, host hardening, patching, credential rotation, least-privilege access, monitoring, recovery, and vendor controls. No system is guaranteed completely secure.
 
-Information may be disclosed to:
+Report a suspected incident privately to **PRIVACY/SUPPORT EMAIL**. The operator must begin containment and investigation promptly and notify Discord, affected people, regulators, or others when required.
 
-- **Discord:** All Bot events, interactions, messages, embeds, DMs,
-  attachments, and moderation or role actions pass through Discord.
-- **People selected by the user or guild:** Under the current implementation,
-  content and statistics are visible according to target channel, thread, DM,
-  and role permissions, and configured log-channel viewers can see the audit
-  information described above. Public deployment is blocked until every such
-  API-data disclosure has a valid basis under Discord's Developer Terms.
-- **The Operator and authorized administrators:** People with a legitimate need
-  may access the live database, service logs, backups, or guild exports to run,
-  secure, support, or administer the Bot.
-- **Infrastructure providers:** Hosting, storage, backup, monitoring, or similar
-  providers may process information only after the Operator identifies them and
-  binds them in writing to act at the Operator's direction, comply with
-  Discord's terms, protect API data, and delete it when required.
-- **Authorities, Discord, or affected users:** API data may be disclosed when
-  required by applicable law or Discord's terms. Incident information may be
-  provided to Discord and affected users as required by Discord's Developer
-  Terms or law.
+## 8. Children
 
-Before public deployment, Discord API data must be disclosed only to a
-contracted service provider acting at the Operator's direction, as required by
-law or Discord's terms, or when the applicable user expressly directs the
-disclosure.
+The Bot is not directed to anyone below the minimum age to use Discord in their country. If a parent or guardian believes prohibited child data was processed, contact **PRIVACY/SUPPORT EMAIL** so the operator can verify and respond as required.
 
-We do not sell, license, or otherwise commercialize Discord API data, disclose
-it to advertisers or data brokers, or use it to build advertising profiles. We
-do not use message content to train machine-learning or artificial-intelligence
-models.
+## 9. Changes
 
-Discord and infrastructure providers may process information in countries
-other than the user's country. Any required transfer safeguards depend on the
-Operator's location, providers, and applicable law. Contact the Operator for
-deployment-specific details.
+An effective policy must be hosted at a stable public URL. Material changes require an updated date and any notice or consent required by law. This draft has no effect until the publication prerequisites are completed and an effective date is added.
 
-## 6. Retention and Deletion
-
-| Data                                                                          | Normal retention                                                                                                                                                                                                                   |
-| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Legacy answer user/message mapping                                            | Existing records retain their stored guild retention setting (90 days by default, historically configurable from 1 to 36,500 days). Cleanup can be delayed while the Bot is offline. Public retirement does not itself erase them. |
-| Legacy answer text on Discord                                                 | Controlled separately by Discord and server moderation. Local metadata cleanup does not delete the Discord message.                                                                                                                |
-| Legacy cooldowns and per-user or aggregate metrics                            | Retained until guild purge or an applicable verified deletion request; answer-link cleanup does not erase these records. The implementation must adopt justified automatic expiration before public deployment.                    |
-| Guild settings, legacy questions/state/post records, and Discord resource IDs | Retained while needed for supported operation or compatibility and otherwise until the server owner purges the guild or the Operator deletes them. No general automatic expiration currently applies.                              |
-| Transient API payloads and library caches                                     | Held in process memory until eviction or restart; they are not intentionally persisted as complete payload archives.                                                                                                               |
-| Backfill initiator and status                                                 | Held only in process memory until replaced by later status, explicitly forgotten during lifecycle handling, or the Bot process restarts.                                                                                           |
-| Data after the Bot leaves a guild                                             | The current implementation marks the guild inactive and retains its data for a possible rejoin. This behavior must be replaced with a prompt, verified deletion process before public deployment.                                  |
-| Host logs                                                                     | The application writes structured logs to the host but does not enforce log rotation itself. **Operator: replace this sentence with the production log-retention period before publication.**                                      |
-| Backups                                                                       | The software can create restricted backup files but does not automatically expire them. **Operator: add and enforce a production backup-retention and erasure schedule before publication.**                                       |
-| Downloaded exports                                                            | Retained by the administrator or Discord client that receives them; the Operator cannot automatically delete independently downloaded copies.                                                                                      |
-
-The server-owner-only `/setup purge` flow removes that guild's records from the
-active SQLite database for metadata, settings, state, questions, posts, answer
-mappings, metrics, and cooldowns. It does **not** securely erase SQLite free
-pages or delete Discord messages, DMs, Discord audit history, host logs,
-previously downloaded exports, or historical backups. The Operator must
-separately address those copies when required by a verified request, Discord's
-instructions, or applicable law.
-
-Before public deployment, the Operator must promptly delete API data when the
-applicable user requests deletion, Discord requests it, the data is no longer
-needed for approved functionality, or the official hosted Bot stops operating,
-unless applicable law requires retention. The current implementation has no
-tested end-to-end individual-erasure or re-collection opt-out workflow and must
-not be represented as having one.
-
-## 7. Your Choices and Rights
-
-- A server administrator can disable individual features or the entire guild.
-- A server owner or Administrator can export current guild data. Only the server
-  owner can use `/setup purge`, with the exact confirmation required by the Bot.
-- A member can ask guild staff to remove a specific Discord message or anonymous
-  answer where appropriate.
-- Any person can request access, correction, deletion, or a copy of personal
-  data by emailing **PRIVACY/SUPPORT EMAIL**. Include the relevant Discord user
-  ID and guild ID, but never send a bot token, password, or other credential.
-
-We may need to verify that the requester controls the relevant Discord account
-and may ask for additional context. Subject to applicable law, rights may also
-include restriction, objection, portability, withdrawal of consent, and a
-complaint to a data-protection authority. Discord API data must be deleted
-promptly on the applicable user's request unless applicable law requires
-retention. Other privacy rights may be limited only where applicable law
-permits. The Operator must respond without undue delay and explain any lawful
-limitation.
-
-Deleting data from the Bot does not automatically delete the same content from
-Discord. Use Discord's controls or contact the relevant server's administrators
-for Discord-hosted messages and account data.
-
-## 8. Security and Incidents
-
-The codebase provides safeguards designed to reduce risk, including guild-scoped
-data isolation, role and permission checks, guarded legacy migration, and operational
-guidance for restrictive database and backup file permissions. Operational
-secrets should be kept outside source control. The repository does not itself
-demonstrate encryption at rest or deployment-specific access restrictions;
-those controls must be implemented and verified before public deployment. No
-storage or transmission method is completely secure, and this policy does not
-promise absolute security or uninterrupted recovery.
-
-Report a suspected security or privacy incident to **PRIVACY/SUPPORT EMAIL**.
-For a potential unauthorized access to Discord API data, the Operator must
-immediately begin remediation, promptly notify Discord and affected users as
-required by Discord's Developer Terms or law, and provide Discord with requested
-incident information.
-
-## 9. Children
-
-The Bot is not directed to children below the minimum age required to use
-Discord in their country. Do not use the Bot if you are not old enough to use
-Discord. A parent, guardian, or other person who believes a child provided data
-contrary to these requirements should contact the Operator. If the report is
-verified, the Operator must stop the processing and promptly delete the data as
-required.
-
-## 10. Changes to This Policy
-
-We may update this policy when the Bot, its data practices, Discord's rules, or
-applicable law changes. We will post the updated policy at the same public URL,
-change the "Last updated" date, and provide any additional notice required by
-law. Material changes apply prospectively unless a different treatment is
-legally permitted and clearly stated.
-
-## 11. Contact
+## 10. Contact
 
 **Operator:** OPERATOR LEGAL NAME<br>
-**Privacy, deletion, security, and support email:** PRIVACY/SUPPORT EMAIL
+**Privacy, deletion, security, and support:** PRIVACY/SUPPORT EMAIL
 
-Do not publish Discord IDs, private messages, or other personal information in
-a public issue tracker.
+Do not place private Discord data or vulnerability details in a public issue.

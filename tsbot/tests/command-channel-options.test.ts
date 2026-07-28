@@ -7,6 +7,8 @@ type JsonOption = {
   type?: number;
   options?: JsonOption[];
   channel_types?: number[];
+  required?: boolean;
+  max_length?: number;
 };
 
 type JsonCommand = {
@@ -59,9 +61,6 @@ describe("public command surface", () => {
       "fun",
       "greetings",
     ]);
-    expect(commandNames).not.toEqual(
-      expect.arrayContaining(["court", "questions", "invictus"]),
-    );
   });
 
   it("marks every slash command unavailable in DMs", () => {
@@ -112,19 +111,36 @@ describe("public command surface", () => {
     }
   });
 
-  it("exposes optional message_file attachment on /superior say", () => {
+  it("requires bounded inline text on /superior say", () => {
     const commands = buildCommandDefinitions().map((command) =>
       command.toJSON(),
     ) as JsonCommand[];
 
     const superior = findCommand(commands, "superior");
     const say = findSubcommand(superior, "say");
-    const messageFile = findOption(say, "message_file");
+    const message = findOption(say, "message");
 
-    expect(messageFile.type).toBe(11);
+    expect(message.type).toBe(3);
+    expect(message.required).toBe(true);
   });
 
-  it("does not register retired Superior and fun subcommands", () => {
+  it("bounds panel embed and button text to Discord limits", () => {
+    const commands = buildCommandDefinitions().map((command) =>
+      command.toJSON(),
+    ) as JsonCommand[];
+    const superior = findCommand(commands, "superior");
+
+    for (const name of ["dmpanel", "rolepanel", "rolepanelmulti"]) {
+      const panel = findSubcommand(superior, name);
+      expect(findOption(panel, "title").max_length).toBe(256);
+      expect(findOption(panel, "description").max_length).toBe(4_096);
+      if (name !== "rolepanelmulti") {
+        expect(findOption(panel, "button_label").max_length).toBe(80);
+      }
+    }
+  });
+
+  it("does not register removed compatibility subcommands", () => {
     const commands = buildCommandDefinitions().map((command) =>
       command.toJSON(),
     ) as JsonCommand[];
@@ -133,11 +149,10 @@ describe("public command surface", () => {
     const funSubcommands =
       findCommand(commands, "fun").options?.map(({ name }) => name) ?? [];
 
-    expect(superiorSubcommands).not.toEqual(
-      expect.arrayContaining(["afk", "afkstatus", "resetroyaltimer"]),
+    expect(superiorSubcommands).toHaveLength(18);
+    expect(superiorSubcommands).toEqual(
+      expect.arrayContaining(["purge", "purgeuser", "backfillstats", "help"]),
     );
-    expect(funSubcommands).not.toEqual(
-      expect.arrayContaining(["verdict", "title", "fate"]),
-    );
+    expect(funSubcommands).toEqual(["battle", "stats", "leaderboard"]);
   });
 });

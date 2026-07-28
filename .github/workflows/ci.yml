@@ -4,14 +4,30 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  test:
+  validate:
+    name: Validate on Linux
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: "npm"
+          cache-dependency-path: tsbot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: tsbot
+        run: npm ci
 
       - name: Validate operations shell
         run: |
@@ -22,6 +38,40 @@ jobs:
           fi
           shellcheck ops.sh
 
+      - name: Check formatting
+        working-directory: tsbot
+        run: npm run format:check
+
+      - name: Typecheck
+        working-directory: tsbot
+        run: npm run typecheck
+
+      - name: Tests
+        working-directory: tsbot
+        run: npm test
+
+      - name: Build production JavaScript
+        working-directory: tsbot
+        run: npm run build
+
+      - name: Verify clean production output
+        working-directory: tsbot
+        run: |
+          test -f dist/src/index.js
+          test ! -d dist/tests
+          find dist/src -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Check whitespace errors
+        run: git diff --check
+
+  windows-portable:
+    name: Build Windows portable artifact
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -29,33 +79,23 @@ jobs:
           cache: "npm"
           cache-dependency-path: tsbot/package-lock.json
 
-      - name: Install dependencies
-        run: |
-          cd tsbot
-          npm ci
+      - name: Install build dependencies
+        working-directory: tsbot
+        run: npm ci
 
-      - name: Validate JSON files
-        run: |
-          node -e "JSON.parse(require('node:fs').readFileSync('data/bootstrap/questions.json','utf8'))"
-          node -e "JSON.parse(require('node:fs').readFileSync('data/bootstrap/answers.json','utf8'))"
-          node -e "JSON.parse(require('node:fs').readFileSync('data/bootstrap/state.json','utf8'))"
+      - name: Build portable Windows x64 ZIP twice reproducibly
+        working-directory: tsbot
+        run: npm run package:win:verify
 
-      - name: Check formatting
-        run: |
-          cd tsbot
-          npm run format:check
+      - name: Smoke-test launchers and native SQLite
+        shell: pwsh
+        run: ./windows/test-portable.ps1 -Artifact ./release/SuperiorBot-5.0.0-win-x64.zip
 
-      - name: Typecheck
-        run: |
-          cd tsbot
-          npm run typecheck
-
-      - name: Tests
-        run: |
-          cd tsbot
-          npm test
-
-      - name: Build
-        run: |
-          cd tsbot
-          npm run build
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SuperiorBot-5.0.0-win-x64
+          path: |
+            release/SuperiorBot-5.0.0-win-x64.zip
+            release/SuperiorBot-5.0.0-win-x64.zip.sha256
+          if-no-files-found: error

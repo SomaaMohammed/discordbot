@@ -1,5 +1,6 @@
 import {
   ApplicationCommandOptionType,
+  ChannelType,
   type ChatInputCommandInteraction,
   type GuildMember,
   type User,
@@ -8,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GuildRuntime } from "../src/runtime.js";
 import {
   buildUtilityCommandDefinition,
+  decodeSnowflakeTimestamp,
   handleUtilityCommand,
 } from "../src/discord/utilities.js";
 
@@ -26,6 +28,7 @@ interface UtilityHarness {
   interaction: ChatInputCommandInteraction;
   runtime: GuildRuntime;
   reply: ReplyMock;
+  deferReply: ReturnType<typeof vi.fn<(payload: unknown) => Promise<void>>>;
   recordCommandMetric: ReturnType<typeof vi.fn<(metricName: string) => void>>;
   membersFetch: ReturnType<
     typeof vi.fn<(userId: string) => Promise<GuildMember>>
@@ -105,7 +108,7 @@ function createHarness(
 
   const reply = vi.fn(async (_payload: unknown) => undefined);
   const recordCommandMetric = vi.fn((_metricName: string) => undefined);
-  const interaction = {
+  const interactionState: Record<string, unknown> = {
     commandName: "utility",
     guildId: interactionGuildId,
     guild,
@@ -114,12 +117,26 @@ function createHarness(
     options: {
       getSubcommand: vi.fn(() => subcommand),
       getUser: vi.fn(() => options.targetUser ?? null),
+      getRole: vi.fn(() => null),
+      getChannel: vi.fn(() => null),
+      getString: vi.fn(() => null),
     },
+    deferred: false,
+    replied: false,
+    editReply: reply,
+    followUp: reply,
     reply,
-  } as unknown as ChatInputCommandInteraction;
+  };
+  const deferReply = vi.fn(async (_payload: unknown) => {
+    interactionState.deferred = true;
+  });
+  interactionState.deferReply = deferReply;
+  const interaction =
+    interactionState as unknown as ChatInputCommandInteraction;
   const runtime = {
     guildId: runtimeGuildId,
     botVersion: "3.1.0-test",
+    settings: { timezone: "UTC" },
     storage: { recordCommandMetric },
     isCurrent: vi.fn(() => current),
   } as unknown as GuildRuntime;
@@ -128,6 +145,7 @@ function createHarness(
     interaction,
     runtime,
     reply,
+    deferReply,
     recordCommandMetric,
     membersFetch,
     member,
@@ -168,9 +186,13 @@ function getEmbedJson(reply: ReplyMock): {
   return embed.toJSON();
 }
 
-function expectPrivateReply(reply: ReplyMock): void {
-  const payload = getReplyPayload(reply);
-  expect(payload.ephemeral).toBe(true);
+function expectPrivateReply(harness: UtilityHarness): void {
+  const payload = getReplyPayload(harness.reply);
+  if (harness.deferReply.mock.calls.length > 0) {
+    expect(harness.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+  } else {
+    expect(payload.ephemeral).toBe(true);
+  }
   expect(payload.allowedMentions).toEqual({ parse: [] });
 }
 
@@ -179,7 +201,7 @@ afterEach(() => {
 });
 
 describe("utility command definition", () => {
-  it("registers four guild-only utility subcommands", () => {
+  it("registers eight guild-only utility subcommands", () => {
     const definition = buildUtilityCommandDefinition().toJSON();
     const subcommands = (definition.options ?? []) as Array<{
       name: string;
@@ -193,6 +215,10 @@ describe("utility command definition", () => {
       "avatar",
       "userinfo",
       "serverinfo",
+      "roleinfo",
+      "channelinfo",
+      "snowflake",
+      "timestamp",
     ]);
 
     for (const subcommandName of ["avatar", "userinfo"]) {
@@ -208,6 +234,14 @@ describe("utility command definition", () => {
       ]);
     }
   });
+
+  it("decodes bounded Discord snowflakes without number precision loss", () => {
+    expect(decodeSnowflakeTimestamp("175928847299117063")).toBe(
+      1_462_015_105_796,
+    );
+    expect(decodeSnowflakeTimestamp("not-an-id")).toBeNull();
+    expect(decodeSnowflakeTimestamp("99999999999999999999")).toBeNull();
+  });
 });
 
 describe("utility command handling", () => {
@@ -217,7 +251,7 @@ describe("utility command handling", () => {
 
     await handleUtilityCommand(harness.interaction, harness.runtime);
 
-    expectPrivateReply(harness.reply);
+    expectPrivateReply(harness);
     const embed = getEmbedJson(harness.reply);
     const fields = Object.fromEntries(
       (embed.fields ?? []).map((field) => [field.name, field.value]),
@@ -239,7 +273,7 @@ describe("utility command handling", () => {
 
     await handleUtilityCommand(harness.interaction, harness.runtime);
 
-    expectPrivateReply(harness.reply);
+    expectPrivateReply(harness);
     const embed = getEmbedJson(harness.reply);
     expect(embed.image?.url).toBe(SERVER_AVATAR_URL);
     expect(embed.description).toContain(
@@ -259,7 +293,7 @@ describe("utility command handling", () => {
 
     await handleUtilityCommand(harness.interaction, harness.runtime);
 
-    expectPrivateReply(harness.reply);
+    expectPrivateReply(harness);
     const embed = getEmbedJson(harness.reply);
     expect(embed.image?.url).toBe(GLOBAL_AVATAR_URL);
     expect(embed.description).not.toContain("Server avatar");
@@ -274,7 +308,7 @@ describe("utility command handling", () => {
 
     await handleUtilityCommand(harness.interaction, harness.runtime);
 
-    expectPrivateReply(harness.reply);
+    expectPrivateReply(harness);
     const embed = getEmbedJson(harness.reply);
     const fields = Object.fromEntries(
       (embed.fields ?? []).map((field) => [field.name, field.value]),
@@ -303,7 +337,7 @@ describe("utility command handling", () => {
 
     await handleUtilityCommand(harness.interaction, harness.runtime);
 
-    expectPrivateReply(harness.reply);
+    expectPrivateReply(harness);
     const embed = getEmbedJson(harness.reply);
     const fields = Object.fromEntries(
       (embed.fields ?? []).map((field) => [field.name, field.value]),
@@ -333,7 +367,7 @@ describe("utility command handling", () => {
 
     await handleUtilityCommand(harness.interaction, harness.runtime);
 
-    expectPrivateReply(harness.reply);
+    expectPrivateReply(harness);
     expect(getReplyPayload(harness.reply).content).toContain(
       "Action cancelled",
     );
@@ -347,7 +381,7 @@ describe("utility command handling", () => {
 
     await handleUtilityCommand(harness.interaction, harness.runtime);
 
-    expectPrivateReply(harness.reply);
+    expectPrivateReply(harness);
     expect(getReplyPayload(harness.reply).content).toBe(
       "This utility request does not belong to this server.",
     );
@@ -364,5 +398,107 @@ describe("utility command handling", () => {
     ).rejects.toThrow("reply failed");
 
     expect(harness.recordCommandMetric).not.toHaveBeenCalled();
+  });
+
+  it("shows safe role metadata without listing permissions", async () => {
+    const harness = createHarness("roleinfo");
+    const role = {
+      id: "423456789012345678",
+      guild: harness.member.guild,
+      name: "Helpers *Team*",
+      members: new Map([[USER_ID, harness.member]]),
+      position: 4,
+      mentionable: false,
+      managed: false,
+      createdTimestamp: CREATED_AT,
+      hexColor: "#336699",
+      color: 0x336699,
+    };
+    vi.mocked(harness.interaction.options.getRole).mockReturnValue(
+      role as never,
+    );
+
+    await handleUtilityCommand(harness.interaction, harness.runtime);
+
+    expectPrivateReply(harness);
+    const embed = getEmbedJson(harness.reply);
+    expect(embed.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Name", value: "Helpers \\*Team\\*" }),
+        expect.objectContaining({ name: "Members", value: "`1`" }),
+      ]),
+    );
+    expect(JSON.stringify(embed).toLowerCase()).not.toContain("permission");
+    expect(harness.recordCommandMetric).toHaveBeenCalledWith(
+      "utility.roleinfo",
+    );
+  });
+
+  it("shows safe channel metadata from the current guild", async () => {
+    const harness = createHarness("channelinfo");
+    const channel = {
+      id: "523456789012345678",
+      guild: harness.member.guild,
+      name: "general_chat",
+      type: ChannelType.GuildText,
+      parent: { name: "Community" },
+      createdTimestamp: CREATED_AT,
+    };
+    vi.mocked(harness.interaction.options.getChannel).mockReturnValue(
+      channel as never,
+    );
+
+    await handleUtilityCommand(harness.interaction, harness.runtime);
+
+    const embed = getEmbedJson(harness.reply);
+    expect(embed.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "Channel ID",
+          value: `\`${channel.id}\``,
+        }),
+        expect.objectContaining({ name: "Category", value: "Community" }),
+      ]),
+    );
+    expect(harness.recordCommandMetric).toHaveBeenCalledWith(
+      "utility.channelinfo",
+    );
+  });
+
+  it("decodes a snowflake and records the metric only after replying", async () => {
+    const harness = createHarness("snowflake");
+    vi.mocked(harness.interaction.options.getString).mockReturnValue(
+      "175928847299117063",
+    );
+
+    await handleUtilityCommand(harness.interaction, harness.runtime);
+
+    expect(getReplyPayload(harness.reply).content).toContain(
+      "175928847299117063",
+    );
+    expect(getReplyPayload(harness.reply).content).toContain(
+      "<t:1462015105:F>",
+    );
+    expect(harness.recordCommandMetric).toHaveBeenCalledWith(
+      "utility.snowflake",
+    );
+  });
+
+  it("renders ISO time in all useful Discord timestamp forms", async () => {
+    const harness = createHarness("timestamp");
+    (harness.runtime.settings as { timezone: string }).timezone = "UTC";
+    vi.mocked(harness.interaction.options.getString).mockReturnValue(
+      "2026-07-28T18:30:00",
+    );
+
+    await handleUtilityCommand(harness.interaction, harness.runtime);
+
+    const content = getReplyPayload(harness.reply).content ?? "";
+    expect(content).toContain("Configured timezone: **UTC**");
+    expect(content).toContain("<t:1785263400:F>");
+    expect(content).toContain("<t:1785263400:R>");
+    expect(harness.recordCommandMetric).toHaveBeenCalledWith(
+      "utility.timestamp",
+    );
   });
 });

@@ -1,289 +1,109 @@
-# Superior Terms of Service
+# Superior terms of service
 
-**Effective date:** July 27, 2026<br>
+**Effective date:** NOT YET EFFECTIVE<br>
 **Last updated:** July 28, 2026
 
-> **Unpublished draft — do not use this URL in the Discord Developer Portal.**
-> The current implementation and these Terms are not suitable for public
-> deployment or publication until every prerequisite below is implemented,
-> verified in production, and reflected accurately in the final documents.
+> **Unpublished draft. Do not link this document from the Discord Developer Portal or present it as binding terms.** Replace the operator/contact placeholders, complete the [Privacy Policy](privacy-policy.md) publication prerequisites, verify the hosted service, and obtain appropriate legal review for the operator's jurisdictions.
 
-Before publication, the Operator must:
+## 1. Agreement and operator
 
-- replace `OPERATOR LEGAL NAME` and `PRIVACY/SUPPORT EMAIL` with a real legal
-  identity and monitored private contact address;
-- complete every deployment, encryption, provider, retention, deletion,
-  disclosure, and Discord-policy prerequisite listed in the unpublished
-  [Privacy Policy](privacy-policy.md);
-- resolve the Discord-policy risks created by passive per-user activity
-  tracking, user leaderboards, history backfills, and administrator exports of
-  other users' API data;
-- ensure sensitive data is prohibited, DM-panel disclosures are clear at the
-  point of collection, and retained pseudonymous-answer data is described
-  accurately; and
-- have qualified counsel select jurisdiction-specific terms and review the
-  complete agreement for the Operator's location and users.
+These terms are between **OPERATOR LEGAL NAME** (“Operator,” “we,” “us,” or “our”) and each person who installs or intentionally uses the official hosted Superior bot (“Bot”). Contact **PRIVACY/SUPPORT EMAIL**.
 
-## 1. Agreement and Operator
+Once these terms become effective, adding the Bot or intentionally using a command, button, modal, panel, or conversational feature means agreeing to them. A guild administrator confirms authority to install and configure the Bot. If you do not agree, do not install or intentionally use it.
 
-These Terms of Service (the "Terms") are an agreement between
-**OPERATOR LEGAL NAME** (the "Operator," "we," "us," or "our") and each person
-who installs or intentionally uses or interacts with the official hosted
-deployment of Superior (the "Bot"). Contact the Operator at
-**PRIVACY/SUPPORT EMAIL**.
-
-By adding the Bot to a Discord server or intentionally using a Bot command,
-button, modal, panel, or other feature, you agree to these Terms. If you do not
-agree, do not install or intentionally use the Bot. A server administrator who
-adds the Bot confirms that they have authority to do so and to configure its
-permissions for that server.
-
-If a person or organization lawfully operates an independent deployment of the
-source code, it operates a separate service and must provide terms and policies
-appropriate for that deployment. These Terms do not automatically govern an
-independent deployment or grant rights to use the source code.
+An independent source-code deployment is a separate service whose operator must provide its own accurate terms and privacy notice.
 
 ## 2. Eligibility
 
-You must meet Discord's minimum age requirement for your country and be legally
-able to agree to these Terms. If you use the Bot for an organization or manage
-it for a Discord server, you confirm that you have authority to act in that
-role. The Bot is not directed to anyone who is not permitted to use Discord.
+You must meet Discord's minimum age requirement in your country and be legally able to agree. If you act for an organization or administer a guild, you confirm authority to do so.
 
-## 3. What the Bot Does
+## 3. Service
 
-Superior provides configurable Discord utilities, neutral conversational
-responses, greetings, announcements, DM and role panels, activity statistics,
-leaderboards, message cleanup, channel controls, and moderation or
-administration tools. A server's owner and administrators decide which
-supported features to enable, how to configure them, and who can view the
-resulting channels and logs.
+Superior provides configurable conversational replies, greetings, information utilities, announcements and panels, optional activity statistics, message cleanup, channel controls, timeouts, role panels, and other bounded moderation tools. Guild owners and administrators select supported features, permissions, destinations, and limits.
 
-The Bot no longer offers its former court, question, anonymous-answer, royal,
-scheduled-post, or digest features. Legacy records from those features may
-remain in schema-v2 storage, exports, logs, or backups for compatibility,
-rollback, retention, and deletion workflows. Retirement does not mean those
-records were erased.
+The Bot is not an emergency service, professional adviser, or substitute for human moderation judgment. Features, limits, and availability may change.
 
-Features, commands, limits, and availability may change. The Bot is a community
-and administration tool, not an emergency service, professional adviser, or
-substitute for human moderation judgment.
+## 4. Discord
 
-## 4. Discord Is a Separate Service
+The Bot depends on Discord's APIs and infrastructure. Discord is a separate service governed by its [Terms of Service](https://discord.com/terms), [Community Guidelines](https://discord.com/guidelines), and [Privacy Policy](https://discord.com/privacy). Discord does not sponsor or endorse the Bot and may change or withdraw APIs, intents, permissions, accounts, or access.
 
-The Bot operates through Discord and depends on Discord's APIs and
-infrastructure. Your use of Discord remains subject to Discord's
-[Terms of Service](https://discord.com/terms),
-[Community Guidelines](https://discord.com/guidelines), and
-[Privacy Policy](https://discord.com/privacy). You must not use the Bot in a way
-that causes the Operator to violate Discord's rules.
+You must not use the Bot in a way that causes the Operator to violate Discord's rules.
 
-Discord is not a party to these Terms, is not responsible for the Bot, and does
-not sponsor or endorse it. Discord may change or withdraw API functionality,
-permissions, intents, accounts, or access at any time.
+## 5. Administrator responsibilities
 
-## 5. Server Owner and Administrator Responsibilities
+An installer or administrator is responsible for:
 
-If you install or administer the Bot, you are responsible for:
+- granting only the permissions needed for enabled features and maintaining safe role hierarchy and channel visibility;
+- configuring feature flags, logging, invocation terms, timezone, moderation limits, panels, and greetings appropriately;
+- telling members how the Bot is used and making the effective privacy notice and terms available;
+- supervising message cleanup, bulk actions, timeouts, panels, announcements, exports, activity backfill, statistics, and leaderboards;
+- protecting downloaded exports and administrator-visible logs; and
+- reviewing Bot output and correcting or reversing actions when human judgment is needed.
 
-- having authority to add the Bot and grant only the permissions needed for the
-  features you enable;
-- configuring the log channel, role hierarchy, timezone,
-  moderation limits, supported features, and log visibility appropriately;
-- telling members how the Bot processes information and making the current
-  Privacy Policy and Terms reasonably available;
-- ensuring your configuration and use comply with law, Discord's rules, and
-  your server's own policies;
-- supervising moderation, bulk actions, role panels, announcements, exports,
-  and activity backfills;
-- protecting downloaded exports and limiting access to channels that may
-  contain private, moderation, or audit content; and
-- reviewing Bot output and correcting or reversing actions when human judgment
-  is needed.
+Permission checks supplement, but do not replace, responsible administration.
 
-The Bot's permission checks supplement rather than replace responsible server
-administration. The Operator is not responsible for permissions, content, or
-actions selected by an independent server owner or administrator. These
-administrator responsibilities do not transfer or reduce the Operator's own
-obligations under Discord's terms or applicable law.
+## 6. Acceptable use
 
-## 6. User Conduct
+You must not:
 
-You may use the Bot only for lawful, authorized purposes. You must not:
+- violate law, Discord's rules, another person's rights, or applicable guild rules;
+- harass, threaten, exploit, discriminate, impersonate, dox, spam, or deceive;
+- submit malware, credentials, authentication tokens, unlawful content, or sensitive personal information;
+- use panels, exports, statistics, backfill, or moderation tools for unauthorized surveillance, retaliation, profiling, or harm;
+- bypass permissions, role hierarchy, lifecycle checks, input bounds, cooldowns, or other safeguards;
+- disrupt, overload, scrape, probe, or gain unauthorized access to the Bot, host, data, or another guild's data;
+- sell or broker Discord or Bot data; or
+- infringe intellectual-property, privacy, publicity, or other rights.
 
-- violate law, Discord's rules, another person's rights, or a server's rules;
-- harass, threaten, exploit, discriminate against, impersonate, or dox anyone;
-- submit illegal content, malware, credentials, authentication tokens,
-  protected health information, financial or payment-account information,
-  government identifiers, or other sensitive information regulated by law;
-- use DM panels, announcements, utilities, role panels, or moderation tools to
-  evade accountability, spam, deceive, surveil, retaliate, or cause harm;
-- bypass permissions, eligibility checks, cooldowns, rate limits, safety
-  controls, or access restrictions;
-- probe, disrupt, overload, reverse engineer for abuse, or gain unauthorized
-  access to the Bot, its data, its host, or another guild's data;
-- scrape, sell, broker, advertise against, or create unauthorized profiles from
-  Discord or Bot data;
-- infringe copyright, trademark, privacy, publicity, or other rights; or
-- assist another person in doing any of the above.
+Report security issues privately to **PRIVACY/SUPPORT EMAIL** rather than publishing exploit details or private data.
 
-Do not report a security issue by publicly posting exploit details or private
-data. Send it to **PRIVACY/SUPPORT EMAIL**.
+## 7. Content and feature disclosures
 
-## 7. Your Content
+You retain rights you already have in submitted content. You grant the Operator a limited, non-exclusive, worldwide, royalty-free license to receive, process, format, transmit, display, and temporarily store that content only as needed to provide, secure, support, and maintain the Bot, follow authorized instructions, and meet legal or Discord obligations.
 
-You retain the rights you have in content you submit. You give the Operator a
-limited, non-exclusive, worldwide, royalty-free license to receive, process,
-store, reproduce, format, transmit, and display that content only as reasonably
-needed to provide, secure, support, and maintain the Bot; comply with your
-instructions; enforce these Terms; and meet legal or Discord obligations. This
-license ends when the content is deleted from systems under the Operator's
-control, except for copies temporarily retained in backups or retained when
-lawfully required.
+You confirm that you have permission to submit the content and select its destination. Depending on the feature, content may be visible to guild members, administrators, a selected recipient, or log-channel viewers according to Discord permissions and feature configuration.
 
-You confirm that you have the rights and permissions needed to submit content
-and choose its destination. Depending on Discord channel permissions, content
-may be public to a server, visible to administrators or log-channel viewers, or
-delivered in a DM. The Operator does not claim ownership of user content.
+A DM-panel submission is delivered through Discord only to the selected recipient. It is not copied to the configured guild log channel, and the aggregate success metric records none of the content, sender, or recipient. Do not use the panel unless you accept delivery to the selected recipient.
 
-A DM-panel submission is delivered to the recipient identified on the panel.
-When a guild log channel is configured and available, the Bot also copies the
-complete message, sender identity, recipient identity, and source-channel
-context to that log channel. Do not submit a DM-panel message unless you accept
-both disclosures.
+Optional member-activity metrics and backfill can produce member-specific statistics and leaderboards from Discord events and eligible history. Administrators must enable and operate those features only with an appropriate, disclosed basis.
 
-### Retained legacy answers
+## 8. Privacy and deletion
 
-The Bot no longer accepts new anonymous court answers. For a migrated or
-previously used guild, the database may still contain a submitter's Discord user
-ID with a question/answer-message record and timestamp. The Operator and a guild
-owner or Administrator permitted to use `/setup export` can correlate that
-mapping with the Discord message. A separate cooldown timestamp or per-user
-legacy answer count can also remain. These records were pseudonymous, not
-untraceable, and public-feature retirement did not delete them.
+The effective [Privacy Policy](privacy-policy.md) will explain processing, disclosure, retention, and requests. Removing the Bot currently marks a guild inactive but does not automatically delete active rows. The guild owner can use `/setup purge`; that action does not delete Discord-hosted copies, host logs, backups, or downloaded exports.
 
-## 8. Privacy
+This behavior is a publication blocker, not a promise of indefinite retention. Before public operation, the Operator must implement and document appropriate guild-removal, individual-request, log, backup, vendor, and shutdown deletion procedures.
 
-The [Superior Privacy Policy](privacy-policy.md) explains what data the
-Bot processes, why it is used, who can receive it, how long it is retained, and
-how to request access, correction, or deletion. It is incorporated into these
-Terms by reference.
+## 9. Intellectual property
 
-Removing the Bot from a server marks the guild inactive but does not
-automatically delete retained Bot data. A server owner can use `/setup purge` to
-delete current live guild rows. That purge does not delete Discord-hosted
-messages, host logs, historical backups, or copies previously exported by an
-administrator. Privacy requests must be sent to **PRIVACY/SUPPORT EMAIL**.
+The Bot software, name, documentation, and other materials remain owned by their respective authors and licensors, subject to applicable open-source licenses. These terms govern the hosted service and do not grant branding rights or imply endorsement. Feedback may be used to improve the Bot without transferring ownership of pre-existing work.
 
-That leave-retention behavior is a description of the current unpublished
-implementation, not an acceptable public-deployment commitment. Before public
-deployment, the Operator must implement prompt deletion after confirmed guild
-removal, verified individual deletion and re-collection controls, fixed log and
-backup erasure periods, and deletion of API data if the hosted Bot stops
-operating, except where applicable law requires retention.
+## 10. Suspension and termination
 
-## 9. Intellectual Property
+Users may stop interacting at any time. A guild owner may disable features, disable the guild, remove the Bot, or use the confirmed purge flow.
 
-The Bot software, branding, documentation, and other materials are owned by the
-Operator or their respective contributors and licensors, subject to any
-third-party or open-source licenses that accompany particular components. These
-Terms govern use of the hosted Bot service; they do not grant permission to use
-the Operator's names, logos, or branding or imply endorsement.
+The Operator may restrict, suspend, or end access to protect people or the service, investigate abuse, comply with law or Discord, enforce effective terms, or discontinue the Bot. Urgent safety, legal, platform, or technical action may occur without advance notice. If the hosted Bot permanently stops, the Operator must stop API access and delete API data as required.
 
-Feedback may be used to improve the Bot without an obligation to compensate the
-person who submits it, but this does not transfer ownership of the submitter's
-pre-existing intellectual property.
+## 11. Availability and changes
 
-## 10. Suspension and Termination
+The Bot may be changed, interrupted, degraded, or discontinued. Discord changes, maintenance, bugs, host failures, and events outside the Operator's control can affect service. No promise is made that every feature or record will always remain available.
 
-You may stop using the Bot at any time. A server owner may disable features,
-disable the guild, remove the Bot, or use the confirmed guild-purge flow.
+Effective terms must be hosted at a stable URL and updated with required notice. Continuing to intentionally use the Bot after an effective update constitutes acceptance only to the extent permitted by law.
 
-The Operator may restrict, suspend, or terminate access to protect users or the
-service; investigate abuse or security issues; enforce these Terms; comply with
-law, Discord's rules, or Discord's requests; or discontinue the Bot. Where
-reasonable, the Operator may provide notice, but urgent safety, legal, platform,
-or technical action may occur without advance notice.
+## 12. Disclaimers and liability
 
-If the Operator permanently discontinues the hosted Bot, it must stop accessing
-Discord's APIs and promptly delete stored Discord API data unless applicable law
-requires retention.
+To the maximum extent permitted by applicable law, the Bot is provided “as is” and “as available.” The Operator and contributors disclaim implied warranties, including merchantability, fitness for a particular purpose, non-infringement, and uninterrupted, secure, or error-free operation. Bot output can be incomplete, delayed, inaccurate, or inappropriate; users and administrators must review it.
 
-Sections that by their nature should survive termination—including content
-responsibility, intellectual-property, disclaimer, liability, and dispute
-terms—remain effective. Data after termination is handled under the Privacy
-Policy and applicable law.
+To the maximum extent permitted by law, the Operator and contributors are not liable for indirect, incidental, special, consequential, exemplary, or punitive damages, or lost data, profit, goodwill, opportunity, or service access arising from the Bot. Nothing excludes a non-waivable consumer right, remedy, warranty, or liability.
 
-## 11. Availability and Changes
+## 13. General terms
 
-The Bot may be changed, interrupted, degraded, or discontinued. Maintenance,
-bugs, Discord outages or API changes, hosting failures, configuration errors,
-and events outside the Operator's control can affect service. The Operator does
-not promise that every feature or historical record will remain available or
-that deleted content can be recovered.
+Contact **PRIVACY/SUPPORT EMAIL** before starting a formal dispute and allow a reasonable opportunity to resolve it. Qualified counsel must add an appropriate governing-law and forum clause before publication without removing mandatory protections.
 
-We may update these Terms when the Bot, Discord's requirements, or applicable
-law changes. The updated Terms will be posted at the same public URL with a new
-"Last updated" date. If a change materially affects users, the Operator will
-provide any additional notice required by law. Continuing to intentionally use
-the Bot after updated Terms take effect constitutes acceptance to the extent
-permitted by law.
+If one provision is unenforceable, it is limited only as necessary and the remainder continues. Delay is not a waiver. Users may not transfer obligations without consent; the Operator may transfer the service as part of a lawful transaction with required notice. Effective terms and the effective privacy policy form the agreement for the hosted Bot and cannot make Discord responsible for it.
 
-## 12. Disclaimers
-
-To the maximum extent permitted by applicable law, the Bot is provided "as is"
-and "as available." The Operator and contributors disclaim implied warranties,
-including merchantability, fitness for a particular purpose, non-infringement,
-and uninterrupted, secure, or error-free operation. Bot output may be
-incomplete, delayed, inaccurate, or inappropriate for a particular situation;
-users and administrators must review it.
-
-Nothing in these Terms excludes a warranty, remedy, or consumer right that
-cannot lawfully be excluded.
-
-## 13. Limitation of Liability
-
-To the maximum extent permitted by applicable law, the Operator and contributors
-will not be liable for indirect, incidental, special, consequential, exemplary,
-or punitive damages, or for lost data, profits, goodwill, opportunities, or
-service access arising from or related to the Bot. This limitation does not
-apply where liability cannot lawfully be limited, including any liability that
-applicable law makes non-excludable.
-
-Server owners and administrators remain responsible for their configurations,
-permissions, moderation decisions, exports, and use of Bot output.
-
-## 14. Disputes and General Terms
-
-Before starting a formal dispute, contact **PRIVACY/SUPPORT EMAIL** and provide a
-reasonable opportunity to resolve the issue informally. Applicable law governs
-these Terms without depriving a consumer of mandatory protections available in
-their place of residence. The Operator should add a jurisdiction-specific
-governing-law and forum provision only after qualified legal review.
-
-If a provision is unenforceable, it will be limited or removed only to the
-minimum extent necessary, and the remaining provisions will continue. A delay
-in enforcing a provision is not a waiver. You may not transfer your rights or
-obligations under these Terms without the Operator's consent; the Operator may
-transfer these Terms as part of a lawful reorganization or transfer of the Bot,
-subject to applicable notice requirements.
-
-These Terms, together with the Privacy Policy and any additional terms
-presented for a specific feature, are the entire agreement about the hosted Bot
-service. Additional terms cannot make Discord responsible for the Bot or
-override Discord's terms.
-
-## 15. Contact and Reports
+## 14. Contact
 
 **Operator:** OPERATOR LEGAL NAME<br>
-**Privacy, deletion, security, abuse reports, and support email:**
-PRIVACY/SUPPORT EMAIL
+**Privacy, deletion, security, abuse, and support:** PRIVACY/SUPPORT EMAIL
 
-The Operator must review reports concerning the Bot, its use, or violations of
-Discord's rules and take appropriate action. This reporting channel must be
-monitored before public deployment.
-
-When reporting a problem, include enough non-sensitive context to identify the
-relevant guild and event. Never send a Discord token, password, or another
-person's private information unless the Operator specifically and lawfully
-requests it through a secure channel.
+Never send a bot token, password, or another person's private information in a support request.

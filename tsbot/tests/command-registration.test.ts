@@ -80,9 +80,9 @@ describe("command registration", () => {
 
   it("clears stale guild-scoped command sets when switching to global mode", async () => {
     const definitions: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
-      { name: "court", description: "Court", type: 1 },
+      { name: "example", description: "Example", type: 1 },
     ];
-    const globalSet = vi.fn(async () => new Map([["court", {}]]));
+    const globalSet = vi.fn(async () => new Map([["example", {}]]));
     const guildASet = vi.fn(async () => new Map());
     const guildBSet = vi.fn(async () => new Map());
     const client = {
@@ -123,7 +123,7 @@ describe("command registration", () => {
 
   it("preserves global definitions when a stale guild scope cannot be cleared", async () => {
     const definitions: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
-      { name: "court", description: "Court", type: 1 },
+      { name: "example", description: "Example", type: 1 },
     ];
     const globalSet = vi.fn(async () => new Map());
     const guildSet = vi.fn(async () => {
@@ -156,10 +156,10 @@ describe("command registration", () => {
     const targetGuildId = "111111111111111111";
     const staleGuildId = "222222222222222222";
     const definitions: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
-      { name: "court", description: "Court", type: 1 },
+      { name: "example", description: "Example", type: 1 },
     ];
     const globalSet = vi.fn(async () => new Map());
-    const targetSet = vi.fn(async () => new Map([["court", {}]]));
+    const targetSet = vi.fn(async () => new Map([["example", {}]]));
     const staleSet = vi.fn(async () => new Map());
     const targetGuild = { id: targetGuildId, commands: { set: targetSet } };
     const staleGuild = { id: staleGuildId, commands: { set: staleSet } };
@@ -190,11 +190,11 @@ describe("command registration", () => {
     const targetGuildId = "111111111111111111";
     const staleGuildId = "222222222222222222";
     const definitions: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
-      { name: "court", description: "Court", type: 1 },
+      { name: "example", description: "Example", type: 1 },
     ];
     const clearFailure = new Error("synthetic stale clear failure");
     const globalSet = vi.fn(async () => new Map());
-    const targetSet = vi.fn(async () => new Map([["court", {}]]));
+    const targetSet = vi.fn(async () => new Map([["example", {}]]));
     const staleSet = vi.fn(async () => {
       throw clearFailure;
     });

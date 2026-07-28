@@ -26,8 +26,13 @@ htmlcov/
 node_modules/
 build/
 dist/
+release/
 coverage/
 *.tsbuildinfo
+
+# Reproducible packaging caches and staging
+windows/.cache/
+windows/.work/
 
 # SQLite runtime data, backups, and logs
 *.db

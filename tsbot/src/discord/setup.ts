@@ -3,48 +3,48 @@ import {
   ChannelType,
   PermissionFlagsBits,
   SlashCommandBuilder,
+  escapeMarkdown,
   type ChatInputCommandInteraction,
-  type Guild,
-  type GuildBasedChannel,
   type GuildMember,
-  type Role,
   type SlashCommandSubcommandsOnlyBuilder,
 } from "discord.js";
+import { DateTime } from "luxon";
+import {
+  isGreetingTemplateWithinDiscordLimit,
+  truncateDiscordContent,
+} from "../greeting-message.js";
 import type { BotRuntime, GuildRuntime } from "../runtime.js";
 import { GuildSettingsConflictError } from "../storage/db.js";
-import type { GuildPurgeResult, GuildSettings } from "../types.js";
-import { restoreAllSilenceLeases } from "./runtime-parity.js";
-import { getEffectiveSilenceTargetRoleIds } from "./silence-leases.js";
+import type { GuildDataExport, GuildSettings } from "../types.js";
+import { clearBackfillStatus } from "./activity.js";
+import { clearModerationProcessState } from "./moderation.js";
+import { clearPanelProcessState } from "./panels.js";
 
 const SETUP_ADMIN_ERROR =
   "Only the server owner or a member with Administrator permission can use setup.";
+const IMPORT_MAX_BYTES = 2 * 1024 * 1024;
+const SETUP_SUMMARY_ITEM_LIMIT = 5;
+const SETUP_SUMMARY_ITEM_LENGTH = 80;
+const GREETING_LIST_ITEM_LIMIT = 6;
+const GREETING_LIST_MESSAGE_PREVIEW_LENGTH = 180;
+
 const FEATURE_CHOICES: Array<{
   name: string;
   value: keyof GuildSettings["features"];
 }> = [
-  { name: "superior-chat", value: "invictusChat" },
+  { name: "chat", value: "chat" },
   { name: "reply-moderation", value: "replyModeration" },
   { name: "greetings", value: "greetings" },
+  { name: "activity-metrics", value: "activityMetrics" },
 ];
-const ACTIVE_FEATURES = new Set<keyof GuildSettings["features"]>(
-  FEATURE_CHOICES.map(({ value }) => value),
-);
-const RETIRED_SETUP_MESSAGE =
-  "That Imperial/Court setup option has been retired. Its stored legacy data was not changed.";
 
 export function getFeatureDisplayName(
   feature: keyof GuildSettings["features"],
 ): string {
   return (
-    FEATURE_CHOICES.find((choice) => choice.value === feature)?.name ?? feature
+    FEATURE_CHOICES.find(({ value }) => value === feature)?.name ?? feature
   );
 }
-
-type ChannelPurpose = keyof GuildSettings["channels"];
-type ArrayRolePurpose =
-  "staff" | "privilegedChat" | "silenceTargets" | "silenceExcludes";
-type SingleRolePurpose = "emperor" | "empress" | "anonymousRequired";
-type RolePurpose = ArrayRolePurpose | SingleRolePurpose;
 
 export interface GuildSetupValidationResult {
   valid: boolean;
@@ -57,27 +57,24 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     .setDescription("Configure Superior for this server")
     .setDMPermission(false)
     .addSubcommand((subcommand) =>
-      subcommand.setName("status").setDescription("Show current configuration"),
+      subcommand
+        .setName("status")
+        .setDescription("Show the active configuration"),
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("enable")
-        .setDescription("Validate and enable this server"),
+        .setDescription("Validate, approve, and enable this server"),
     )
     .addSubcommand((subcommand) =>
-      subcommand.setName("disable").setDescription("Disable all bot behavior"),
+      subcommand
+        .setName("disable")
+        .setDescription("Disable bot behavior safely"),
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("channel")
-        .setDescription("Set or clear a channel binding")
-        .addStringOption((option) =>
-          option
-            .setName("purpose")
-            .setDescription("Channel purpose")
-            .setRequired(true)
-            .addChoices({ name: "log", value: "log" }),
-        )
+        .setDescription("Set or clear the optional log channel")
         .addStringOption((option) =>
           option
             .setName("action")
@@ -91,7 +88,7 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
         .addChannelOption((option) =>
           option
             .setName("channel")
-            .setDescription("Channel to bind when action is set")
+            .setDescription("Log channel when action is set")
             .addChannelTypes(
               ChannelType.GuildText,
               ChannelType.GuildAnnouncement,
@@ -120,7 +117,9 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     .addSubcommand((subcommand) =>
       subcommand
         .setName("timezone")
-        .setDescription("Set the timezone used by Superior responses")
+        .setDescription(
+          "Set the timezone used for natural-language time replies",
+        )
         .addStringOption((option) =>
           option
             .setName("timezone")
@@ -132,24 +131,24 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     .addSubcommand((subcommand) =>
       subcommand
         .setName("limits")
-        .setDescription("Configure bulk moderation limits")
+        .setDescription("Set the finite bulk-moderation target cap")
         .addIntegerOption((option) =>
           option
-            .setName("mute_target_cap")
-            .setDescription("Maximum bulk moderation targets; 0 disables cap")
-            .setMinValue(0)
-            .setMaxValue(10_000)
+            .setName("bulk_target_cap")
+            .setDescription("Maximum targets per bulk command (1-1000)")
+            .setMinValue(1)
+            .setMaxValue(1_000)
             .setRequired(true),
         ),
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("trigger")
-        .setDescription("Configure the conversational invocation")
+        .setDescription("Configure direct conversational invocation words")
         .addStringOption((option) =>
           option
             .setName("keyword")
-            .setDescription("Primary invocation keyword")
+            .setDescription("Primary invocation word or phrase")
             .setRequired(true)
             .setMaxLength(50),
         )
@@ -164,7 +163,7 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     .addSubcommand((subcommand) =>
       subcommand
         .setName("greeting")
-        .setDescription("Manage configurable greeting profiles")
+        .setDescription("Manage greeting profiles for the current invoker")
         .addStringOption((option) =>
           option
             .setName("action")
@@ -184,36 +183,49 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
             .setRequired(false)
             .setMaxLength(50),
         )
-        .addUserOption((option) =>
-          option
-            .setName("user")
-            .setDescription("Optional user mentioned by the greeting")
-            .setRequired(false),
-        )
         .addStringOption((option) =>
           option
             .setName("message")
-            .setDescription(
-              "Greeting text; use {user} for the configured mention",
-            )
+            .setDescription("Greeting text; {user} means the person sending it")
             .setRequired(false)
-            .setMaxLength(1900),
+            .setMaxLength(2_000),
         ),
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("validate")
-        .setDescription("Validate this configuration"),
+        .setDescription("Validate the active configuration without enabling"),
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("export")
-        .setDescription("Export only this server's configuration and data"),
+        .setDescription(
+          "Export only this server's active settings and metrics",
+        ),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("import")
+        .setDescription(
+          "Import a same-server v2 export in disabled review mode",
+        )
+        .addAttachmentOption((option) =>
+          option
+            .setName("file")
+            .setDescription("JSON file created by /setup export")
+            .setRequired(true),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("confirmation")
+            .setDescription("Type IMPORT followed by this server ID")
+            .setRequired(true),
+        ),
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("purge")
-        .setDescription("Permanently purge only this server's retained data")
+        .setDescription("Permanently purge only this server's stored data")
         .addStringOption((option) =>
           option
             .setName("confirmation")
@@ -230,13 +242,15 @@ export async function handleSetupCommand(
   authorizedActor?: GuildMember,
 ): Promise<void> {
   const actor = authorizedActor ?? (await requireSetupAdmin(interaction));
-  if (!actor || !interaction.guild) {
+  if (
+    !actor ||
+    !interaction.guild ||
+    interaction.guild.id !== guildRuntime.guildId
+  ) {
     return;
   }
-
   try {
-    const subcommand = interaction.options.getSubcommand();
-    switch (subcommand) {
+    switch (interaction.options.getSubcommand()) {
       case "status":
         await showSetupStatus(interaction, guildRuntime.settings);
         return;
@@ -245,11 +259,10 @@ export async function handleSetupCommand(
         return;
       case "disable":
         await guildRuntime.setEnabled(false);
-        await interaction.reply({
-          content:
-            "Superior is disabled for this server. Stored data was retained.",
-          ephemeral: true,
-        });
+        await replyPrivate(
+          interaction,
+          "Superior is disabled. Stored active data was retained.",
+        );
         return;
       case "channel":
         await updateChannel(interaction, guildRuntime);
@@ -266,15 +279,6 @@ export async function handleSetupCommand(
       case "trigger":
         await updateTrigger(interaction, guildRuntime);
         return;
-      case "labels":
-      case "champion":
-      case "schedule":
-      case "role":
-        await interaction.reply({
-          content: RETIRED_SETUP_MESSAGE,
-          ephemeral: true,
-        });
-        return;
       case "greeting":
         await updateGreeting(interaction, guildRuntime);
         return;
@@ -284,22 +288,21 @@ export async function handleSetupCommand(
       case "export":
         await exportGuild(interaction, runtime, guildRuntime.guildId);
         return;
+      case "import":
+        await importGuild(interaction, runtime, guildRuntime);
+        return;
       case "purge":
         await purgeGuild(interaction, runtime, guildRuntime, actor);
         return;
       default:
-        await interaction.reply({
-          content: "Unknown setup operation.",
-          ephemeral: true,
-        });
+        await replyPrivate(interaction, "Unknown setup operation.");
     }
   } catch (error) {
     if (error instanceof GuildSettingsConflictError) {
-      await interaction.reply({
-        content:
-          "This server's configuration changed during setup. Review the latest settings and try again.",
-        ephemeral: true,
-      });
+      await replyPrivate(
+        interaction,
+        "This server's configuration changed during setup. Review the latest settings and try again.",
+      );
       return;
     }
     throw error;
@@ -309,142 +312,115 @@ export async function handleSetupCommand(
 export async function requireSetupAdmin(
   interaction: ChatInputCommandInteraction,
 ): Promise<GuildMember | null> {
-  if (!interaction.guild) {
-    await interaction.reply({
-      content: "Use setup inside a server.",
-      ephemeral: true,
-    });
+  const guild = interaction.guild;
+  if (!guild || !interaction.guildId || guild.id !== interaction.guildId) {
+    await replyPrivate(interaction, "Use setup inside a server.");
     return null;
   }
-
-  const actor = await interaction.guild.members
+  const member = await guild.members
     .fetch(interaction.user.id)
     .catch(() => null);
-  if (
-    !actor ||
-    (interaction.guild.ownerId !== interaction.user.id &&
-      !actor.permissions.has(PermissionFlagsBits.Administrator))
-  ) {
-    await interaction.reply({ content: SETUP_ADMIN_ERROR, ephemeral: true });
+  if (!member || member.guild.id !== guild.id) {
+    await replyPrivate(interaction, "Could not verify your server membership.");
     return null;
   }
-  return actor;
+  if (
+    member.id !== guild.ownerId &&
+    !member.permissions.has(PermissionFlagsBits.Administrator)
+  ) {
+    await replyPrivate(interaction, SETUP_ADMIN_ERROR);
+    return null;
+  }
+  return member;
 }
 
 async function showSetupStatus(
   interaction: ChatInputCommandInteraction,
   settings: GuildSettings,
 ): Promise<void> {
-  const enabledFeatures = Object.entries(settings.features)
-    .filter(
-      ([name, enabled]) =>
-        enabled && ACTIVE_FEATURES.has(name as keyof GuildSettings["features"]),
-    )
-    .map(([name]) =>
-      getFeatureDisplayName(name as keyof GuildSettings["features"]),
-    );
-  await interaction.reply({
-    content: [
-      `**Superior Setup v${settings.version}**`,
-      `Enabled: \`${settings.enabled ? "yes" : "no"}\``,
-      `Timezone: \`${settings.timezone}\``,
-      `Invocation: \`${settings.invocation.keyword}\` (${settings.invocation.aliases.length} alias(es))`,
-      `Features: ${enabledFeatures.length > 0 ? enabledFeatures.map((name) => `\`${name}\``).join(", ") : "none"}`,
-      `Log channel: ${settings.channels.log ? `<#${settings.channels.log}>` : "not set"}`,
-      `Greeting profiles: \`${settings.greetings.length}\``,
-      "Legacy court settings and data are retained but inactive.",
-    ].join("\n"),
-    ephemeral: true,
-  });
+  const features = Object.entries(settings.features)
+    .map(([name, enabled]) => `${name}: ${enabled ? "on" : "off"}`)
+    .join(", ");
+  const aliases = summarizeSetupValues(settings.invocation.aliases);
+  const profiles = summarizeSetupValues(
+    settings.greetings.map(({ name }) => name),
+  );
+  await replyPrivate(
+    interaction,
+    truncateDiscordContent(
+      [
+        `Enabled: **${settings.enabled ? "yes" : "no"}**`,
+        `Review required: **${settings.reviewRequired ? "yes" : "no"}**`,
+        `Timezone: **${escapeMarkdown(settings.timezone)}**`,
+        `Features: ${features}`,
+        `Log channel: ${settings.channels.log ? `<#${settings.channels.log}>` : "not set"}`,
+        `Invocation: **${escapeMarkdown(settings.invocation.keyword)}**; aliases (**${settings.invocation.aliases.length}**): ${aliases}`,
+        `Bulk target cap: **${settings.limits.bulkModerationTargetCap}**`,
+        `Greeting profiles (**${settings.greetings.length}**): ${profiles}`,
+      ].join("\n"),
+    ),
+  );
 }
 
 async function enableGuild(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
 ): Promise<void> {
-  if (!interaction.guild) {
+  await deferPrivate(interaction);
+  const result = await validateGuildSetup(interaction, runtime.settings);
+  if (!result.valid) {
+    await replyPrivate(
+      interaction,
+      `Superior remains disabled:\n${result.errors.map((error) => `- ${error}`).join("\n")}`,
+    );
     return;
   }
-  // Validate a fresh persisted snapshot. setEnabled(true) performs a
-  // compare-and-set against this snapshot after the asynchronous Discord
-  // checks, so any concurrent edit causes enablement to fail closed.
-  const settings = await runtime.refreshSettings();
-  const validation = await validateGuildSetup(interaction.guild, settings);
-  if (!validation.valid) {
-    await interaction.reply({
-      content: `Setup is incomplete:\n${validation.errors.map((error) => `- ${error}`).join("\n")}`,
-      ephemeral: true,
-    });
-    return;
-  }
-
   await runtime.setEnabled(true);
-  await interaction.reply({
-    content: "Setup is valid. Superior is now enabled for this server.",
-    ephemeral: true,
-  });
+  await replyPrivate(
+    interaction,
+    "Configuration approved and Superior enabled for this server.",
+  );
 }
 
 async function updateChannel(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
 ): Promise<void> {
-  const purpose = interaction.options.getString(
-    "purpose",
-    true,
-  ) as ChannelPurpose;
   const action = interaction.options.getString("action", true);
-  if (purpose !== "log") {
-    await interaction.reply({
-      content: RETIRED_SETUP_MESSAGE,
-      ephemeral: true,
-    });
-    return;
-  }
-  if (action !== "set" && action !== "clear") {
-    await interaction.reply({
-      content: "Channel action must be set or clear.",
-      ephemeral: true,
-    });
-    return;
-  }
-  const channel = interaction.options.getChannel("channel");
-  let resolvedChannel: GuildBasedChannel | null = null;
-  if (action === "set") {
-    if (!channel || !interaction.guild) {
-      await interaction.reply({
-        content: "Choose a channel from this server when action is set.",
-        ephemeral: true,
-      });
-      return;
-    }
-    resolvedChannel = await interaction.guild.channels
-      .fetch(channel.id)
-      .catch(() => null);
+  const next = cloneSettings(runtime.settings);
+  if (action === "clear") {
+    next.channels.log = null;
+  } else if (action === "set") {
+    const selected = interaction.options.getChannel("channel", false);
+    const channel = selected
+      ? interaction.guild?.channels.cache.get(selected.id)
+      : null;
     if (
-      !resolvedChannel ||
-      resolvedChannel.guildId !== interaction.guild.id ||
-      !isSendableGuildChannel(resolvedChannel)
+      !channel ||
+      !interaction.guild ||
+      channel.guild?.id !== runtime.guildId ||
+      ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(
+        channel.type,
+      )
     ) {
-      await interaction.reply({
-        content: "Choose a text or announcement channel from this server.",
-        ephemeral: true,
-      });
+      await replyPrivate(
+        interaction,
+        "Choose a text or announcement channel in this server.",
+      );
       return;
     }
+    next.channels.log = channel.id;
+  } else {
+    await replyPrivate(interaction, "Unknown channel action.");
+    return;
   }
-
-  const settings = cloneSettings(runtime.settings);
-  settings.channels[purpose] =
-    action === "clear" ? null : (resolvedChannel?.id ?? null);
-  await runtime.saveSettings(settings);
-  await interaction.reply({
-    content:
-      action === "clear"
-        ? `Cleared the ${purpose} channel binding.`
-        : `Set the ${purpose} channel to ${resolvedChannel?.toString()}.`,
-    ephemeral: true,
-  });
+  next.reviewRequired = true;
+  next.enabled = false;
+  await runtime.saveSettings(next);
+  await replyPrivate(
+    interaction,
+    "Log channel updated. Review with `/setup validate`, then run `/setup enable`.",
+  );
 }
 
 async function updateFeature(
@@ -455,21 +431,20 @@ async function updateFeature(
     "name",
     true,
   ) as keyof GuildSettings["features"];
-  if (!ACTIVE_FEATURES.has(name)) {
-    await interaction.reply({
-      content: RETIRED_SETUP_MESSAGE,
-      ephemeral: true,
-    });
+  const enabled = interaction.options.getBoolean("enabled", true);
+  if (!FEATURE_CHOICES.some(({ value }) => value === name)) {
+    await replyPrivate(interaction, "Unknown feature.");
     return;
   }
-  const enabled = interaction.options.getBoolean("enabled", true);
-  const settings = cloneSettings(runtime.settings);
-  settings.features[name] = enabled;
-  await runtime.saveSettings(settings);
-  await interaction.reply({
-    content: `Feature ${getFeatureDisplayName(name)} is now \`${enabled ? "enabled" : "disabled"}\`.`,
-    ephemeral: true,
-  });
+  const next = cloneSettings(runtime.settings);
+  next.features[name] = enabled;
+  next.reviewRequired = true;
+  next.enabled = false;
+  await runtime.saveSettings(next);
+  await replyPrivate(
+    interaction,
+    `${getFeatureDisplayName(name)} is now ${enabled ? "on" : "off"}. Revalidate before enabling.`,
+  );
 }
 
 async function updateTimezone(
@@ -478,42 +453,40 @@ async function updateTimezone(
 ): Promise<void> {
   const timezone = interaction.options.getString("timezone", true).trim();
   if (!isValidTimezone(timezone)) {
-    await interaction.reply({
-      content:
-        "Timezone must be a valid IANA timezone, such as `UTC` or `Asia/Amman`.",
-      ephemeral: true,
-    });
+    await replyPrivate(
+      interaction,
+      "Use a valid IANA timezone, such as `UTC` or `Asia/Amman`.",
+    );
     return;
   }
-
-  const settings = cloneSettings(runtime.settings);
-  settings.timezone = timezone;
-  await runtime.saveSettings(settings);
-  await interaction.reply({
-    content: `Timezone updated to \`${settings.timezone}\`.`,
-    ephemeral: true,
-  });
+  const next = cloneSettings(runtime.settings);
+  next.timezone = timezone;
+  await runtime.saveSettings(next);
+  await replyPrivate(
+    interaction,
+    `Timezone set to **${escapeMarkdown(timezone)}**. Review and re-enable Superior.`,
+  );
 }
 
 async function updateLimits(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
 ): Promise<void> {
-  const settings = cloneSettings(runtime.settings);
-  const targetCap = interaction.options.getInteger("mute_target_cap");
-  if (targetCap === null) {
-    await interaction.reply({
-      content: RETIRED_SETUP_MESSAGE,
-      ephemeral: true,
-    });
+  const cap = interaction.options.getInteger("bulk_target_cap", true);
+  if (!Number.isSafeInteger(cap) || cap < 1 || cap > 1_000) {
+    await replyPrivate(
+      interaction,
+      "Bulk target cap must be between 1 and 1000.",
+    );
     return;
   }
-  settings.limits.muteallTargetCap = targetCap;
-  await runtime.saveSettings(settings);
-  await interaction.reply({
-    content: "Guild limits updated.",
-    ephemeral: true,
-  });
+  const next = cloneSettings(runtime.settings);
+  next.limits.bulkModerationTargetCap = cap;
+  await runtime.saveSettings(next);
+  await replyPrivate(
+    interaction,
+    `Bulk moderation target cap set to **${cap}**. Review and re-enable Superior.`,
+  );
 }
 
 async function updateTrigger(
@@ -525,26 +498,33 @@ async function updateTrigger(
   );
   const aliases = Array.from(
     new Set(
-      (interaction.options.getString("aliases") ?? "")
+      (interaction.options.getString("aliases", false) ?? "")
         .split(",")
         .map(normalizeInvocationTerm)
         .filter(Boolean),
     ),
   ).filter((alias) => alias !== keyword);
-  if (!keyword) {
-    await interaction.reply({
-      content: "Invocation keyword cannot be empty.",
-      ephemeral: true,
-    });
+  if (
+    !isValidInvocationTerm(keyword) ||
+    aliases.some((alias) => !isValidInvocationTerm(alias))
+  ) {
+    await replyPrivate(
+      interaction,
+      "Invocation terms must be 1-32 letters, numbers, spaces, underscores, or hyphens.",
+    );
     return;
   }
-  const settings = cloneSettings(runtime.settings);
-  settings.invocation = { keyword, aliases };
-  await runtime.saveSettings(settings);
-  await interaction.reply({
-    content: `Invocation updated to \`${keyword}\` with \`${aliases.length}\` alias(es).`,
-    ephemeral: true,
-  });
+  if (aliases.length > 10) {
+    await replyPrivate(interaction, "Configure at most 10 invocation aliases.");
+    return;
+  }
+  const next = cloneSettings(runtime.settings);
+  next.invocation = { keyword, aliases };
+  await runtime.saveSettings(next);
+  await replyPrivate(
+    interaction,
+    "Conversational invocation updated. Review and re-enable Superior.",
+  );
 }
 
 async function updateGreeting(
@@ -553,107 +533,94 @@ async function updateGreeting(
 ): Promise<void> {
   const action = interaction.options.getString("action", true);
   if (action === "list") {
-    const lines = runtime.settings.greetings.map(
-      (profile) =>
-        `- \`${profile.name}\`${profile.userId ? ` -> <@${profile.userId}>` : ""}: ${profile.message}`,
+    await replyPrivate(
+      interaction,
+      formatGreetingProfileList(runtime.settings),
     );
-    await interaction.reply({
-      content:
-        lines.length > 0
-          ? lines.join("\n")
-          : "No greeting profiles configured.",
-      ephemeral: true,
-    });
     return;
   }
-
   const name = normalizeProfileName(
-    interaction.options.getString("name") ?? "",
+    interaction.options.getString("name", false) ?? "",
   );
   if (!name) {
-    await interaction.reply({
-      content: "Provide a profile name for this action.",
-      ephemeral: true,
-    });
+    await replyPrivate(interaction, "Provide a profile name.");
     return;
   }
-  const settings = cloneSettings(runtime.settings);
-  const index = settings.greetings.findIndex(
-    (profile) => profile.name.toLowerCase() === name.toLowerCase(),
+  const index = runtime.settings.greetings.findIndex(
+    (profile) => profile.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
   );
+  const next = cloneSettings(runtime.settings);
   if (action === "remove") {
     if (index < 0) {
-      await interaction.reply({
-        content: "Greeting profile not found.",
-        ephemeral: true,
-      });
+      await replyPrivate(interaction, "That greeting profile does not exist.");
       return;
     }
-    settings.greetings.splice(index, 1);
-  } else {
-    const message = interaction.options.getString("message")?.trim();
+    next.greetings.splice(index, 1);
+  } else if (action === "add" || action === "update") {
+    const message = (interaction.options.getString("message", false) ?? "")
+      .normalize("NFKC")
+      .trim();
     if (!message) {
-      await interaction.reply({
-        content: "Provide greeting text for add or update.",
-        ephemeral: true,
-      });
+      await replyPrivate(
+        interaction,
+        "Provide greeting text. Use `{user}` for the current invoker.",
+      );
       return;
     }
-    const selectedUser = interaction.options.getUser("user");
+    if (!isGreetingTemplateWithinDiscordLimit(message)) {
+      await replyPrivate(
+        interaction,
+        "That greeting exceeds Discord's 2,000-character limit after Markdown escaping and `{user}` expansion. Shorten the message.",
+      );
+      return;
+    }
     if (
-      selectedUser &&
-      (!interaction.guild ||
-        !(await interaction.guild.members
-          .fetch(selectedUser.id)
-          .catch(() => null)))
+      /@(?:everyone|here)\b/i.test(message) ||
+      /<@(?:!|&)?\d{17,20}>/.test(message)
     ) {
-      await interaction.reply({
-        content: "Greeting user must be a current member of this server.",
-        ephemeral: true,
-      });
+      await replyPrivate(
+        interaction,
+        "Greeting profiles cannot store Discord or broadcast mentions. Use `{user}` for the current invoker.",
+      );
       return;
     }
-    const profile = {
-      name,
-      userId: selectedUser?.id ?? null,
-      message,
-    };
     if (action === "add" && index >= 0) {
-      await interaction.reply({
-        content: "That greeting profile already exists; use update.",
-        ephemeral: true,
-      });
+      await replyPrivate(
+        interaction,
+        "That profile already exists; use update.",
+      );
       return;
     }
     if (action === "update" && index < 0) {
-      await interaction.reply({
-        content: "Greeting profile not found; use add.",
-        ephemeral: true,
-      });
+      await replyPrivate(interaction, "That profile does not exist; use add.");
       return;
     }
-    if (index >= 0) settings.greetings[index] = profile;
-    else settings.greetings.push(profile);
+    const profile = { name, message };
+    if (index >= 0) next.greetings[index] = profile;
+    else next.greetings.push(profile);
+  } else {
+    await replyPrivate(interaction, "Unknown greeting action.");
+    return;
   }
-  await runtime.saveSettings(settings);
-  await interaction.reply({
-    content: `Greeting profile ${action} complete.`,
-    ephemeral: true,
-  });
+  await runtime.saveSettings(next);
+  await replyPrivate(
+    interaction,
+    `Greeting profile **${escapeMarkdown(name)}** updated. Review and re-enable Superior.`,
+  );
 }
 
 async function replyWithValidation(
   interaction: ChatInputCommandInteraction,
   settings: GuildSettings,
 ): Promise<void> {
-  if (!interaction.guild) return;
-  const result = await validateGuildSetup(interaction.guild, settings);
-  await interaction.reply({
-    content: result.valid
-      ? "Configuration is valid and ready to enable."
-      : `Configuration issues:\n${result.errors.map((error) => `- ${error}`).join("\n")}`,
-    ephemeral: true,
-  });
+  await deferPrivate(interaction);
+  const result = await validateGuildSetup(interaction, settings);
+  await replyPrivate(
+    interaction,
+    result.valid
+      ? "Configuration is valid. Run `/setup enable` to approve and enable it."
+      : `Configuration needs attention:\n${result.errors.map((error) => `- ${error}`).join("\n")}`,
+  );
 }
 
 async function exportGuild(
@@ -661,15 +628,72 @@ async function exportGuild(
   runtime: BotRuntime,
   guildId: string,
 ): Promise<void> {
-  const payload = runtime.storage.exportGuild(guildId);
+  await deferPrivate(interaction);
+  const exported = runtime.storage.exportGuildData(guildId);
   const attachment = new AttachmentBuilder(
-    Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf8"),
-    { name: `superior-${guildId}.json` },
+    Buffer.from(`${JSON.stringify(exported, null, 2)}\n`),
+    {
+      name: `superior-${guildId}-export.json`,
+    },
   );
-  await interaction.reply({
-    content: "Exported configuration and data for this server only.",
+  await interaction.editReply({
+    content: "Active settings and aggregate metrics for this server only.",
     files: [attachment],
-    ephemeral: true,
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function importGuild(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+  guildRuntime: GuildRuntime,
+): Promise<void> {
+  const confirmation = interaction.options
+    .getString("confirmation", true)
+    .trim();
+  if (confirmation !== `IMPORT ${guildRuntime.guildId}`) {
+    await replyPrivate(
+      interaction,
+      `Confirmation must be \`IMPORT ${guildRuntime.guildId}\`.`,
+    );
+    return;
+  }
+  const attachment = interaction.options.getAttachment("file", true);
+  if (attachment.size > IMPORT_MAX_BYTES) {
+    await replyPrivate(interaction, "Import files are limited to 2 MiB.");
+    return;
+  }
+  await deferPrivate(interaction);
+  let response: Response;
+  try {
+    response = await fetch(attachment.url, {
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    await replyPrivate(interaction, "Could not download that import file.");
+    return;
+  }
+  if (!response.ok) {
+    await replyPrivate(interaction, "Could not download that import file.");
+    return;
+  }
+  let payload: GuildDataExport;
+  try {
+    payload = JSON.parse(await response.text()) as GuildDataExport;
+  } catch {
+    await replyPrivate(interaction, "The import file is not valid JSON.");
+    return;
+  }
+  runtime.storage.importGuildData(
+    guildRuntime.guildId,
+    payload,
+    guildRuntime.settings,
+  );
+  runtime.invalidateGuild(guildRuntime.guildId);
+  await interaction.editReply({
+    content:
+      "Import completed in disabled review mode. Run `/setup status`, `/setup validate`, then `/setup enable`.",
+    allowedMentions: { parse: [] },
   });
 }
 
@@ -679,439 +703,176 @@ async function purgeGuild(
   guildRuntime: GuildRuntime,
   actor: GuildMember,
 ): Promise<void> {
-  if (!interaction.guild || interaction.guild.ownerId !== actor.id) {
-    await interaction.reply({
-      content: "Only the server owner can purge retained guild data.",
-      ephemeral: true,
-    });
-    return;
-  }
-  const expected = `PURGE ${guildRuntime.guildId}`;
-  const confirmation = interaction.options.getString("confirmation", true);
-  const preview = runtime.storage.previewGuildPurge(guildRuntime.guildId);
-  if (confirmation !== expected) {
-    await interaction.reply({
-      content:
-        `Purge removes this server's settings, state, questions, posts, answers, cooldowns, and metrics. ` +
-        `Current removal scope: \`${formatPurgeSummary(preview)}\`. ` +
-        `Type \`${expected}\` exactly to continue.`,
-      ephemeral: true,
-    });
-    return;
-  }
-
-  runtime.storage.setGuildEnabled(guildRuntime.guildId, false);
-  runtime.invalidateGuild(guildRuntime.guildId, {
-    forgetBackfillStatus: true,
-  });
-  await interaction.reply({
-    content:
-      `Exact owner confirmation accepted. Preparing safe removal of only this server's retained data: ` +
-      `\`${formatPurgeSummary(preview)}\`.`,
-    ephemeral: true,
-  });
-  let restoredLeases: Awaited<ReturnType<typeof restoreAllSilenceLeases>>;
-  try {
-    restoredLeases = await restoreAllSilenceLeases(
-      interaction.guild,
-      guildRuntime,
+  const confirmation = interaction.options
+    .getString("confirmation", true)
+    .trim();
+  if (confirmation !== `PURGE ${guildRuntime.guildId}`) {
+    await replyPrivate(
+      interaction,
+      `Confirmation must be \`PURGE ${guildRuntime.guildId}\`.`,
     );
-  } catch {
-    await interaction.editReply({
-      content:
-        "Purge refused because active silence-lock metadata could not be read safely. " +
-        "All retained server data was preserved; the bot remains disabled here.",
-    });
     return;
   }
-  if (restoredLeases.unresolved > 0) {
-    await interaction.editReply({
-      content:
-        `Purge refused because ${restoredLeases.unresolved} active silence overwrite(s) could not be restored. ` +
-        "All retained server data was preserved; the bot remains disabled here. Check Manage Roles permission and role hierarchy, then retry.",
-    });
+  if (
+    actor.guild.id !== guildRuntime.guildId ||
+    interaction.guild?.id !== guildRuntime.guildId
+  ) {
+    await replyPrivate(
+      interaction,
+      "This purge request does not belong to this server.",
+    );
     return;
   }
-  const result = runtime.storage.purgeGuild(guildRuntime.guildId);
+  await deferPrivate(interaction);
+  await runtime.storage.purgeGuildData(guildRuntime.guildId);
+  clearBackfillStatus(guildRuntime.guildId);
+  clearModerationProcessState(guildRuntime.guildId);
+  clearPanelProcessState(guildRuntime.guildId);
+  runtime.invalidateGuild(guildRuntime.guildId);
   await interaction.editReply({
     content:
-      "Purged this server's Superior configuration and retained data, including legacy records. " +
-      `Removal summary: \`${formatPurgeSummary(result)}\``,
+      "This server's active settings and metrics were permanently purged.",
+    allowedMentions: { parse: [] },
   });
-}
-
-function formatPurgeSummary(result: GuildPurgeResult): string {
-  return [
-    `guild=${result.guilds}`,
-    `settings=${result.settings}`,
-    `state/questions=${result.kv}`,
-    `posts=${result.posts}`,
-    `answers=${result.answers}`,
-    `cooldowns=${result.cooldowns}`,
-    `metrics=${result.metrics}`,
-  ].join(", ");
 }
 
 export async function validateGuildSetup(
-  guild: Guild,
+  interaction: ChatInputCommandInteraction,
   settings: GuildSettings,
 ): Promise<GuildSetupValidationResult> {
   const errors: string[] = [];
-  if (!isValidTimezone(settings.timezone)) {
-    errors.push(`Timezone \`${settings.timezone}\` is invalid.`);
+  const guild = interaction.guild;
+  if (!guild || !interaction.guildId) {
+    return { valid: false, errors: ["Setup must run inside a server."] };
   }
-  if (settings.features.invictusChat && !settings.invocation.keyword.trim()) {
-    errors.push("Superior chat requires an invocation keyword.");
+  if (!isValidTimezone(settings.timezone)) errors.push("Timezone is invalid.");
+  if (!isValidInvocationTerm(settings.invocation.keyword)) {
+    errors.push("Primary invocation is invalid.");
+  }
+  if (
+    settings.limits.bulkModerationTargetCap < 1 ||
+    settings.limits.bulkModerationTargetCap > 1_000
+  ) {
+    errors.push("Bulk moderation target cap must be between 1 and 1000.");
   }
   if (settings.features.greetings && settings.greetings.length === 0) {
-    errors.push("Greetings requires at least one greeting profile.");
+    errors.push("Greetings are enabled but no greeting profile exists.");
   }
-
-  const me =
-    guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
-  if (!me) {
-    errors.push("Could not resolve the bot member to validate permissions.");
-  }
-
   if (settings.channels.log) {
     const channel = await guild.channels
       .fetch(settings.channels.log)
       .catch(() => null);
-    if (!channel || channel.guildId !== guild.id) {
-      errors.push("The log channel no longer exists in this server.");
-    } else if (!isSendableGuildChannel(channel)) {
-      errors.push("The log channel cannot receive bot messages.");
-    } else if (me) {
-      const permissions = channel.permissionsFor(me);
-      const required = [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.EmbedLinks,
-      ];
-      const missing = required.filter(
-        (permission) => !permissions?.has(permission),
-      );
-      if (missing.length > 0) {
-        errors.push(
-          `The log channel is missing ${missing.length} required bot permission(s).`,
-        );
-      }
-    }
-  }
-
-  const greetingUserIds = new Set(
-    settings.greetings
-      .map((profile) => profile.userId)
-      .filter((userId): userId is string => Boolean(userId)),
-  );
-  for (const userId of greetingUserIds) {
-    const member = await guild.members.fetch(userId).catch(() => null);
-    if (!member) {
-      errors.push(
-        `Configured greeting user \`${userId}\` is not a member of this server.`,
-      );
-    }
-  }
-
-  if (
-    me &&
-    settings.features.replyModeration &&
-    !me.permissions.has(PermissionFlagsBits.ModerateMembers)
-  ) {
-    errors.push(
-      "Reply moderation requires the bot Moderate Members permission.",
-    );
-  }
-
-  return { valid: errors.length === 0, errors };
-}
-
-async function validateLegacyGuildSetup(
-  guild: Guild,
-  settings: GuildSettings,
-): Promise<GuildSetupValidationResult> {
-  const errors: string[] = [];
-  const effectiveSilenceTargetRoleIds = getEffectiveSilenceTargetRoleIds(
-    settings.roles.silenceTargets,
-    settings.roles.silenceExcludes,
-  );
-  if (!Object.values(settings.features).some(Boolean)) {
-    errors.push("Enable at least one feature.");
-  }
-  if (!isValidTimezone(settings.timezone)) {
-    errors.push(`Timezone \`${settings.timezone}\` is invalid.`);
-  }
-  if (settings.features.court) {
-    if (settings.courtSchedule.mode === "off") {
-      errors.push("Court feature requires court schedule mode manual or auto.");
-    }
-    if (!settings.channels.court) {
-      errors.push("Court feature requires a court channel.");
-    }
-  }
-  if (settings.features.anonymousAnswers && !settings.features.court) {
-    errors.push("Anonymous answers require the court feature.");
-  }
-  if (settings.features.weeklyDigest && !settings.channels.weeklyDigest) {
-    errors.push("Weekly digest requires a weekly-digest channel.");
-  }
-  if (
-    (settings.features.royalAfk || settings.features.royalPresence) &&
-    !settings.channels.royalAlert
-  ) {
-    errors.push("Royal AFK/presence requires a royal-alert channel.");
-  }
-  if (
-    (settings.features.royalAfk || settings.features.royalPresence) &&
-    !settings.roles.emperor &&
-    !settings.roles.empress
-  ) {
-    errors.push("Royal AFK/presence requires an Emperor or Empress role.");
-  }
-  if (
-    settings.features.silenceLock &&
-    effectiveSilenceTargetRoleIds.length === 0
-  ) {
-    errors.push(
-      "Silence lock requires at least one non-excluded silence-target role.",
-    );
-  }
-  if (settings.features.silenceLock && !settings.roles.emperor) {
-    errors.push("Silence lock requires an Emperor role binding.");
-  }
-  if (settings.features.invictusChat && !settings.invocation.keyword.trim()) {
-    errors.push("Superior chat requires an invocation keyword.");
-  }
-  if (settings.features.greetings && settings.greetings.length === 0) {
-    errors.push("Greetings feature requires at least one greeting profile.");
-  }
-
-  const me =
-    guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
-  if (!me) {
-    errors.push("Could not resolve the bot member to validate permissions.");
-  }
-
-  const courtPermissions = [
-    PermissionFlagsBits.ViewChannel,
-    PermissionFlagsBits.SendMessages,
-    PermissionFlagsBits.EmbedLinks,
-    PermissionFlagsBits.ReadMessageHistory,
-    ...(settings.features.anonymousAnswers
-      ? [
-          PermissionFlagsBits.CreatePublicThreads,
-          PermissionFlagsBits.SendMessagesInThreads,
-          PermissionFlagsBits.ManageThreads,
-        ]
-      : []),
-  ];
-  const channelRequirements: Array<{
-    purpose: ChannelPurpose;
-    id: string | null;
-    requiredPermissions: bigint[];
-  }> = [
-    {
-      purpose: "court",
-      id: settings.channels.court,
-      requiredPermissions: courtPermissions,
-    },
-    {
-      purpose: "log",
-      id: settings.channels.log,
-      requiredPermissions: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.EmbedLinks,
-      ],
-    },
-    {
-      purpose: "weeklyDigest",
-      id: settings.channels.weeklyDigest,
-      requiredPermissions: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.EmbedLinks,
-      ],
-    },
-    {
-      purpose: "royalAlert",
-      id: settings.channels.royalAlert,
-      requiredPermissions: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-      ],
-    },
-  ];
-  for (const requirement of channelRequirements) {
-    if (!requirement.id) continue;
-    const channel = await guild.channels
-      .fetch(requirement.id)
-      .catch(() => null);
-    if (!channel || channel.guildId !== guild.id) {
-      errors.push(
-        `${requirement.purpose} channel no longer exists in this server.`,
-      );
-      continue;
-    }
-    if (!isSendableGuildChannel(channel)) {
-      errors.push(
-        `${requirement.purpose} channel cannot receive bot messages.`,
-      );
-      continue;
-    }
-    if (
-      requirement.purpose === "court" &&
-      settings.features.anonymousAnswers &&
-      channel.isThread()
-    ) {
-      errors.push(
-        "court channel must be a text or announcement channel when anonymous answers are enabled.",
-      );
-    }
-    if (me) {
-      const permissions = channel.permissionsFor(me);
-      const missing = requirement.requiredPermissions.filter(
-        (permission) => !permissions?.has(permission),
-      );
-      if (missing.length > 0) {
-        errors.push(
-          `${requirement.purpose} channel is missing ${missing.length} required bot permission(s).`,
-        );
-      }
-    }
-  }
-
-  const roleIds = new Set<string>([
-    ...settings.roles.staff,
-    ...settings.roles.privilegedChat,
-    ...settings.roles.silenceTargets,
-    ...settings.roles.silenceExcludes,
-    ...[
-      settings.roles.emperor,
-      settings.roles.empress,
-      settings.roles.anonymousRequired,
-    ].filter((roleId): roleId is string => Boolean(roleId)),
-  ]);
-  const resolvedRoles = new Map<string, Role>();
-  for (const roleId of roleIds) {
-    const role =
-      guild.roles.cache.get(roleId) ??
-      (await guild.roles.fetch(roleId).catch(() => null));
-    if (!role || role.guild.id !== guild.id) {
-      errors.push(
-        `Configured role \`${roleId}\` no longer exists in this server.`,
-      );
+    if (!channel || channel.guild.id !== guild.id || !channel.isTextBased()) {
+      errors.push("The configured log channel is unavailable.");
     } else {
-      resolvedRoles.set(roleId, role);
-    }
-  }
-
-  const configuredUserIds = new Set<string>([
-    ...[settings.championUserId].filter((userId): userId is string =>
-      Boolean(userId),
-    ),
-    ...settings.greetings
-      .map((profile) => profile.userId)
-      .filter((userId): userId is string => Boolean(userId)),
-  ]);
-  for (const userId of configuredUserIds) {
-    const member = await guild.members.fetch(userId).catch(() => null);
-    if (!member) {
-      errors.push(
-        `Configured user \`${userId}\` is not a member of this server.`,
-      );
-    }
-  }
-
-  if (me && settings.features.silenceLock) {
-    if (!me.permissions.has(PermissionFlagsBits.ManageRoles)) {
-      errors.push("Silence lock requires the bot Manage Roles permission.");
-    }
-    for (const roleId of effectiveSilenceTargetRoleIds) {
-      const role = resolvedRoles.get(roleId);
-      if (role && me.roles.highest.comparePositionTo(role) <= 0) {
+      const botMember =
+        guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+      const permissions = botMember ? channel.permissionsFor(botMember) : null;
+      if (
+        !permissions?.has(PermissionFlagsBits.ViewChannel) ||
+        !permissions.has(PermissionFlagsBits.SendMessages)
+      ) {
         errors.push(
-          `Bot role must be above silence-target role ${role.toString()}.`,
+          "Superior cannot view and send messages in the configured log channel.",
         );
       }
     }
   }
-  if (
-    me &&
-    settings.features.replyModeration &&
-    !me.permissions.has(PermissionFlagsBits.ModerateMembers)
-  ) {
-    errors.push(
-      "Reply moderation requires the bot Moderate Members permission.",
-    );
-  }
-
   return { valid: errors.length === 0, errors };
-}
-
-function isArrayRolePurpose(purpose: RolePurpose): purpose is ArrayRolePurpose {
-  return new Set<RolePurpose>([
-    "staff",
-    "privilegedChat",
-    "silenceTargets",
-    "silenceExcludes",
-  ]).has(purpose);
 }
 
 function cloneSettings(settings: GuildSettings): GuildSettings {
   return structuredClone(settings);
 }
 
-async function initializeCourtQuestionsWithRollback(
-  runtime: GuildRuntime,
-  rollback: () => Promise<unknown>,
-): Promise<void> {
-  try {
-    runtime.storage.initializeCourtQuestions();
-  } catch (error) {
-    try {
-      await rollback();
-    } catch (rollbackError) {
-      throw new AggregateError(
-        [error, rollbackError],
-        "Court question initialization failed and the setup change could not be rolled back",
-      );
-    }
-    throw error;
-  }
-}
-
 function isValidTimezone(timezone: string): boolean {
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format();
-    return true;
-  } catch {
-    return false;
-  }
+  return DateTime.now().setZone(timezone).isValid;
 }
 
 function normalizeInvocationTerm(value: string): string {
-  return value.trim().toLowerCase().replaceAll(/\s+/g, " ");
+  return value
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function isValidInvocationTerm(value: string): boolean {
+  return (
+    value.length >= 1 && value.length <= 32 && /^[\p{L}\p{N}_ -]+$/u.test(value)
+  );
 }
 
 function normalizeProfileName(value: string): string {
-  return value.trim().replaceAll(/\s+/g, " ");
+  return value.normalize("NFKC").trim().replace(/\s+/g, " ");
 }
 
-function formatHourMinute(hour: number, minute: number): string {
-  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+function summarizeSetupValues(values: string[]): string {
+  if (values.length === 0) return "none";
+  const visible = values
+    .slice(0, SETUP_SUMMARY_ITEM_LIMIT)
+    .map((value) => formatSetupPreview(value, SETUP_SUMMARY_ITEM_LENGTH));
+  const omitted = values.length - visible.length;
+  return `${visible.join(", ")}${omitted > 0 ? `, … (+${omitted} more)` : ""}`;
 }
 
-function isSendableGuildChannel(
-  channel: GuildBasedChannel,
-): channel is GuildBasedChannel & {
-  send: (payload: unknown) => Promise<unknown>;
-} {
-  return (
-    new Set<ChannelType>([
-      ChannelType.GuildText,
-      ChannelType.GuildAnnouncement,
-    ]).has(channel.type) &&
-    typeof (channel as { send?: unknown }).send === "function"
+function formatGreetingProfileList(settings: GuildSettings): string {
+  if (settings.greetings.length === 0) {
+    return "No greeting profiles are configured.";
+  }
+  const visible = settings.greetings.slice(0, GREETING_LIST_ITEM_LIMIT);
+  const lines = visible.map(
+    ({ name, message }) =>
+      `- **${formatSetupPreview(name, SETUP_SUMMARY_ITEM_LENGTH)}**: ${formatSetupPreview(message, GREETING_LIST_MESSAGE_PREVIEW_LENGTH)}`,
   );
+  const omitted = settings.greetings.length - visible.length;
+  return truncateDiscordContent(
+    [
+      `Greeting profiles (**${settings.greetings.length}** configured):`,
+      ...lines,
+      omitted > 0
+        ? `… **${omitted}** more omitted. Use \`/setup export\` to review every complete profile.`
+        : null,
+    ]
+      .filter((line): line is string => line !== null)
+      .join("\n"),
+  );
+}
+
+function formatSetupPreview(value: string, limit: number): string {
+  return truncateDiscordContent(
+    escapeMarkdown(value.replace(/\s+/g, " ").trim()),
+    limit,
+  );
+}
+
+async function replyPrivate(
+  interaction: ChatInputCommandInteraction,
+  content: string,
+): Promise<void> {
+  if (interaction.deferred && !interaction.replied) {
+    await interaction.editReply({ content, allowedMentions: { parse: [] } });
+    return;
+  }
+  if (interaction.replied) {
+    await interaction.followUp({
+      content,
+      ephemeral: true,
+      allowedMentions: { parse: [] },
+    });
+    return;
+  }
+  await interaction.reply({
+    content,
+    ephemeral: true,
+    allowedMentions: { parse: [] },
+  });
+}
+
+async function deferPrivate(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ ephemeral: true });
+  }
 }

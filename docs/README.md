@@ -1,11 +1,10 @@
-# Superior Documentation
+# Superior documentation
 
-- [Configuration](configuration.md): Discord installation, active `/setup` choices, commands, lifecycle, registration, permissions, and intents.
-- [Development](development.md): multi-tenant architecture, active/legacy boundaries, schema and migration rules, local commands, and testing guidance.
-- [Operations](operations.md): safe migration, deployment, validation, backup, restore, rollback, and multi-guild health checks.
-- [Privacy policy](privacy-policy.md): data collection, use, disclosure, retention, deletion, and privacy-request details.
-- [Terms of service](terms-of-service.md): eligibility, acceptable use, administrator responsibilities, availability, and legal terms.
-- [Final review and handoff](final-review-and-handoff.md): redesign history, current public surface, compatibility constraints, validation evidence, and deployment boundaries.
+- [Configuration](configuration.md): Discord application setup, environment variables, guild onboarding, command families, permissions, and intents.
+- [Windows portable guide](windows.md): extract-and-run setup, launcher checks, database location, upgrades, and troubleshooting.
+- [Development](development.md): active architecture, schema v3, test/build commands, and contribution boundaries.
+- [Operations](operations.md): Linux service controls, guarded rollout, schema migration, backup, restore, and release rollback.
 - [Member capabilities](reference/member-capabilities.md): active features grouped by access level.
-- [Trigger patterns](reference/trigger-patterns.md): configurable neutral Superior chat and reply-moderation phrases.
-- [Invictus Empire lore](../lore/README.md): separate canon-writing guide, continuity ledger, and snippets; it is not an active bot feature specification.
+- [Trigger patterns](reference/trigger-patterns.md): direct-address rules, natural-language intents, shorthand, and bounded inputs.
+- [Privacy policy](privacy-policy.md): unpublished description of active data processing and operator prerequisites.
+- [Terms of service](terms-of-service.md): unpublished service terms and operator prerequisites.

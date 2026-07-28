@@ -16,14 +16,13 @@ import {
   handleModalSubmitInteraction,
 } from "./commands.js";
 import { logError, logInfo } from "../logging.js";
-import {
-  startRuntimeBackgroundLoops,
-  type RuntimeBackgroundLoopController,
-  wireRuntimeParity,
-} from "./runtime-parity.js";
+import { wireMessageRuntime } from "../message-runtime.js";
 import type { BotRuntime } from "../runtime.js";
 import { synchronizeCommands } from "./registration.js";
 import { AsyncWorkTracker } from "./work-tracker.js";
+import { clearBackfillStatus } from "./activity.js";
+import { clearModerationProcessState } from "./moderation.js";
+import { clearPanelProcessState } from "./panels.js";
 
 export interface DiscordClientWorkLifecycle {
   stop: () => void;
@@ -48,12 +47,11 @@ export function createDiscordClient(runtime: BotRuntime): Client {
       GatewayIntentBits.MessageContent,
     ],
     partials: [Partials.Channel, Partials.Message, Partials.Reaction],
+    allowedMentions: { parse: [], repliedUser: false },
   });
   const workTracker = new AsyncWorkTracker();
-  let backgroundLoops: RuntimeBackgroundLoopController | null = null;
   const workLifecycle: DiscordClientWorkLifecycle = {
     stop(): void {
-      backgroundLoops?.stop();
       workTracker.stopAccepting();
     },
     drain(timeoutMs: number): Promise<boolean> {
@@ -62,7 +60,7 @@ export function createDiscordClient(runtime: BotRuntime): Client {
   };
   clientWorkLifecycles.set(client, workLifecycle);
 
-  wireRuntimeParity(client, runtime, workTracker);
+  wireMessageRuntime(client, runtime, workTracker);
 
   client.once("clientReady", () => {
     return workTracker
@@ -134,15 +132,6 @@ export function createDiscordClient(runtime: BotRuntime): Client {
             },
           );
         }
-
-        if (!workTracker.isAccepting) {
-          return;
-        }
-        backgroundLoops = startRuntimeBackgroundLoops(
-          client,
-          runtime,
-          workTracker,
-        );
 
         const commandDefinitions = buildCommandDefinitions().map((definition) =>
           definition.toJSON(),
@@ -322,6 +311,11 @@ export function recordGuildAvailable(
   const record = rejoined
     ? runtime.storage.reactivateGuild(guildId, guildName, observedJoinedAt)
     : runtime.storage.ensureGuild(guildId, guildName, observedJoinedAt);
+  if (rejoined) {
+    clearBackfillStatus(guildId);
+    clearModerationProcessState(guildId);
+    clearPanelProcessState(guildId);
+  }
   runtime.invalidateGuild(guildId);
   return { record, rejoined };
 }
@@ -350,6 +344,9 @@ export function recordGuildUnavailable(
   guildId: string,
 ): void {
   runtime.storage.markGuildLeft(guildId);
+  clearBackfillStatus(guildId);
+  clearModerationProcessState(guildId);
+  clearPanelProcessState(guildId);
   runtime.invalidateGuild(guildId);
 }
 
@@ -434,11 +431,19 @@ async function replyWithUnexpectedError(
     ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction,
   content: string,
 ): Promise<void> {
-  if (interaction.replied || interaction.deferred) {
+  if (interaction.deferred && !interaction.replied) {
     await interaction
-      .followUp({ content, ephemeral: true })
+      .editReply({ content, allowedMentions: { parse: [] } })
       .catch(() => undefined);
     return;
   }
-  await interaction.reply({ content, ephemeral: true }).catch(() => undefined);
+  if (interaction.replied) {
+    await interaction
+      .followUp({ content, ephemeral: true, allowedMentions: { parse: [] } })
+      .catch(() => undefined);
+    return;
+  }
+  await interaction
+    .reply({ content, ephemeral: true, allowedMentions: { parse: [] } })
+    .catch(() => undefined);
 }

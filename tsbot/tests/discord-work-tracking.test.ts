@@ -1,28 +1,15 @@
 import type { EventEmitter } from "node:events";
-import { DateTime } from "luxon";
-import {
-  ChannelType,
-  type GuildMember,
-  type ChatInputCommandInteraction,
-  type MessageReaction,
-  type Message,
-  type User,
-} from "discord.js";
+import type { ChatInputCommandInteraction, Message } from "discord.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDiscordClient,
   getDiscordClientWorkLifecycle,
 } from "../src/discord/bot.js";
-import { createDefaultGuildSettings } from "../src/guild-settings.js";
-import { DEFAULT_BACKFILL_STATUS } from "../src/parity.js";
 import type { BotRuntime, GuildRuntime } from "../src/runtime.js";
 
 const GUILD_ID = "123456789012345678";
 
-function deferred<T>(): {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-} {
+function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((settle) => {
     resolve = settle;
@@ -32,35 +19,28 @@ function deferred<T>(): {
 
 describe("Discord work tracking", () => {
   const clients: ReturnType<typeof createDiscordClient>[] = [];
-
   afterEach(() => {
-    for (const client of clients) {
-      client.destroy();
-    }
+    for (const client of clients) client.destroy();
     clients.length = 0;
   });
 
-  it("drains interaction and message handlers through the same lifecycle", async () => {
-    const firstRuntime = deferred<GuildRuntime | null>();
-    const secondRuntime = deferred<GuildRuntime | null>();
-    const thirdRuntime = deferred<GuildRuntime | null>();
+  it("drains command and message work through one shutdown lifecycle", async () => {
+    const commandRuntime = deferred<GuildRuntime | null>();
+    const messageRuntime = deferred<GuildRuntime | null>();
     const forGuild = vi
       .fn<BotRuntime["forGuild"]>()
-      .mockImplementationOnce(() => firstRuntime.promise)
-      .mockImplementationOnce(() => secondRuntime.promise)
-      .mockImplementationOnce(() => thirdRuntime.promise);
-    const runtime = {
-      forGuild,
-    } as unknown as BotRuntime;
+      .mockImplementationOnce(() => commandRuntime.promise)
+      .mockImplementationOnce(() => messageRuntime.promise);
+    const runtime = { forGuild } as unknown as BotRuntime;
     const client = createDiscordClient(runtime);
     clients.push(client);
     const emitter = client as unknown as EventEmitter;
     const reply = vi.fn(async () => undefined);
     const interaction = {
       guildId: GUILD_ID,
-      guild: { id: GUILD_ID, name: "Tracking Test Guild" },
-      commandName: "court",
-      options: { getSubcommand: vi.fn(() => "status") },
+      guild: { id: GUILD_ID, name: "Tracking Guild" },
+      commandName: "utility",
+      options: { getSubcommand: vi.fn(() => "ping") },
       reply,
       isAutocomplete: () => false,
       isChatInputCommand: () => true,
@@ -70,192 +50,46 @@ describe("Discord work tracking", () => {
     const message = {
       guildId: GUILD_ID,
       guild: { id: GUILD_ID },
-      author: { bot: false },
+      channel: { guildId: GUILD_ID },
+      content: "superior ping",
+      author: { id: "223456789012345678", bot: false },
+      client,
     } as unknown as Message;
-    const reaction = {
-      message: {
-        partial: false,
-        guildId: GUILD_ID,
-        guild: { id: GUILD_ID },
-      },
-    } as unknown as MessageReaction;
-    const reactionUser = {
-      id: "234567890123456789",
-      bot: false,
-    } as User;
 
     emitter.emit("interactionCreate", interaction);
     emitter.emit("messageCreate", message);
-    emitter.emit("messageReactionAdd", reaction, reactionUser);
-    await vi.waitFor(() => {
-      expect(forGuild).toHaveBeenCalledTimes(3);
-    });
+    await vi.waitFor(() => expect(forGuild).toHaveBeenCalledTimes(2));
 
-    const workLifecycle = getDiscordClientWorkLifecycle(client);
-    expect(workLifecycle).not.toBeNull();
-    workLifecycle?.stop();
-    let drainCompleted = false;
-    const drain = workLifecycle?.drain(1_000).then((result) => {
-      drainCompleted = true;
+    const lifecycle = getDiscordClientWorkLifecycle(client);
+    lifecycle?.stop();
+    let completed = false;
+    const drain = lifecycle?.drain(1_000).then((result) => {
+      completed = true;
       return result;
     });
 
-    firstRuntime.resolve(null);
-    await vi.waitFor(() => {
-      expect(reply).toHaveBeenCalledTimes(1);
-    });
-    expect(drainCompleted).toBe(false);
-
-    secondRuntime.resolve(null);
-    await Promise.resolve();
-    expect(drainCompleted).toBe(false);
-
-    thirdRuntime.resolve(null);
+    commandRuntime.resolve(null);
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(1));
+    expect(completed).toBe(false);
+    messageRuntime.resolve(null);
     await expect(drain).resolves.toBe(true);
-    expect(drainCompleted).toBe(true);
   });
 
-  it("does not fetch partial reaction messages for a disabled guild", async () => {
-    const settings = createDefaultGuildSettings();
-    settings.enabled = false;
-    const guildRuntime = {
-      settings,
-      isCurrent: vi.fn(() => true),
-    } as unknown as GuildRuntime;
-    const forGuild = vi.fn(async () => guildRuntime);
-    const runtime = { forGuild } as unknown as BotRuntime;
-    const client = createDiscordClient(runtime);
-    clients.push(client);
-    const emitter = client as unknown as EventEmitter;
-    const fetch = vi.fn(async () => ({
-      guildId: GUILD_ID,
-      guild: { id: GUILD_ID },
-    }));
-    const reaction = {
-      message: {
-        partial: true,
-        guildId: GUILD_ID,
-        fetch,
-      },
-    } as unknown as MessageReaction;
-    const reactionUser = {
-      id: "234567890123456789",
-      bot: false,
-    } as User;
-
-    emitter.emit("messageReactionAdd", reaction, reactionUser);
-    await vi.waitFor(() => {
-      expect(forGuild).toHaveBeenCalledWith(GUILD_ID);
-    });
-
-    const workLifecycle = getDiscordClientWorkLifecycle(client);
-    workLifecycle?.stop();
-    await expect(workLifecycle?.drain(1_000)).resolves.toBe(true);
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it("keeps archived-thread backfill discovery in the interaction drain", async () => {
-    const archivedDiscovery = deferred<{ threads: Map<string, never> }>();
-    const fetchArchived = vi.fn(
-      async (options: { type: "public" | "private" }) =>
-        options.type === "public"
-          ? archivedDiscovery.promise
-          : { threads: new Map<string, never>() },
-    );
-    const historyChannel = {
-      id: "234567890123456789",
-      type: ChannelType.GuildText,
-      threads: { fetchArchived },
-      messages: {
-        fetch: vi.fn(async () => ({
-          size: 0,
-          values: () => new Map().values(),
-          last: () => undefined,
-        })),
-      },
-    };
-    const actor = {
-      id: "345678901234567890",
-      permissions: { has: vi.fn(() => true) },
-    } as unknown as GuildMember;
-    const guild = {
-      id: GUILD_ID,
-      name: "Backfill Tracking Guild",
-      ownerId: actor.id,
-      members: { fetch: vi.fn(async () => actor) },
-      channels: {
-        cache: new Map([[historyChannel.id, historyChannel]]),
-        fetchActiveThreads: vi.fn(async () => ({
-          threads: new Map<string, never>(),
-        })),
-      },
-    };
-    const settings = createDefaultGuildSettings();
-    settings.enabled = true;
-    const mergeUserMetricBackfill = vi.fn(() => [0, 0] as [number, number]);
-    const guildRuntime = {
-      guildId: GUILD_ID,
-      botVersion: "3.0.0-test",
-      settings,
-      storage: {
-        recordCommandMetric: vi.fn(),
-        mergeUserMetricBackfill,
-      },
-      backfillStatus: structuredClone(DEFAULT_BACKFILL_STATUS),
-      generation: 0,
-      now: () => DateTime.utc(),
-      randomInt: () => 0,
-      isCurrent: () => true,
-    } as unknown as GuildRuntime;
+  it("stops accepting new tracked work after shutdown begins", async () => {
     const runtime = {
-      forGuild: vi.fn(async () => guildRuntime),
+      forGuild: vi.fn(async () => null),
     } as unknown as BotRuntime;
     const client = createDiscordClient(runtime);
     clients.push(client);
-    const emitter = client as unknown as EventEmitter;
-    const reply = vi.fn(async () => undefined);
-    const interaction = {
+    const lifecycle = getDiscordClientWorkLifecycle(client);
+    lifecycle?.stop();
+    (client as unknown as EventEmitter).emit("messageCreate", {
       guildId: GUILD_ID,
-      guild,
-      commandName: "superior",
-      options: {
-        getSubcommand: vi.fn(() => "backfillstats"),
-        getInteger: vi.fn(() => 0),
-      },
-      user: {
-        id: actor.id,
-        toString: () => `<@${actor.id}>`,
-      },
-      reply,
-      editReply: vi.fn(async () => undefined),
-      isAutocomplete: () => false,
-      isChatInputCommand: () => true,
-      isButton: () => false,
-      isModalSubmit: () => false,
-    } as unknown as ChatInputCommandInteraction;
-
-    emitter.emit("interactionCreate", interaction);
-    await vi.waitFor(() => {
-      expect(fetchArchived).toHaveBeenCalledWith({
-        type: "public",
-        fetchAll: true,
-      });
+      guild: { id: GUILD_ID },
+      author: { bot: false },
+      content: "superior ping",
     });
-
-    const workLifecycle = getDiscordClientWorkLifecycle(client);
-    expect(workLifecycle).not.toBeNull();
-    workLifecycle?.stop();
-    let drainCompleted = false;
-    const drain = workLifecycle?.drain(1_000).then((result) => {
-      drainCompleted = true;
-      return result;
-    });
-    await Promise.resolve();
-    expect(drainCompleted).toBe(false);
-
-    archivedDiscovery.resolve({ threads: new Map<string, never>() });
-    await expect(drain).resolves.toBe(true);
-    expect(drainCompleted).toBe(true);
-    expect(mergeUserMetricBackfill).toHaveBeenCalledTimes(3);
+    await expect(lifecycle?.drain(100)).resolves.toBe(true);
+    expect(runtime.forGuild).not.toHaveBeenCalled();
   });
 });

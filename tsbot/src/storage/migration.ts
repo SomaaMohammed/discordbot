@@ -1,225 +1,224 @@
+import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import {
-  assertDiscordSnowflake,
+  DISCORD_SNOWFLAKE_PATTERN,
   serializeGuildSettings,
 } from "../guild-settings.js";
+import type { GuildSettings } from "../types.js";
 import {
-  buildLegacyGuildSettings,
-  buildMigratedStatePayload,
-  parseLegacyStateJson,
-} from "./legacy-v1-settings.js";
+  convertLegacyMetric,
+  convertLegacyV2Settings,
+  LEGACY_SILENCE_RECOVERY_METRIC_KEY,
+} from "./legacy-v2-converter.js";
 import {
-  countLegacyRows,
-  createV2Objects,
+  createV3Objects,
+  CURRENT_SCHEMA_VERSION,
   databaseIntegrityCheck,
   detectDatabaseSchema,
-  recordCurrentSchemaVersion,
-  validateV2Schema,
   type DatabaseSchemaKind,
+  recordCurrentSchemaVersion,
+  V2_TABLE_NAMES,
+  validateV2Schema,
+  validateV3Schema,
 } from "./schema.js";
 
 export type MigrationFailurePoint =
-  "after-rename" | "after-create" | "after-copy" | "after-verify";
+  | "after-source-read"
+  | "after-rename"
+  | "after-create"
+  | "after-copy"
+  | "after-verify"
+  | "after-drop"
+  | "after-version"
+  | "before-commit";
 
-export interface MigrateDatabaseOptions {
+export interface MigrationOptions {
   dbFile: string;
-  legacyGuildId: string | null;
-  environment?: NodeJS.ProcessEnv;
-  now?: () => string;
-  /** Test-only failure injection used to prove transactional rollback. */
+  dryRun?: boolean;
   failurePoint?: MigrationFailurePoint;
+  now?: () => string;
+  /** Test/diagnostic hook invoked after BEGIN IMMEDIATE and before reads. */
+  onLockAcquired?: () => void;
 }
 
 export interface MigrationResult {
-  status: "initialized" | "migrated" | "already-current";
-  schemaVersion: 2;
-  copiedRows: Record<string, number>;
+  status: "migrated" | "dry-run" | "already-current";
+  fromSchema: "legacy-v2" | "current-v3";
+  toSchema: "current-v3";
+  guilds: number;
+  settingsRequiringReview: number;
+  metricsPreserved: number;
+  metricsDropped: number;
+  warnings: number;
 }
 
 export interface DatabaseValidationResult {
   schema: DatabaseSchemaKind;
-  integrity: "ok";
-  schemaVersion: 0 | 1 | 2;
+  schemaVersion: number | null;
+  integrity: string;
+  foreignKeyViolations: number;
 }
 
-const LEGACY_TABLE_MAP = {
-  kv: "kv_v1_legacy",
-  posts: "posts_v1_legacy",
-  answers: "answers_v1_legacy",
-  metrics: "metrics_v1_legacy",
-  anon_cooldowns: "anon_cooldowns_v1_legacy",
-} as const;
+interface LegacyGuildRow {
+  guild_id: string;
+  enabled: number;
+  name: string | null;
+  joined_at: string | null;
+  left_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
 
-const LEGACY_INDEX_NAMES = [
-  "idx_posts_closed_posted_at",
-  "idx_answers_question_created",
-  "idx_answers_message_id",
+interface LegacySettingsRow {
+  guild_id: string;
+  settings_version: number;
+  settings_json: string;
+  updated_at: string;
+}
+
+interface LegacyMetricRow {
+  guild_id: string;
+  metric_key: string;
+  metric_value: string;
+  updated_at: string;
+}
+
+interface PreparedSettingsRow {
+  guildId: string;
+  settings: GuildSettings;
+  json: string;
+  updatedAt: string;
+}
+
+interface PreparedMetricRow {
+  guildId: string;
+  key: string;
+  value: number;
+  updatedAt: string;
+}
+
+interface PreparedMigration {
+  guilds: LegacyGuildRow[];
+  settings: PreparedSettingsRow[];
+  metrics: PreparedMetricRow[];
+  result: Omit<MigrationResult, "status">;
+}
+
+const V2_EXPLICIT_INDEXES = [
+  "idx_posts_guild_closed_posted_at",
+  "idx_posts_guild_posted_at",
+  "idx_answers_guild_question_created",
+  "idx_answers_guild_message_id",
+  "idx_answers_guild_created_at",
+  "idx_guilds_enabled_left_at",
 ] as const;
 
-export function migrateDatabase(
-  options: MigrateDatabaseOptions,
-): MigrationResult {
-  const db = new Database(options.dbFile);
-  const now = options.now ?? (() => new Date().toISOString());
+class DryRunRollback extends Error {}
+
+export function migrateDatabase(options: MigrationOptions): MigrationResult {
+  const db = new Database(options.dbFile, {
+    fileMustExist: true,
+    timeout: 5_000,
+  });
+  db.pragma("foreign_keys = ON");
+
+  let dryRunResult: MigrationResult | null = null;
   try {
-    db.pragma("foreign_keys = ON");
     const migrate = db.transaction((): MigrationResult => {
-      // BEGIN IMMEDIATE is acquired before schema classification or any legacy
-      // source reads. A v1 writer therefore cannot commit newer rows between
-      // the snapshot used for transformation and the INSERT ... SELECT copy.
-      assertHealthy(db);
+      options.onLockAcquired?.();
+      assertIntegrity(db);
       const schema = detectDatabaseSchema(db);
-      if (schema === "current-v2") {
+      if (schema === "current-v3") {
+        const issues = validateV3Schema(db);
+        if (issues.length > 0) {
+          throw new Error(`Schema v3 validation failed: ${issues.join("; ")}`);
+        }
         return {
           status: "already-current",
-          schemaVersion: 2,
-          copiedRows: {},
+          fromSchema: "current-v3",
+          toSchema: "current-v3",
+          guilds: countRows(db, "guilds"),
+          settingsRequiringReview: countReviewRequiredSettings(db),
+          metricsPreserved: countRows(db, "metrics"),
+          metricsDropped: 0,
+          warnings: 0,
         };
       }
-      if (schema === "unknown") {
+      if (schema === "legacy-v1") {
         throw new Error(
-          "Database schema is unknown or incomplete; migration refused without changes.",
+          "Schema v1 cannot be migrated by v5. Upgrade with the final v4 release to schema v2, stop the bot, create an offline backup, then run the v5 migration.",
+        );
+      }
+      if (schema !== "legacy-v2") {
+        throw new Error(
+          `Refusing to migrate ${schema}: expected the exact final-v4 schema v2 layout`,
         );
       }
 
-      if (schema === "empty") {
-        const appliedAt = now();
-        createV2Objects(db);
-        recordCurrentSchemaVersion(db, appliedAt);
-        const issues = validateV2Schema(db);
-        if (issues.length > 0) {
-          throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
-        }
-        assertHealthy(db);
-        return {
-          status: "initialized",
-          schemaVersion: 2,
-          copiedRows: {},
-        };
+      const v2Issues = validateV2Schema(db);
+      if (v2Issues.length > 0) {
+        throw new Error(`Schema v2 validation failed: ${v2Issues.join("; ")}`);
       }
 
-      const counts = countLegacyRows(db);
-      const hasRows = Object.values(counts).some((count) => count > 0);
-      const guildId = options.legacyGuildId
-        ? assertDiscordSnowflake(options.legacyGuildId, "LEGACY_GUILD_ID")
-        : null;
-      if (hasRows && !guildId) {
-        throw new Error(
-          "LEGACY_GUILD_ID is required because the legacy database contains rows (TEST_GUILD_ID is accepted only by the migration CLI as a deprecated fallback).",
-        );
+      const now = (options.now ?? utcNow)();
+      const prepared = prepareMigration(db, now);
+      injectFailure(options, "after-source-read");
+
+      for (const index of V2_EXPLICIT_INDEXES) {
+        db.exec(`DROP INDEX ${quoteIdentifier(index)}`);
       }
-
-      const stateRow = db
-        .prepare("SELECT value FROM kv WHERE key = 'state'")
-        .get() as { value: string } | undefined;
-      const legacyState = parseLegacyStateJson(stateRow?.value ?? null);
-      const settings = guildId
-        ? buildLegacyGuildSettings(options.environment ?? {}, legacyState)
-        : null;
-      const appliedAt = now();
-
-      for (const [current, legacy] of Object.entries(LEGACY_TABLE_MAP)) {
+      for (const table of V2_TABLE_NAMES) {
         db.exec(
-          `ALTER TABLE ${quoteIdentifier(current)} RENAME TO ${quoteIdentifier(legacy)}`,
+          `ALTER TABLE ${quoteIdentifier(table)} RENAME TO ${quoteIdentifier(legacyTableName(table))}`,
         );
-      }
-      for (const index of LEGACY_INDEX_NAMES) {
-        db.exec(`DROP INDEX IF EXISTS ${quoteIdentifier(index)}`);
       }
       injectFailure(options, "after-rename");
 
-      createV2Objects(db);
+      createV3Objects(db);
       injectFailure(options, "after-create");
 
-      if (guildId && settings) {
-        db.prepare(
-          `INSERT INTO guilds (
-             guild_id, enabled, name, joined_at, left_at, created_at, updated_at
-           ) VALUES (?, 1, NULL, NULL, NULL, ?, ?)`,
-        ).run(guildId, appliedAt, appliedAt);
-        db.prepare(
-          `INSERT INTO guild_settings (
-             guild_id, settings_version, settings_json, updated_at
-           ) VALUES (?, ?, ?, ?)`,
-        ).run(
-          guildId,
-          settings.version,
-          serializeGuildSettings(settings),
-          appliedAt,
-        );
-
-        db.prepare(
-          `INSERT INTO kv (guild_id, key, value, updated_at)
-           SELECT ?, key, value, updated_at FROM kv_v1_legacy`,
-        ).run(guildId);
-        if (stateRow) {
-          db.prepare(
-            `UPDATE kv SET value = ?
-             WHERE guild_id = ? AND key = 'state'`,
-          ).run(
-            JSON.stringify(buildMigratedStatePayload(legacyState)),
-            guildId,
-          );
-        }
-        db.prepare(
-          `INSERT INTO posts (
-             guild_id, message_id, thread_id, channel_id, category, question,
-             posted_at, close_after_hours, closed, closed_at, close_reason
-           )
-           SELECT ?, message_id, thread_id, channel_id, category, question,
-                  posted_at, close_after_hours, closed, closed_at, close_reason
-           FROM posts_v1_legacy`,
-        ).run(guildId);
-        db.prepare(
-          `INSERT INTO answers (
-             guild_id, question_message_id, user_id, answer_message_id, created_at
-           )
-           SELECT ?, question_message_id, user_id, answer_message_id, created_at
-           FROM answers_v1_legacy`,
-        ).run(guildId);
-        db.prepare(
-          `INSERT INTO metrics (
-             guild_id, metric_key, metric_value, updated_at
-           )
-           SELECT ?, metric_key, metric_value, updated_at
-           FROM metrics_v1_legacy`,
-        ).run(guildId);
-        db.prepare(
-          `INSERT INTO anon_cooldowns (guild_id, user_id, last_answer_at)
-           SELECT ?, user_id, last_answer_at FROM anon_cooldowns_v1_legacy`,
-        ).run(guildId);
-      }
+      copyPreparedRows(db, prepared);
       injectFailure(options, "after-copy");
-
-      verifyCopiedRowCounts(db, counts, guildId);
-      const foreignKeyViolations = db.pragma("foreign_key_check") as unknown[];
-      if (foreignKeyViolations.length > 0) {
-        throw new Error("Migration produced foreign key violations");
-      }
+      verifyPreparedRows(db, prepared);
       injectFailure(options, "after-verify");
 
-      for (const legacy of Object.values(LEGACY_TABLE_MAP)) {
-        db.exec(`DROP TABLE ${quoteIdentifier(legacy)}`);
+      for (const table of [...V2_TABLE_NAMES].reverse()) {
+        db.exec(`DROP TABLE ${quoteIdentifier(legacyTableName(table))}`);
       }
-      // The version marker is deliberately the final data write. A database is
-      // never advertised as v2 before all copy and integrity checks succeed.
-      recordCurrentSchemaVersion(db, appliedAt);
+      injectFailure(options, "after-drop");
 
-      const issues = validateV2Schema(db);
-      if (issues.length > 0) {
+      // The marker is deliberately the last data write. A database claiming
+      // version 3 has already passed source and copy verification.
+      recordCurrentSchemaVersion(db, now);
+      injectFailure(options, "after-version");
+
+      const finalIssues = validateV3Schema(db);
+      if (finalIssues.length > 0) {
         throw new Error(
-          `Migrated schema validation failed: ${issues.join("; ")}`,
+          `Migrated schema validation failed: ${finalIssues.join("; ")}`,
         );
       }
-      assertHealthy(db);
 
-      return {
-        status: "migrated",
-        schemaVersion: 2,
-        copiedRows: counts,
+      const result: MigrationResult = {
+        status: options.dryRun ? "dry-run" : "migrated",
+        ...prepared.result,
       };
+      injectFailure(options, "before-commit");
+      if (options.dryRun) {
+        dryRunResult = result;
+        throw new DryRunRollback("validated dry run");
+      }
+      return result;
     });
-    return migrate.immediate();
+
+    try {
+      return migrate.immediate();
+    } catch (error) {
+      if (error instanceof DryRunRollback && dryRunResult) {
+        return dryRunResult;
+      }
+      throw error;
+    }
   } finally {
     db.close();
   }
@@ -227,86 +226,320 @@ export function migrateDatabase(
 
 export function validateDatabaseFile(
   dbFile: string,
-  options: { requireCurrent?: boolean } = {},
+  options: { expect?: 2 | 3; requireCurrent?: boolean } = {},
 ): DatabaseValidationResult {
-  const db = new Database(dbFile, { readonly: true, fileMustExist: true });
+  const db = new Database(dbFile, {
+    readonly: true,
+    fileMustExist: true,
+  });
+  db.pragma("foreign_keys = ON");
   try {
-    assertHealthy(db);
+    const integrity = databaseIntegrityCheck(db);
     const schema = detectDatabaseSchema(db);
-    if (schema === "unknown" || schema === "empty") {
-      throw new Error(`Database schema is ${schema}; validation failed`);
+    const foreignKeyViolations = (db.pragma("foreign_key_check") as unknown[])
+      .length;
+    const schemaVersion = readSchemaVersion(db, schema);
+    const expected = options.expect ?? (options.requireCurrent ? 3 : undefined);
+    if (integrity.toLowerCase() !== "ok") {
+      throw new Error(`Database integrity check failed: ${integrity}`);
     }
-    if (options.requireCurrent && schema !== "current-v2") {
-      throw new Error("Database schema is not current v2");
+    if (foreignKeyViolations > 0) {
+      throw new Error(
+        `Database foreign-key check reported ${foreignKeyViolations} violation(s)`,
+      );
     }
-    if (schema === "current-v2") {
-      const issues = validateV2Schema(db);
-      if (issues.length > 0) {
-        throw new Error(
-          `Database schema validation failed: ${issues.join("; ")}`,
-        );
-      }
+    if (
+      (expected === 2 && schema !== "legacy-v2") ||
+      (expected === 3 && schema !== "current-v3")
+    ) {
+      throw new Error(
+        `Database schema is ${schema}; expected exact schema v${expected}`,
+      );
     }
-    return {
-      schema,
-      integrity: "ok",
-      schemaVersion: schema === "current-v2" ? 2 : 1,
-    };
+    return { schema, schemaVersion, integrity, foreignKeyViolations };
   } finally {
     db.close();
   }
 }
 
-function verifyCopiedRowCounts(
+function prepareMigration(
   db: Database.Database,
-  expected: Record<string, number>,
-  guildId: string | null,
-): void {
-  const guildCount = db
-    .prepare("SELECT COUNT(*) AS count FROM guilds")
-    .get() as { count: number };
-  const settingsCount = db
-    .prepare("SELECT COUNT(*) AS count FROM guild_settings")
-    .get() as { count: number };
-  const expectedMetadataRows = guildId ? 1 : 0;
-  if (
-    Number(guildCount.count) !== expectedMetadataRows ||
-    Number(settingsCount.count) !== expectedMetadataRows
-  ) {
-    throw new Error("Migration guild metadata/settings row-count mismatch");
+  now: string,
+): PreparedMigration {
+  const guilds = db
+    .prepare("SELECT * FROM guilds ORDER BY guild_id")
+    .all() as LegacyGuildRow[];
+  const settingsRows = db
+    .prepare("SELECT * FROM guild_settings ORDER BY guild_id")
+    .all() as LegacySettingsRow[];
+  const metricRows = db
+    .prepare("SELECT * FROM metrics ORDER BY guild_id, metric_key")
+    .all() as LegacyMetricRow[];
+
+  assertLegacyGuildRows(guilds);
+  assertNoUnresolvedRecoveryMetadata(metricRows);
+
+  const sourceSettings = new Map(
+    settingsRows.map((row) => [row.guild_id, row]),
+  );
+  const settings: PreparedSettingsRow[] = [];
+  let settingsRequiringReview = 0;
+  let warnings = 0;
+
+  for (const guild of guilds) {
+    const source = sourceSettings.get(guild.guild_id);
+    let input: unknown = {};
+    let sourceEnabled: boolean | null = null;
+    if (source?.settings_version === 1) {
+      try {
+        input = JSON.parse(source.settings_json) as unknown;
+        if (
+          input &&
+          typeof input === "object" &&
+          !Array.isArray(input) &&
+          typeof (input as { enabled?: unknown }).enabled === "boolean"
+        ) {
+          sourceEnabled = (input as { enabled: boolean }).enabled;
+        }
+      } catch {
+        input = {};
+      }
+    }
+
+    const enabledConsistent =
+      sourceEnabled !== null && sourceEnabled === Boolean(guild.enabled);
+    const converted = convertLegacyV2Settings(enabledConsistent ? input : {}, {
+      guildEnabled: Boolean(guild.enabled),
+      guildActive: guild.left_at === null,
+    });
+    if (converted.settings.reviewRequired) {
+      settingsRequiringReview += 1;
+    }
+    warnings += converted.warnings.length;
+    guild.enabled = converted.settings.enabled ? 1 : 0;
+    settings.push({
+      guildId: guild.guild_id,
+      settings: converted.settings,
+      json: serializeGuildSettings(converted.settings),
+      updatedAt: now,
+    });
   }
 
-  for (const table of Object.keys(LEGACY_TABLE_MAP) as Array<
-    keyof typeof LEGACY_TABLE_MAP
-  >) {
-    const row = guildId
-      ? (db
-          .prepare(
-            `SELECT COUNT(*) AS count FROM ${quoteIdentifier(table)} WHERE guild_id = ?`,
-          )
-          .get(guildId) as { count: number })
-      : (db
-          .prepare(`SELECT COUNT(*) AS count FROM ${quoteIdentifier(table)}`)
-          .get() as { count: number });
-    const actual = Number(row.count);
-    const wanted = expected[table] ?? 0;
-    if (actual !== wanted) {
+  const preparedMetrics = new Map<string, PreparedMetricRow>();
+  let dropped = 0;
+  for (const row of metricRows) {
+    if (row.metric_key === LEGACY_SILENCE_RECOVERY_METRIC_KEY) {
+      dropped += 1;
+      continue;
+    }
+    const converted = convertLegacyMetric(row.metric_key, row.metric_value);
+    if (!converted) {
+      dropped += 1;
+      continue;
+    }
+    if (!isValidTimestamp(row.updated_at)) {
+      dropped += 1;
+      continue;
+    }
+    const mapKey = `${row.guild_id}\u0000${converted.key}`;
+    const existing = preparedMetrics.get(mapKey);
+    if (!existing) {
+      preparedMetrics.set(mapKey, {
+        guildId: row.guild_id,
+        key: converted.key,
+        value: converted.value,
+        updatedAt: row.updated_at,
+      });
+      continue;
+    }
+    const total = existing.value + converted.value;
+    if (!Number.isSafeInteger(total)) {
       throw new Error(
-        `Migration row-count mismatch for ${table}: copied ${actual}, expected ${wanted}`,
+        "Active metric collision exceeds the supported safe-integer range",
+      );
+    }
+    existing.value = total;
+    if (Date.parse(row.updated_at) > Date.parse(existing.updatedAt)) {
+      existing.updatedAt = row.updated_at;
+    }
+  }
+
+  return {
+    guilds,
+    settings,
+    metrics: [...preparedMetrics.values()].sort((left, right) =>
+      `${left.guildId}\u0000${left.key}`.localeCompare(
+        `${right.guildId}\u0000${right.key}`,
+      ),
+    ),
+    result: {
+      fromSchema: "legacy-v2",
+      toSchema: "current-v3",
+      guilds: guilds.length,
+      settingsRequiringReview,
+      metricsPreserved: preparedMetrics.size,
+      metricsDropped: dropped,
+      warnings,
+    },
+  };
+}
+
+function copyPreparedRows(
+  db: Database.Database,
+  prepared: PreparedMigration,
+): void {
+  const insertGuild = db.prepare(
+    `INSERT INTO guilds (
+       guild_id, enabled, name, joined_at, left_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const guild of prepared.guilds) {
+    insertGuild.run(
+      guild.guild_id,
+      guild.enabled,
+      guild.name,
+      guild.joined_at,
+      guild.left_at,
+      guild.created_at,
+      guild.updated_at,
+    );
+  }
+
+  const insertSettings = db.prepare(
+    `INSERT INTO guild_settings (
+       guild_id, settings_version, settings_json, updated_at
+     ) VALUES (?, 2, ?, ?)`,
+  );
+  for (const row of prepared.settings) {
+    insertSettings.run(row.guildId, row.json, row.updatedAt);
+  }
+
+  const insertMetric = db.prepare(
+    `INSERT INTO metrics (
+       guild_id, metric_key, metric_value, updated_at
+     ) VALUES (?, ?, ?, ?)`,
+  );
+  for (const row of prepared.metrics) {
+    insertMetric.run(row.guildId, row.key, row.value, row.updatedAt);
+  }
+}
+
+function verifyPreparedRows(
+  db: Database.Database,
+  prepared: PreparedMigration,
+): void {
+  const guilds = db
+    .prepare("SELECT * FROM guilds ORDER BY guild_id")
+    .all() as LegacyGuildRow[];
+  if (!isDeepStrictEqual(guilds, prepared.guilds)) {
+    throw new Error("Migrated guild metadata does not match the prepared copy");
+  }
+
+  const settings = db
+    .prepare(
+      "SELECT guild_id, settings_version, settings_json, updated_at FROM guild_settings ORDER BY guild_id",
+    )
+    .all() as LegacySettingsRow[];
+  const expectedSettings = prepared.settings.map((row) => ({
+    guild_id: row.guildId,
+    settings_version: 2,
+    settings_json: row.json,
+    updated_at: row.updatedAt,
+  }));
+  if (!isDeepStrictEqual(settings, expectedSettings)) {
+    throw new Error("Migrated guild settings do not match the prepared copy");
+  }
+
+  const metrics = db
+    .prepare(
+      "SELECT guild_id, metric_key, metric_value, updated_at FROM metrics ORDER BY guild_id, metric_key",
+    )
+    .all() as Array<{
+    guild_id: string;
+    metric_key: string;
+    metric_value: number;
+    updated_at: string;
+  }>;
+  const expectedMetrics = prepared.metrics.map((row) => ({
+    guild_id: row.guildId,
+    metric_key: row.key,
+    metric_value: row.value,
+    updated_at: row.updatedAt,
+  }));
+  if (!isDeepStrictEqual(metrics, expectedMetrics)) {
+    throw new Error("Migrated metrics do not match the prepared copy");
+  }
+
+  const foreignKeyViolations = db.pragma("foreign_key_check") as unknown[];
+  if (foreignKeyViolations.length > 0) {
+    throw new Error("Migrated candidate has foreign-key violations");
+  }
+}
+
+function assertLegacyGuildRows(rows: LegacyGuildRow[]): void {
+  for (const row of rows) {
+    if (!DISCORD_SNOWFLAKE_PATTERN.test(row.guild_id)) {
+      throw new Error("Schema v2 contains an invalid guild ID");
+    }
+    if (row.enabled !== 0 && row.enabled !== 1) {
+      throw new Error("Schema v2 contains an invalid enabled value");
+    }
+    for (const timestamp of [
+      row.joined_at,
+      row.left_at,
+      row.created_at,
+      row.updated_at,
+    ]) {
+      if (timestamp !== null && !isValidTimestamp(timestamp)) {
+        throw new Error("Schema v2 contains invalid guild timestamps");
+      }
+    }
+  }
+}
+
+function assertNoUnresolvedRecoveryMetadata(rows: LegacyMetricRow[]): void {
+  for (const row of rows) {
+    if (row.metric_key !== LEGACY_SILENCE_RECOVERY_METRIC_KEY) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.metric_value);
+    } catch {
+      throw new Error(
+        "Migration blocked: permission-recovery metadata is malformed. Run the final v4 bot, repair or restore all silence leases, verify the lease list is empty, stop the service, and retry.",
+      );
+    }
+    if (!isValidEmptyRecoveryPayload(parsed)) {
+      throw new Error(
+        "Migration blocked: unresolved or malformed permission-recovery metadata exists. Run the final v4 bot, restore/cancel every silence lease, verify the lease list is empty, stop the service, and retry.",
       );
     }
   }
 }
 
-function assertHealthy(db: Database.Database): void {
-  const result = databaseIntegrityCheck(db);
-  if (result !== "ok") {
-    throw new Error(`SQLite integrity_check failed: ${result || "no result"}`);
+function isValidEmptyRecoveryPayload(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).length === 2 &&
+    record.version === 1 &&
+    Array.isArray(record.leases) &&
+    record.leases.length === 0
+  );
+}
+
+function assertIntegrity(db: Database.Database): void {
+  const integrity = databaseIntegrityCheck(db);
+  if (integrity.toLowerCase() !== "ok") {
+    throw new Error(`Database integrity check failed: ${integrity}`);
   }
 }
 
 function injectFailure(
-  options: MigrateDatabaseOptions,
+  options: MigrationOptions,
   point: MigrationFailurePoint,
 ): void {
   if (options.failurePoint === point) {
@@ -314,6 +547,61 @@ function injectFailure(
   }
 }
 
+function countRows(db: Database.Database, table: string): number {
+  return Number(
+    (
+      db
+        .prepare(`SELECT COUNT(*) AS count FROM ${quoteIdentifier(table)}`)
+        .get() as { count: number }
+    ).count,
+  );
+}
+
+function countReviewRequiredSettings(db: Database.Database): number {
+  const rows = db
+    .prepare("SELECT settings_json FROM guild_settings")
+    .all() as Array<{ settings_json: string }>;
+  return rows.reduce((count, row) => {
+    try {
+      const parsed = JSON.parse(row.settings_json) as {
+        reviewRequired?: unknown;
+      };
+      return count + (parsed.reviewRequired === true ? 1 : 0);
+    } catch {
+      return count;
+    }
+  }, 0);
+}
+
+function readSchemaVersion(
+  db: Database.Database,
+  schema: DatabaseSchemaKind,
+): number | null {
+  if (schema !== "legacy-v2" && schema !== "current-v3") {
+    return null;
+  }
+  const row = db
+    .prepare("SELECT MAX(version) AS version FROM schema_migrations")
+    .get() as { version: number | null };
+  return row.version === null ? null : Number(row.version);
+}
+
+function legacyTableName(table: string): string {
+  return `${table}_v2_legacy`;
+}
+
 function quoteIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function utcNow(): string {
+  return new Date().toISOString();
+}
+
+function isValidTimestamp(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    Number.isFinite(Date.parse(value))
+  );
 }

@@ -2,186 +2,97 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadDatabaseConfig, loadProcessConfig } from "../src/config.js";
-import { loadLegacyMigrationConfig } from "../src/storage/legacy-v1-settings.js";
+import {
+  loadProcessConfig,
+  resolveDatabaseFile,
+  resolveEnvironmentFile,
+} from "../src/config.js";
 
-const CONFIG_ENV_KEYS = [
-  "BOT_OPERATOR_USER_IDS",
+const ENV_KEYS = [
   "BOT_VERSION",
   "COMMAND_REGISTRATION_MODE",
-  "COURT_CHANNEL_ID",
   "DB_FILE",
   "DEV_GUILD_IDS",
   "DISCORD_TOKEN",
   "ENV_FILE",
-  "LEGACY_GUILD_ID",
-  "SCHEDULER_CONCURRENCY",
-  "TEST_GUILD_ID",
 ] as const;
 
-const originalEnv = { ...process.env };
-const tempRepoRoots: string[] = [];
+let environmentSnapshot: Record<string, string | undefined>;
+const temporaryRoots: string[] = [];
 
-function resetConfigEnv(): void {
-  for (const key of CONFIG_ENV_KEYS) {
+beforeEach(() => {
+  environmentSnapshot = Object.fromEntries(
+    ENV_KEYS.map((key) => [key, process.env[key]]),
+  );
+  for (const key of ENV_KEYS) {
     delete process.env[key];
   }
-  delete process.env.npm_package_version;
-}
-
-function writeEnvFile(repoRoot: string, lines: string[]): void {
-  fs.writeFileSync(path.join(repoRoot, ".env"), `${lines.join("\n")}\n`);
-}
-
-function makeRepoRoot(): string {
-  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "imperial-config-"));
-  tempRepoRoots.push(repoRoot);
-  return repoRoot;
-}
-
-beforeEach(resetConfigEnv);
+});
 
 afterEach(() => {
-  process.env = { ...originalEnv };
-  for (const repoRoot of tempRepoRoots.splice(0)) {
-    fs.rmSync(repoRoot, { recursive: true, force: true });
+  for (const key of ENV_KEYS) {
+    const value = environmentSnapshot[key];
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+  for (const root of temporaryRoots.splice(0)) {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-describe("process config", () => {
-  it("requires only the token and defaults command registration to global", () => {
-    const repoRoot = makeRepoRoot();
-    writeEnvFile(repoRoot, [
-      "DISCORD_TOKEN=test-token",
-      "DB_FILE=data/court.db",
-    ]);
-
-    const config = loadProcessConfig(repoRoot);
-
-    expect(config.discordToken).toBe("test-token");
-    expect(config.commandRegistrationMode).toBe("global");
-    expect(config.devGuildIds).toEqual([]);
-    expect(config.dbFile).toBe(path.join(repoRoot, "data/court.db"));
-    expect(config.schedulerConcurrency).toBe(4);
-    expect("testGuildId" in config).toBe(false);
-    expect("courtChannelId" in config).toBe(false);
+describe("configuration", () => {
+  it("defaults fresh installs to superior.db", () => {
+    const root = makeRoot();
+    expect(resolveDatabaseFile(root)).toBe(path.join(root, "superior.db"));
   });
 
-  it("validates every development guild and operator snowflake", () => {
-    const repoRoot = makeRepoRoot();
-    writeEnvFile(repoRoot, [
-      "DISCORD_TOKEN=test-token",
-      "COMMAND_REGISTRATION_MODE=guild",
-      "DEV_GUILD_IDS=111111111111111111,222222222222222222,111111111111111111",
-      "BOT_OPERATOR_USER_IDS=333333333333333333",
-      "SCHEDULER_CONCURRENCY=8",
-    ]);
+  it("fails closed when an implicit new default could strand a v4 database", () => {
+    const root = makeRoot();
+    fs.writeFileSync(path.join(root, "court.db"), "synthetic sentinel");
+    expect(() => resolveDatabaseFile(root)).toThrow(/DB_FILE must be set/);
 
-    const config = loadProcessConfig(repoRoot);
-
-    expect(config.devGuildIds).toEqual([
-      "111111111111111111",
-      "222222222222222222",
-    ]);
-    expect(config.botOperatorUserIds).toEqual(["333333333333333333"]);
-    expect(config.schedulerConcurrency).toBe(8);
+    process.env.DB_FILE = "explicit.db";
+    expect(resolveDatabaseFile(root)).toBe(path.join(root, "explicit.db"));
   });
 
-  it("rejects guild registration without development guilds", () => {
-    const repoRoot = makeRepoRoot();
-    writeEnvFile(repoRoot, [
-      "DISCORD_TOKEN=test-token",
-      "COMMAND_REGISTRATION_MODE=guild",
-    ]);
-    expect(() => loadProcessConfig(repoRoot)).toThrow("DEV_GUILD_IDS");
-  });
-
-  it("rejects malformed snowflakes and integer values", () => {
-    const repoRoot = makeRepoRoot();
-    writeEnvFile(repoRoot, [
-      "DISCORD_TOKEN=test-token",
-      "DEV_GUILD_IDS=not-a-snowflake",
-    ]);
-    expect(() => loadProcessConfig(repoRoot)).toThrow("DEV_GUILD_IDS");
-
-    delete process.env.DEV_GUILD_IDS;
-    writeEnvFile(repoRoot, [
-      "DISCORD_TOKEN=test-token",
-      "SCHEDULER_CONCURRENCY=4workers",
-    ]);
-    expect(() => loadProcessConfig(repoRoot)).toThrow(
-      "SCHEDULER_CONCURRENCY must be an integer",
+  it("resolves explicit database and environment paths", () => {
+    const root = makeRoot();
+    process.env.DB_FILE = path.join(root, "data", "bot.db");
+    process.env.ENV_FILE = "config/operator.env";
+    expect(resolveDatabaseFile(root)).toBe(path.join(root, "data", "bot.db"));
+    expect(resolveEnvironmentFile(root)).toBe(
+      path.join(root, "config", "operator.env"),
     );
   });
 
-  it("loads database-only configuration without a Discord token", () => {
-    const repoRoot = makeRepoRoot();
-    writeEnvFile(repoRoot, ["DB_FILE=temporary.sqlite"]);
-    expect(loadDatabaseConfig(repoRoot).dbFile).toBe(
-      path.join(repoRoot, "temporary.sqlite"),
-    );
-  });
-
-  it("loads a custom ENV_FILE relative to the repository root", () => {
-    const repoRoot = makeRepoRoot();
-    const configDirectory = path.join(repoRoot, "config");
-    fs.mkdirSync(configDirectory);
+  it("loads only active process configuration", () => {
+    const root = makeRoot();
     fs.writeFileSync(
-      path.join(configDirectory, "production.env"),
+      path.join(root, ".env"),
       [
-        "DISCORD_TOKEN=custom-file-token",
-        "DB_FILE=data/custom.sqlite",
-        "LEGACY_GUILD_ID=222222222222222222",
-        "COURT_CHANNEL_ID=333333333333333333",
+        "DISCORD_TOKEN=synthetic-token",
+        "COMMAND_REGISTRATION_MODE=guild",
+        "DEV_GUILD_IDS=111111111111111111,222222222222222222",
+        "DB_FILE=synthetic.db",
       ].join("\n"),
     );
-    process.env.ENV_FILE = "config/production.env";
-
-    expect(loadProcessConfig(repoRoot)).toMatchObject({
-      discordToken: "custom-file-token",
-      dbFile: path.join(repoRoot, "data/custom.sqlite"),
+    const config = loadProcessConfig(root);
+    expect(config).toMatchObject({
+      discordToken: "synthetic-token",
+      commandRegistrationMode: "guild",
+      devGuildIds: ["111111111111111111", "222222222222222222"],
+      dbFile: path.join(root, "synthetic.db"),
     });
-    expect(loadLegacyMigrationConfig(repoRoot)).toMatchObject({
-      legacyGuildId: "222222222222222222",
-      environment: expect.objectContaining({
-        COURT_CHANNEL_ID: "333333333333333333",
-      }),
-    });
-  });
-
-  it("does not allow ENV_FILE inside dotenv to redirect later loads", () => {
-    const repoRoot = makeRepoRoot();
-    writeEnvFile(repoRoot, [
-      "DISCORD_TOKEN=selected-token",
-      "ENV_FILE=redirected.env",
-    ]);
-    fs.writeFileSync(
-      path.join(repoRoot, "redirected.env"),
-      "DISCORD_TOKEN=redirected-token\n",
-    );
-
-    expect(loadProcessConfig(repoRoot).discordToken).toBe("selected-token");
-    expect(process.env.ENV_FILE).toBeUndefined();
-    expect(loadProcessConfig(repoRoot).discordToken).toBe("selected-token");
-  });
-
-  it("uses TEST_GUILD_ID only as a deprecated migration fallback", () => {
-    const fallbackRoot = makeRepoRoot();
-    writeEnvFile(fallbackRoot, ["TEST_GUILD_ID=111111111111111111"]);
-    expect(loadLegacyMigrationConfig(fallbackRoot)).toMatchObject({
-      legacyGuildId: "111111111111111111",
-      legacyGuildIdSource: "TEST_GUILD_ID",
-    });
-
-    delete process.env.TEST_GUILD_ID;
-    const explicitRoot = makeRepoRoot();
-    writeEnvFile(explicitRoot, [
-      "TEST_GUILD_ID=111111111111111111",
-      "LEGACY_GUILD_ID=222222222222222222",
-    ]);
-    expect(loadLegacyMigrationConfig(explicitRoot)).toMatchObject({
-      legacyGuildId: "222222222222222222",
-      legacyGuildIdSource: "LEGACY_GUILD_ID",
-    });
+    expect(config).not.toHaveProperty("schedulerConcurrency");
+    expect(config).not.toHaveProperty("botOperatorUserIds");
   });
 });
+
+function makeRoot(): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "superior-config-"));
+  temporaryRoots.push(root);
+  return root;
+}
