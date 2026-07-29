@@ -45,7 +45,7 @@ Then configure and enable each guild with `/setup`.
 
 ## Upgrade from schema v2
 
-Build version 5.0.1 first, but do not start it against v2. A dry run performs classification and conversion checks without committing:
+Build version 5.1.0 first, but do not start it against v2. A dry run performs classification and conversion checks without committing:
 
 ```bash
 cd tsbot

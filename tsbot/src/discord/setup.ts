@@ -68,6 +68,11 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName("enable-all")
+        .setDescription("Enable every feature and approve this server"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName("disable")
         .setDescription("Disable bot behavior safely"),
     )
@@ -257,6 +262,9 @@ export async function handleSetupCommand(
       case "enable":
         await enableGuild(interaction, guildRuntime);
         return;
+      case "enable-all":
+        await enableAllFeatures(interaction, guildRuntime);
+        return;
       case "disable":
         await guildRuntime.setEnabled(false);
         await replyPrivate(
@@ -379,6 +387,31 @@ async function enableGuild(
   await replyPrivate(
     interaction,
     "Configuration approved and Superior enabled for this server.",
+  );
+}
+
+async function enableAllFeatures(
+  interaction: ChatInputCommandInteraction,
+  runtime: GuildRuntime,
+): Promise<void> {
+  await deferPrivate(interaction);
+  const next = cloneSettings(runtime.settings);
+  for (const { value } of FEATURE_CHOICES) {
+    next.features[value] = true;
+  }
+  const result = await validateGuildSetup(interaction, next);
+  if (!result.valid) {
+    await replyPrivate(
+      interaction,
+      `Nothing changed because enabling every feature requires:\n${result.errors.map((error) => `- ${error}`).join("\n")}`,
+    );
+    return;
+  }
+  await runtime.saveSettings(next);
+  await runtime.setEnabled(true);
+  await replyPrivate(
+    interaction,
+    "All features and commands are enabled for this server.",
   );
 }
 

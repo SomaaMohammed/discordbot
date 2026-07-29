@@ -40,6 +40,7 @@ describe("setup command definition", () => {
     expect(json.options?.map(({ name }) => name)).toEqual([
       "status",
       "enable",
+      "enable-all",
       "disable",
       "channel",
       "feature",
@@ -115,6 +116,83 @@ describe("setup authorization", () => {
 });
 
 describe("active-only setup behavior", () => {
+  it("enables every feature and the server in one command", async () => {
+    const settings = createDefaultGuildSettings();
+    settings.greetings.push({ name: "Welcome", message: "Hello {user}!" });
+    const saveSettings = vi.fn(async (next: GuildSettings) => next);
+    const setEnabled = vi.fn(async () => settings);
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+      saveSettings,
+      setEnabled,
+    } as unknown as GuildRuntime;
+    const interaction = {
+      guild: { id: GUILD_ID },
+      guildId: GUILD_ID,
+      options: { getSubcommand: vi.fn(() => "enable-all") },
+      deferred: true,
+      replied: false,
+      editReply: vi.fn(async () => undefined),
+    } as never;
+
+    await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        features: {
+          chat: true,
+          replyModeration: true,
+          greetings: true,
+          activityMetrics: true,
+        },
+      }),
+    );
+    expect(setEnabled).toHaveBeenCalledWith(true);
+    expect(saveSettings.mock.invocationCallOrder[0]).toBeLessThan(
+      setEnabled.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it("leaves settings unchanged when enable-all validation fails", async () => {
+    const settings = createDefaultGuildSettings();
+    const saveSettings = vi.fn();
+    const setEnabled = vi.fn();
+    const editReply = vi.fn(async () => undefined);
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+      saveSettings,
+      setEnabled,
+    } as unknown as GuildRuntime;
+    const interaction = {
+      guild: { id: GUILD_ID },
+      guildId: GUILD_ID,
+      options: { getSubcommand: vi.fn(() => "enable-all") },
+      deferred: true,
+      replied: false,
+      editReply,
+    } as never;
+
+    await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(saveSettings).not.toHaveBeenCalled();
+    expect(setEnabled).not.toHaveBeenCalled();
+    expect(editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining(
+          "Greetings are enabled but no greeting profile exists.",
+        ),
+      }),
+    );
+  });
+
   it("stores greeting profiles without a fixed user and explains dynamic {user}", async () => {
     const settings = createDefaultGuildSettings();
     const reply = vi.fn(async () => undefined);
