@@ -35,26 +35,30 @@ By default these writable files sit beside the launcher:
 - `superior.db`: active SQLite database created on first real startup.
 - SQLite sidecars such as `superior.db-wal` and `superior.db-shm` while running.
 
+A missing or empty database is initialized as schema v4 on the first real startup. Normal startup never upgrades an older database.
+
 Back up the database and any sidecars only through a SQLite-aware backup while the bot is running, or after fully stopping the bot. Do not synchronize a live database through a consumer cloud-drive folder.
 
 The bot runs only while the process and laptop are awake. Disable sleep or use a dedicated always-on host for continuous service. Keep Windows and the executable patched, and keep Discord credentials access-controlled.
 
-## Portable ZIP and schema-v2 upgrades
+## Portable ZIP and schema upgrades
 
 The versioned portable ZIP remains available from CI for offline database maintenance. It exposes the bundled `runtime`, `app`, and `tools` directories plus their manifest and checksums; the single-file launcher intentionally exposes only start, version, and configuration-check operations.
 
-Version 5 refuses schema v2 during normal startup. Close every process that can write the source database, extract the current portable ZIP, copy the database into that folder as `superior.db`, and keep the original untouched. Then run the bundled offline tools from PowerShell:
+Version 5.2.0 refuses schema v3 and v2 during normal startup. Close every process that can write the source database, extract the current portable ZIP, copy the database into that folder as `superior.db`, and keep the original untouched. For the normal schema-v3 upgrade, run the bundled offline tools from PowerShell:
 
 ```powershell
 New-Item -ItemType Directory -Path .\backups -Force
-.\runtime\node.exe .\app\dist\src\storage\backup-cli.js --db .\superior.db --out .\backups\pre-v5-schema2.db --expect 2
+.\runtime\node.exe .\app\dist\src\storage\backup-cli.js --db .\superior.db --out .\backups\pre-v5.2-schema3.db --expect 3
 .\runtime\node.exe .\app\dist\src\storage\migrate-cli.js --db .\superior.db --dry-run
 .\runtime\node.exe .\app\dist\src\storage\migrate-cli.js --db .\superior.db
-.\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 3
+.\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 4
 .\SuperiorBot.exe --check
 ```
 
-Do not continue if backup, dry-run, migration, or validation fails. A transaction failure leaves the copied database at v2. Keep the validated v2 backup until the new bot and every guild configuration have been reviewed.
+Do not continue if backup, dry-run, migration, or validation fails. A transaction failure leaves the copied database at v3. Keep the validated v3 backup until the new bot and every guild configuration, panel, and ticket resource has been reviewed.
+
+The exact supported schema-v2 layout can migrate directly to v4 with the same commands: change the backup name to `pre-v5.2-schema2.db` and its expectation to `--expect 2`; keep the final checker at `--expect 4`. A failed transaction leaves that copy at v2. Schema-v2 conversion can mark unsafe settings for review and discard legacy rows with no active 5.2.0 consumer.
 
 A schema-v1 database must first be upgraded to v2 with the final 4.0.0 source release. Renaming a database file never upgrades its contents.
 
@@ -67,7 +71,7 @@ A schema-v1 database must first be upgraded to v2 with the final 4.0.0 source re
 5. Run `--version` and `--check`, then start it.
 6. Keep the previous executable and backup until verification succeeds. Old private runtime caches can be removed after the new version is verified and stopped.
 
-For a v5 rollback, stop the process and return to a known-good v5 folder with a compatible schema-v3 backup. Returning to v4 also requires restoring the matching pre-migration schema-v2 backup; never mix application and schema generations.
+For a 5.2.0 rollback, stop the process and return to a known-good 5.2.0 folder with a compatible schema-v4 backup. Returning to 5.1.0 requires restoring the matching pre-migration schema-v3 backup. Returning to a schema-v2 application after a direct legacy migration requires its matching v2 backup. Never mix application and schema generations.
 
 ## Troubleshooting
 

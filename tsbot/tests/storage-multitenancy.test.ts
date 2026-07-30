@@ -133,10 +133,28 @@ describe("active guild storage", () => {
     storage
       .forGuild(GUILD_A)
       .incrementUserMetric(USER_A, "reactions_received", 5);
+    const guild = storage.forGuild(GUILD_A);
+    guild.upsertTicketConfiguration({
+      categoryId: "555555555555555555",
+      logChannelId: "666666666666666666",
+      supportRoleId: "777777777777777777",
+    });
+    guild.createPostedPanel({
+      panelId: "panel_A1",
+      preset: "resources",
+      channelId: "888888888888888888",
+      messageId: "999999999999999999",
+      configuration: { title: "Rules" },
+    });
+    const reservation = guild.reserveTicketCreation({
+      openerId: USER_B,
+      subject: "Portable ticket",
+      description: "Include operational rows in the tenant export.",
+    });
     const payload = storage.exportGuildData(GUILD_A);
 
     expect(payload).toMatchObject({
-      formatVersion: 2,
+      formatVersion: 3,
       guildId: GUILD_A,
       metrics: [
         {
@@ -144,6 +162,19 @@ describe("active guild storage", () => {
           value: 5,
         },
       ],
+      ticketConfiguration: {
+        guildId: GUILD_A,
+        enabled: true,
+      },
+      postedPanels: [
+        {
+          guildId: GUILD_A,
+          panelId: "panel_A1",
+          configuration: { title: "Rules" },
+        },
+      ],
+      tickets: [{ ticketId: reservation.ticket.ticketId, state: "creating" }],
+      ticketEvents: [{ type: "creation_reserved" }],
     });
     expect(JSON.stringify(payload)).not.toContain('userId":null');
     const invalidGreetingPayload = structuredClone(payload);
@@ -161,6 +192,28 @@ describe("active guild storage", () => {
     expect(storage.getGuildSettings(GUILD_A)).toEqual(
       settingsBeforeInvalidImport,
     );
+    const controlCharacterPayload = structuredClone(payload);
+    controlCharacterPayload.tickets[0]!.subject = "Unsafe\u0007 subject";
+    expect(() =>
+      storage.importGuildData(
+        GUILD_A,
+        controlCharacterPayload,
+        storage.getGuildSettings(GUILD_A)!,
+      ),
+    ).toThrow(/ticket subject cannot contain control characters/);
+    expect(guild.getTicketById(reservation.ticket.ticketId)).toMatchObject({
+      subject: "Portable ticket",
+    });
+    const missingTicketConfiguration = structuredClone(payload);
+    missingTicketConfiguration.ticketConfiguration = null;
+    expect(() =>
+      storage.importGuildData(
+        GUILD_A,
+        missingTicketConfiguration,
+        storage.getGuildSettings(GUILD_A)!,
+      ),
+    ).toThrow(/active tickets requires ticket configuration/);
+    expect(guild.getTicketConfiguration()).toMatchObject({ enabled: true });
     expect(() =>
       storage.importGuildData(
         GUILD_B,
@@ -169,17 +222,64 @@ describe("active guild storage", () => {
       ),
     ).toThrow(/current guild/);
 
+    guild.disableTicketConfiguration();
+    guild.deletePostedPanel("panel_A1");
+    guild.failTicketCreation(reservation.ticket.ticketId, "temporary mutation");
+    storage.importGuildData(
+      GUILD_A,
+      payload,
+      storage.getGuildSettings(GUILD_A)!,
+    );
+    expect(guild.getTicketConfiguration()).toMatchObject({ enabled: false });
+    expect(guild.findPostedPanelByToken("panel_A1")).toMatchObject({
+      configuration: { title: "Rules" },
+    });
+    expect(guild.getTicketById(reservation.ticket.ticketId)).toMatchObject({
+      state: "creating",
+      failureReason: null,
+    });
+    expect(guild.listTicketEvents(reservation.ticket.ticketId)).toHaveLength(1);
+
+    const legacyV2Payload = {
+      formatVersion: 2,
+      guildId: payload.guildId,
+      exportedAt: payload.exportedAt,
+      metadata: payload.metadata,
+      settings: payload.settings,
+      metrics: payload.metrics,
+    };
+    storage.importGuildData(
+      GUILD_A,
+      legacyV2Payload,
+      storage.getGuildSettings(GUILD_A)!,
+    );
+    expect(guild.getTicketConfiguration()).toMatchObject({ enabled: false });
+    expect(guild.findPostedPanelByToken("panel_A1")).not.toBeNull();
+    expect(guild.getTicketById(reservation.ticket.ticketId)).toMatchObject({
+      state: "creating",
+      failureReason: null,
+    });
+    expect(guild.listTicketEvents(reservation.ticket.ticketId)).toHaveLength(1);
+
     expect(storage.previewGuildPurge(GUILD_A)).toEqual({
       guildId: GUILD_A,
       guilds: 1,
       settings: 1,
       metrics: 1,
+      ticketConfigurations: 1,
+      postedPanels: 1,
+      tickets: 1,
+      ticketEvents: 1,
     });
     expect(storage.purgeGuildData(GUILD_A)).toEqual({
       guildId: GUILD_A,
       guilds: 1,
       settings: 1,
       metrics: 1,
+      ticketConfigurations: 1,
+      postedPanels: 1,
+      tickets: 1,
+      ticketEvents: 1,
     });
     expect(storage.getGuild(GUILD_A)).toBeNull();
     expect(storage.getGuild(GUILD_B)).not.toBeNull();

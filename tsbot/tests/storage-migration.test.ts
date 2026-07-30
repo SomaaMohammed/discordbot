@@ -3,6 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  createDefaultGuildSettings,
+  serializeGuildSettings,
+} from "../src/guild-settings.js";
 import { BotStorage } from "../src/storage/db.js";
 import {
   migrateDatabase,
@@ -11,8 +15,9 @@ import {
 } from "../src/storage/migration.js";
 import {
   detectDatabaseSchema,
-  V3_EXPLICIT_INDEX_NAMES,
-  V3_TABLE_NAMES,
+  initializeV3Schema,
+  V4_EXPLICIT_INDEX_NAMES,
+  V4_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import {
   createV2FixtureDatabase,
@@ -31,7 +36,7 @@ afterEach(() => {
   }
 });
 
-describe("explicit schema v2 to v3 migration", () => {
+describe("explicit schema migration to v4", () => {
   it("preserves active tenant data and discards retired state", () => {
     const dbFile = fixturePath("active.db");
     const db = createV2FixtureDatabase(dbFile);
@@ -109,15 +114,15 @@ describe("explicit schema v2 to v3 migration", () => {
     expect(result).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v2",
-      toSchema: "current-v3",
+      toSchema: "current-v4",
       guilds: 2,
       settingsRequiringReview: 1,
       metricsPreserved: 3,
       metricsDropped: 3,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 3 })).toMatchObject({
-      schema: "current-v3",
-      schemaVersion: 3,
+    expect(validateDatabaseFile(dbFile, { expect: 4 })).toMatchObject({
+      schema: "current-v4",
+      schemaVersion: 4,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -125,10 +130,10 @@ describe("explicit schema v2 to v3 migration", () => {
     const migrated = new Database(dbFile, { readonly: true });
     try {
       expect(schemaObjects(migrated, "table")).toEqual(
-        [...V3_TABLE_NAMES].sort(),
+        [...V4_TABLE_NAMES].sort(),
       );
       expect(schemaObjects(migrated, "index")).toEqual(
-        [...V3_EXPLICIT_INDEX_NAMES].sort(),
+        [...V4_EXPLICIT_INDEX_NAMES].sort(),
       );
       expect(
         migrated
@@ -326,6 +331,98 @@ describe("explicit schema v2 to v3 migration", () => {
     );
   });
 
+  it("transactionally upgrades current v3 while preserving every active row", () => {
+    const dbFile = fixturePath("v3.db");
+    createV3Fixture(dbFile);
+
+    expect(
+      migrateDatabase({
+        dbFile,
+        now: () => "2026-02-01T00:00:00.000Z",
+      }),
+    ).toMatchObject({
+      status: "migrated",
+      fromSchema: "legacy-v3",
+      toSchema: "current-v4",
+      guilds: 1,
+      metricsPreserved: 1,
+      metricsDropped: 0,
+    });
+    expect(validateDatabaseFile(dbFile, { expect: 4 })).toMatchObject({
+      schema: "current-v4",
+      schemaVersion: 4,
+    });
+
+    const db = new Database(dbFile, { readonly: true });
+    try {
+      expect(db.prepare("SELECT * FROM guilds").all()).toEqual([
+        {
+          guild_id: GUILD_A,
+          enabled: 0,
+          name: "Preserved v3",
+          joined_at: "2026-01-01T00:00:00.000Z",
+          left_at: null,
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-01-01T00:00:00.000Z",
+        },
+      ]);
+      expect(
+        db
+          .prepare("SELECT metric_key, metric_value, updated_at FROM metrics")
+          .all(),
+      ).toEqual([
+        {
+          metric_key: "command_usage.utility.ping",
+          metric_value: 7,
+          updated_at: "2026-01-01T00:00:00.000Z",
+        },
+      ]);
+      expect(
+        db
+          .prepare("SELECT version FROM schema_migrations ORDER BY version")
+          .all(),
+      ).toEqual([{ version: 3 }, { version: 4 }]);
+      for (const table of [
+        "ticket_configurations",
+        "posted_panels",
+        "tickets",
+        "ticket_events",
+      ]) {
+        expect(
+          db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get(),
+        ).toEqual({ count: 0 });
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each<MigrationFailurePoint>([
+    "after-source-read",
+    "after-rename",
+    "after-create",
+    "after-copy",
+    "after-verify",
+    "after-drop",
+    "after-version",
+    "before-commit",
+  ])(
+    "rolls v3 back completely after an injected %s failure",
+    (failurePoint) => {
+      const dbFile = fixturePath(`v3-${failurePoint}.db`);
+      createV3Fixture(dbFile);
+      const before = fs.readFileSync(dbFile);
+
+      expect(() => migrateDatabase({ dbFile, failurePoint })).toThrow(
+        `Injected migration failure at ${failurePoint}`,
+      );
+      expect(fs.readFileSync(dbFile)).toEqual(before);
+      expect(validateDatabaseFile(dbFile, { expect: 3 }).schema).toBe(
+        "legacy-v3",
+      );
+    },
+  );
+
   it("is idempotent for an already-current database", () => {
     const dbFile = fixturePath("current.db");
     const storage = new BotStorage({ dbFile });
@@ -334,12 +431,12 @@ describe("explicit schema v2 to v3 migration", () => {
     storage.close();
     expect(migrateDatabase({ dbFile })).toMatchObject({
       status: "already-current",
-      fromSchema: "current-v3",
-      toSchema: "current-v3",
+      fromSchema: "current-v4",
+      toSchema: "current-v4",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 3 }).schema).toBe(
-      "current-v3",
+    expect(validateDatabaseFile(dbFile, { expect: 4 }).schema).toBe(
+      "current-v4",
     );
   });
 
@@ -420,6 +517,35 @@ function createV1Fixture(dbFile: string): void {
       ON answers (question_message_id, created_at);
     CREATE INDEX idx_answers_message_id ON answers (answer_message_id);
   `);
+  db.close();
+}
+
+function createV3Fixture(dbFile: string): void {
+  const db = new Database(dbFile);
+  db.pragma("foreign_keys = ON");
+  initializeV3Schema(db, "2026-01-01T00:00:00.000Z");
+  const settings = createDefaultGuildSettings();
+  db.prepare(
+    `INSERT INTO guilds (
+       guild_id, enabled, name, joined_at, left_at, created_at, updated_at
+     ) VALUES (?, 0, ?, ?, NULL, ?, ?)`,
+  ).run(
+    GUILD_A,
+    "Preserved v3",
+    "2026-01-01T00:00:00.000Z",
+    "2026-01-01T00:00:00.000Z",
+    "2026-01-01T00:00:00.000Z",
+  );
+  db.prepare(
+    `INSERT INTO guild_settings (
+       guild_id, settings_version, settings_json, updated_at
+     ) VALUES (?, 2, ?, ?)`,
+  ).run(GUILD_A, serializeGuildSettings(settings), "2026-01-01T00:00:00.000Z");
+  db.prepare(
+    `INSERT INTO metrics (
+       guild_id, metric_key, metric_value, updated_at
+     ) VALUES (?, ?, ?, ?)`,
+  ).run(GUILD_A, "command_usage.utility.ping", 7, "2026-01-01T00:00:00.000Z");
   db.close();
 }
 

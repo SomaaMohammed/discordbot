@@ -1,5 +1,4 @@
 import {
-  PermissionFlagsBits,
   SlashCommandBuilder,
   type AutocompleteInteraction,
   type ButtonInteraction,
@@ -30,6 +29,8 @@ import {
   handlePanelCommand,
   handlePanelModal,
 } from "./panels.js";
+import { buildPanelCommandDefinition } from "./panel-command.js";
+import { handlePresetPanelCommand } from "./preset-panels.js";
 import {
   buildSetupCommandDefinition,
   handleSetupCommand,
@@ -39,6 +40,13 @@ import {
   buildUtilityCommandDefinition,
   handleUtilityCommand,
 } from "./utilities.js";
+import { evaluateGuildManagement } from "./ticket-authorization.js";
+import { buildTicketCommandDefinition } from "./ticket-command.js";
+import { handleTicketCommand } from "./ticket-commands-handler.js";
+import {
+  handleTicketButton,
+  handleTicketModal,
+} from "./ticket-interactions.js";
 
 const SUPERIOR_SUBCOMMANDS = [
   "say",
@@ -175,6 +183,8 @@ export function buildCommandDefinitions(): Array<
   return [
     buildSetupCommandDefinition(),
     superior,
+    buildPanelCommandDefinition(),
+    buildTicketCommandDefinition(),
     buildUtilityCommandDefinition(),
     fun,
     greetings,
@@ -543,6 +553,17 @@ export async function handleChatInputCommand(
     await handleFunCommand(interaction, guildRuntime);
     return;
   }
+  if (command === "panel" || command === "ticket") {
+    await deferPrivate(interaction);
+    const actor = await requireAdministrator(interaction, guildRuntime);
+    if (!actor) return;
+    if (command === "panel") {
+      await handlePresetPanelCommand(interaction, guildRuntime, actor);
+    } else {
+      await handleTicketCommand(interaction, guildRuntime, actor);
+    }
+    return;
+  }
   if (command !== "superior") {
     await replyPrivate(interaction, "Unknown command family.");
     return;
@@ -590,6 +611,7 @@ export async function handleButtonInteraction(
 ): Promise<void> {
   const guildRuntime = await getCurrentComponentRuntime(interaction, runtime);
   if (!guildRuntime) return;
+  if (await handleTicketButton(interaction, guildRuntime)) return;
   if (await handlePanelButton(interaction, guildRuntime)) return;
   await replyPrivate(
     interaction,
@@ -603,6 +625,7 @@ export async function handleModalSubmitInteraction(
 ): Promise<void> {
   const guildRuntime = await getCurrentComponentRuntime(interaction, runtime);
   if (!guildRuntime) return;
+  if (await handleTicketModal(interaction, guildRuntime)) return;
   if (await handlePanelModal(interaction, guildRuntime)) return;
   await replyPrivate(
     interaction,
@@ -654,8 +677,11 @@ async function requireAdministrator(
     return null;
   }
   if (
-    actor.id !== guild.ownerId &&
-    !actor.permissions.has(PermissionFlagsBits.Administrator)
+    !evaluateGuildManagement({
+      guildId: runtime.guildId,
+      ownerId: guild.ownerId,
+      member: actor,
+    }).allowed
   ) {
     await replyPrivate(
       interaction,
@@ -674,7 +700,9 @@ async function handleHelp(
     [
       "**Superior command guide**",
       "`/setup` — administrator configuration, validation, export, import, and purge",
-      "`/superior` — announcements, safe panels, moderation, backfill, and this help",
+      "`/panel` — fixed Superior help, server, resource, and ticket panels",
+      "`/ticket` — administrator ticket setup, status, launcher, and recovery",
+      "`/superior` — announcements, legacy safe panels, moderation, backfill, and this help",
       "`/utility` — private member/server/role/channel/ID/time information",
       "`/fun` — battles and aggregate activity statistics",
       "`/greetings send` — greet the person invoking the command",

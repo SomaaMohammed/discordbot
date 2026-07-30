@@ -19,6 +19,7 @@ afterEach(() => {
 
 interface JsonOption {
   name: string;
+  description?: string;
   type?: number;
   options?: JsonOption[];
   min_value?: number;
@@ -53,6 +54,9 @@ describe("setup command definition", () => {
       "import",
       "purge",
     ]);
+    expect(findSubcommand("import")).toMatchObject({
+      description: expect.stringContaining("Owner-only replacement"),
+    });
   });
 
   it("makes greetings universal by exposing no target-user option", () => {
@@ -90,8 +94,9 @@ describe("setup authorization", () => {
     const reply = vi.fn(async () => undefined);
     const member = {
       id: USER_ID,
-      guild: { id: GUILD_ID },
+      guild: { id: GUILD_ID, ownerId: "999999999999999999" },
       permissions: { has: vi.fn(() => false) },
+      roles: { cache: new Map() },
     };
     const guild = {
       id: GUILD_ID,
@@ -360,14 +365,19 @@ describe("active-only setup behavior", () => {
     const settings = createDefaultGuildSettings();
     const importGuildData = vi.fn();
     const invalidateGuild = vi.fn();
+    const ownerFetch = vi.fn(async () => ({
+      id: GUILD_ID,
+      ownerId: USER_ID,
+    }));
     const fetchMock = vi.fn(
       async () =>
         new Response(JSON.stringify({ formatVersion: 2, guildId: GUILD_ID })),
     );
     vi.stubGlobal("fetch", fetchMock);
     const interaction: Record<string, unknown> = {
-      guild: { id: GUILD_ID },
+      guild: { id: GUILD_ID, ownerId: USER_ID },
       guildId: GUILD_ID,
+      client: { guilds: { fetch: ownerFetch } },
       options: {
         getSubcommand: vi.fn(() => "import"),
         getString: vi.fn((name: string) =>
@@ -410,5 +420,395 @@ describe("active-only setup behavior", () => {
     );
     expect(importGuildData).toHaveBeenCalledTimes(1);
     expect(invalidateGuild).toHaveBeenCalledWith(GUILD_ID);
+    expect(invalidateGuild.mock.invocationCallOrder[0]).toBeLessThan(
+      importGuildData.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(ownerFetch).toHaveBeenCalledWith({
+      guild: GUILD_ID,
+      cache: false,
+      force: true,
+    });
+    expect(fetchMock.mock.invocationCallOrder[0]).toBeLessThan(
+      ownerFetch.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it("refuses an import if ownership changes during the download", async () => {
+    const settings = createDefaultGuildSettings();
+    const importGuildData = vi.fn();
+    const invalidateGuild = vi.fn();
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ formatVersion: 2, guildId: GUILD_ID })),
+    );
+    const ownerFetch = vi.fn(async () => ({
+      id: GUILD_ID,
+      ownerId: "999999999999999999",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const interaction: Record<string, any> = {
+      guild: { id: GUILD_ID, ownerId: USER_ID },
+      guildId: GUILD_ID,
+      client: { guilds: { fetch: ownerFetch } },
+      options: {
+        getSubcommand: vi.fn(() => "import"),
+        getString: vi.fn((name: string) =>
+          name === "confirmation" ? `IMPORT ${GUILD_ID}` : null,
+        ),
+        getAttachment: vi.fn(() => ({
+          size: 100,
+          url: "https://example.test/synthetic-export.json",
+        })),
+      },
+      deferred: false,
+      replied: false,
+      editReply: vi.fn(async () => undefined),
+      reply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+    interaction.deferReply = vi.fn(async () => {
+      interaction.deferred = true;
+    });
+    const runtime = {
+      storage: { importGuildData },
+      invalidateGuild,
+    } as unknown as BotRuntime;
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+    } as GuildRuntime;
+
+    await handleSetupCommand(interaction as never, runtime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ownerFetch).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.invocationCallOrder[0]).toBeLessThan(
+      ownerFetch.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(invalidateGuild).not.toHaveBeenCalled();
+    expect(importGuildData).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("owner") }),
+    );
+  });
+
+  it("bounds the downloaded import body even when attachment metadata is false", async () => {
+    const settings = createDefaultGuildSettings();
+    const importGuildData = vi.fn();
+    const invalidateGuild = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new Uint8Array(2 * 1024 * 1024 + 1))),
+    );
+    const interaction: Record<string, any> = {
+      guild: { id: GUILD_ID, ownerId: USER_ID },
+      guildId: GUILD_ID,
+      options: {
+        getSubcommand: vi.fn(() => "import"),
+        getString: vi.fn((name: string) =>
+          name === "confirmation" ? `IMPORT ${GUILD_ID}` : null,
+        ),
+        getAttachment: vi.fn(() => ({
+          size: 100,
+          url: "https://example.test/oversized-export.json",
+        })),
+      },
+      deferred: false,
+      replied: false,
+      editReply: vi.fn(async () => undefined),
+      reply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+    interaction.deferReply = vi.fn(async () => {
+      interaction.deferred = true;
+    });
+    const runtime = {
+      storage: { importGuildData },
+      invalidateGuild,
+    } as unknown as BotRuntime;
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+    } as GuildRuntime;
+
+    await handleSetupCommand(interaction as never, runtime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(importGuildData).not.toHaveBeenCalled();
+    expect(invalidateGuild).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("2 MiB") }),
+    );
+  });
+
+  it("refuses a non-owner import before downloading or mutating", async () => {
+    const settings = createDefaultGuildSettings();
+    const importGuildData = vi.fn();
+    const invalidateGuild = vi.fn();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const interaction: Record<string, any> = {
+      guild: { id: GUILD_ID, ownerId: "999999999999999999" },
+      guildId: GUILD_ID,
+      options: {
+        getSubcommand: vi.fn(() => "import"),
+        getString: vi.fn(() => `IMPORT ${GUILD_ID}`),
+        getAttachment: vi.fn(() => ({
+          size: 100,
+          url: "https://example.test/export.json",
+        })),
+      },
+      deferred: false,
+      replied: false,
+      reply: vi.fn(async () => undefined),
+      editReply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+    const runtime = {
+      storage: { importGuildData },
+      invalidateGuild,
+    } as unknown as BotRuntime;
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+    } as GuildRuntime;
+
+    await handleSetupCommand(interaction as never, runtime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(importGuildData).not.toHaveBeenCalled();
+    expect(invalidateGuild).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("owner") }),
+    );
+  });
+
+  it("refuses a non-owner purge before invalidating or deleting", async () => {
+    const settings = createDefaultGuildSettings();
+    const purgeGuildData = vi.fn();
+    const invalidateGuild = vi.fn();
+    const interaction: Record<string, any> = {
+      guild: { id: GUILD_ID, ownerId: "999999999999999999" },
+      guildId: GUILD_ID,
+      options: {
+        getSubcommand: vi.fn(() => "purge"),
+        getString: vi.fn(() => `PURGE ${GUILD_ID}`),
+      },
+      deferred: false,
+      replied: false,
+      reply: vi.fn(async () => undefined),
+      editReply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+    const runtime = {
+      storage: { purgeGuildData },
+      invalidateGuild,
+    } as unknown as BotRuntime;
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+    } as GuildRuntime;
+
+    await handleSetupCommand(interaction as never, runtime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(purgeGuildData).not.toHaveBeenCalled();
+    expect(invalidateGuild).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("owner") }),
+    );
+  });
+
+  it("allows the owner to purge after exact confirmation", async () => {
+    const settings = createDefaultGuildSettings();
+    const purgeGuildData = vi.fn(async () => ({ guildId: GUILD_ID }));
+    const invalidateGuild = vi.fn();
+    const ownerFetch = vi.fn(async () => ({
+      id: GUILD_ID,
+      ownerId: USER_ID,
+    }));
+    const interaction: Record<string, any> = {
+      guild: { id: GUILD_ID, ownerId: USER_ID },
+      guildId: GUILD_ID,
+      client: { guilds: { fetch: ownerFetch } },
+      options: {
+        getSubcommand: vi.fn(() => "purge"),
+        getString: vi.fn(() => `PURGE ${GUILD_ID}`),
+      },
+      deferred: false,
+      replied: false,
+      reply: vi.fn(async () => undefined),
+      editReply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+    interaction.deferReply = vi.fn(async () => {
+      interaction.deferred = true;
+    });
+    const runtime = {
+      storage: { purgeGuildData },
+      invalidateGuild,
+    } as unknown as BotRuntime;
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+    } as GuildRuntime;
+
+    await handleSetupCommand(interaction as never, runtime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(invalidateGuild).toHaveBeenCalledWith(GUILD_ID);
+    expect(purgeGuildData).toHaveBeenCalledWith(GUILD_ID);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("purged") }),
+    );
+    expect(ownerFetch).toHaveBeenCalledTimes(1);
+    expect(interaction.deferReply.mock.invocationCallOrder[0]).toBeLessThan(
+      ownerFetch.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it("refuses a purge if ownership changes after deferral", async () => {
+    const settings = createDefaultGuildSettings();
+    const purgeGuildData = vi.fn(async () => ({ guildId: GUILD_ID }));
+    const invalidateGuild = vi.fn();
+    const ownerFetch = vi.fn(async () => ({
+      id: GUILD_ID,
+      ownerId: "999999999999999999",
+    }));
+    const interaction: Record<string, any> = {
+      guild: { id: GUILD_ID, ownerId: USER_ID },
+      guildId: GUILD_ID,
+      client: { guilds: { fetch: ownerFetch } },
+      options: {
+        getSubcommand: vi.fn(() => "purge"),
+        getString: vi.fn(() => `PURGE ${GUILD_ID}`),
+      },
+      deferred: false,
+      replied: false,
+      reply: vi.fn(async () => undefined),
+      editReply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+    interaction.deferReply = vi.fn(async () => {
+      interaction.deferred = true;
+    });
+    const runtime = {
+      storage: { purgeGuildData },
+      invalidateGuild,
+    } as unknown as BotRuntime;
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+    } as GuildRuntime;
+
+    await handleSetupCommand(interaction as never, runtime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(interaction.deferReply).toHaveBeenCalledTimes(1);
+    expect(ownerFetch).toHaveBeenCalledTimes(1);
+    expect(interaction.deferReply.mock.invocationCallOrder[0]).toBeLessThan(
+      ownerFetch.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(invalidateGuild).not.toHaveBeenCalled();
+    expect(purgeGuildData).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("owner") }),
+    );
+  });
+
+  it("refuses an oversized complete export instead of sending partial data", async () => {
+    const settings = createDefaultGuildSettings();
+    const exportGuildData = vi.fn(() => ({
+      formatVersion: 3,
+      guildId: GUILD_ID,
+      oversized: "x".repeat(2 * 1024 * 1024),
+    }));
+    const interaction: Record<string, any> = {
+      guild: { id: GUILD_ID },
+      guildId: GUILD_ID,
+      options: { getSubcommand: vi.fn(() => "export") },
+      deferred: false,
+      replied: false,
+      editReply: vi.fn(async () => undefined),
+      reply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+    interaction.deferReply = vi.fn(async () => {
+      interaction.deferred = true;
+    });
+    const runtime = {
+      storage: { exportGuildData },
+    } as unknown as BotRuntime;
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+    } as GuildRuntime;
+
+    await handleSetupCommand(interaction as never, runtime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("No partial export"),
+      }),
+    );
+    expect(interaction.editReply.mock.calls[0]?.[0]).not.toHaveProperty(
+      "files",
+    );
+  });
+
+  it("responds privately when export preflight refuses materialization", async () => {
+    const settings = createDefaultGuildSettings();
+    const interaction: Record<string, any> = {
+      guild: { id: GUILD_ID },
+      guildId: GUILD_ID,
+      options: { getSubcommand: vi.fn(() => "export") },
+      deferred: false,
+      replied: false,
+      editReply: vi.fn(async () => undefined),
+      reply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+    interaction.deferReply = vi.fn(async () => {
+      interaction.deferred = true;
+    });
+    const runtime = {
+      storage: {
+        exportGuildData: vi.fn(() => {
+          throw new RangeError("synthetic materialization limit");
+        }),
+      },
+    } as unknown as BotRuntime;
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+    } as GuildRuntime;
+
+    await handleSetupCommand(interaction as never, runtime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("refused safely"),
+      }),
+    );
   });
 });

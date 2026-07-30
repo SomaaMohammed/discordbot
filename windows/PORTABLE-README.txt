@@ -23,6 +23,8 @@ LAUNCHER COMMANDS
 DATA AND BACKUPS
 - superior.db is created beside the launcher unless DB_FILE selects another
   path. SQLite sidecars can appear while the bot is running.
+- A missing or empty database is initialized as schema v4. Startup does not
+  upgrade an older schema automatically.
 - Never share .env, a database, a sidecar, or a backup.
 - Stop the bot before manually copying or restoring its database files.
 - MANIFEST.sha256 contains a SHA-256 for every shipped file other than the
@@ -30,22 +32,24 @@ DATA AND BACKUPS
 - BUILD-INFO.txt records the package, target, pinned Node archive hash, and
   package-lock hash used for this build.
 
-SCHEMA-V2 UPGRADE
-Version 5 will not start against schema v2. Close every old bot process, keep
-the original database untouched, and copy it into this folder as superior.db.
-Then run these commands from PowerShell:
+SCHEMA UPGRADE
+Version 5.2.0 will not start against schema v3 or v2. Close every old bot
+process, keep the original database untouched, and copy it into this folder as
+superior.db. For the normal schema-v3 upgrade, run these commands in PowerShell:
 
   New-Item -ItemType Directory -Path .\backups -Force
-  .\runtime\node.exe .\app\dist\src\storage\backup-cli.js --db .\superior.db --out .\backups\pre-v5-schema2.db --expect 2
+  .\runtime\node.exe .\app\dist\src\storage\backup-cli.js --db .\superior.db --out .\backups\pre-v5.2-schema3.db --expect 3
   .\runtime\node.exe .\app\dist\src\storage\migrate-cli.js --db .\superior.db --dry-run
   .\runtime\node.exe .\app\dist\src\storage\migrate-cli.js --db .\superior.db
-  .\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 3
+  .\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 4
   .\SuperiorBot.exe --check
 
-Stop if any command fails. Keep the validated v2 backup until the migrated
-copy and every server configuration have been reviewed. Schema v1 must first
-be upgraded to v2 with the final 4.0.0 source release; renaming a file does not
-change its schema.
+Stop if any command fails. Keep the validated v3 backup until the migrated copy
+and every server configuration, panel, and ticket resource has been reviewed.
+For the exact supported schema-v2 layout, use the same commands with a
+pre-v5.2-schema2.db backup and --expect 2 on that backup; keep --expect 4 on the
+final check. Schema v1 must first be upgraded to v2 with the final 4.0.0 source
+release; renaming a file does not change its schema.
 
 UPDATING
 1. Stop the bot and make a validated backup.

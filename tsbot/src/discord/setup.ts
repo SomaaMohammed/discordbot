@@ -19,10 +19,11 @@ import type { GuildDataExport, GuildSettings } from "../types.js";
 import { clearBackfillStatus } from "./activity.js";
 import { clearModerationProcessState } from "./moderation.js";
 import { clearPanelProcessState } from "./panels.js";
+import { evaluateGuildManagement } from "./ticket-authorization.js";
 
 const SETUP_ADMIN_ERROR =
   "Only the server owner or a member with Administrator permission can use setup.";
-const IMPORT_MAX_BYTES = 2 * 1024 * 1024;
+const GUILD_TRANSFER_MAX_BYTES = 2 * 1024 * 1024;
 const SETUP_SUMMARY_ITEM_LIMIT = 5;
 const SETUP_SUMMARY_ITEM_LENGTH = 80;
 const GREETING_LIST_ITEM_LIMIT = 6;
@@ -204,15 +205,13 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     .addSubcommand((subcommand) =>
       subcommand
         .setName("export")
-        .setDescription(
-          "Export only this server's active settings and metrics",
-        ),
+        .setDescription("Export this server's active data as bounded JSON"),
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("import")
         .setDescription(
-          "Import a same-server v2 export in disabled review mode",
+          "Owner-only replacement from a same-server v2 or v3 export",
         )
         .addAttachmentOption((option) =>
           option
@@ -297,7 +296,7 @@ export async function handleSetupCommand(
         await exportGuild(interaction, runtime, guildRuntime.guildId);
         return;
       case "import":
-        await importGuild(interaction, runtime, guildRuntime);
+        await importGuild(interaction, runtime, guildRuntime, actor);
         return;
       case "purge":
         await purgeGuild(interaction, runtime, guildRuntime, actor);
@@ -310,6 +309,15 @@ export async function handleSetupCommand(
       await replyPrivate(
         interaction,
         "This server's configuration changed during setup. Review the latest settings and try again.",
+      );
+      return;
+    }
+    if (error instanceof TypeError || error instanceof RangeError) {
+      await replyPrivate(
+        interaction,
+        truncateDiscordContent(
+          `Setup operation was refused safely: ${error.message}`,
+        ),
       );
       return;
     }
@@ -333,8 +341,11 @@ export async function requireSetupAdmin(
     return null;
   }
   if (
-    member.id !== guild.ownerId &&
-    !member.permissions.has(PermissionFlagsBits.Administrator)
+    !evaluateGuildManagement({
+      guildId: guild.id,
+      ownerId: guild.ownerId,
+      member,
+    }).allowed
   ) {
     await replyPrivate(interaction, SETUP_ADMIN_ERROR);
     return null;
@@ -662,15 +673,25 @@ async function exportGuild(
   guildId: string,
 ): Promise<void> {
   await deferPrivate(interaction);
-  const exported = runtime.storage.exportGuildData(guildId);
-  const attachment = new AttachmentBuilder(
-    Buffer.from(`${JSON.stringify(exported, null, 2)}\n`),
-    {
-      name: `superior-${guildId}-export.json`,
-    },
+  const exported = runtime.storage.exportGuildData(
+    guildId,
+    undefined,
+    GUILD_TRANSFER_MAX_BYTES,
   );
+  const serialized = Buffer.from(`${JSON.stringify(exported, null, 2)}\n`);
+  if (serialized.byteLength > GUILD_TRANSFER_MAX_BYTES) {
+    await replyPrivate(
+      interaction,
+      "This server's complete export exceeds the 2 MiB safe transfer limit. No partial export was created; use an operator-managed database backup and retention plan.",
+    );
+    return;
+  }
+  const attachment = new AttachmentBuilder(serialized, {
+    name: `superior-${guildId}-export.json`,
+  });
   await interaction.editReply({
-    content: "Active settings and aggregate metrics for this server only.",
+    content:
+      "Active settings, metrics, panel records, ticket configuration, tickets, and ticket audit events for this server only.",
     files: [attachment],
     allowedMentions: { parse: [] },
   });
@@ -680,7 +701,19 @@ async function importGuild(
   interaction: ChatInputCommandInteraction,
   runtime: BotRuntime,
   guildRuntime: GuildRuntime,
+  actor: GuildMember,
 ): Promise<void> {
+  if (
+    !interaction.guild ||
+    actor.guild.id !== guildRuntime.guildId ||
+    actor.id !== interaction.guild.ownerId
+  ) {
+    await replyPrivate(
+      interaction,
+      "Only the server owner can replace stored guild data from an import.",
+    );
+    return;
+  }
   const confirmation = interaction.options
     .getString("confirmation", true)
     .trim();
@@ -692,7 +725,7 @@ async function importGuild(
     return;
   }
   const attachment = interaction.options.getAttachment("file", true);
-  if (attachment.size > IMPORT_MAX_BYTES) {
+  if (attachment.size > GUILD_TRANSFER_MAX_BYTES) {
     await replyPrivate(interaction, "Import files are limited to 2 MiB.");
     return;
   }
@@ -710,24 +743,77 @@ async function importGuild(
     await replyPrivate(interaction, "Could not download that import file.");
     return;
   }
+  let responseText: string | null;
+  try {
+    responseText = await readBoundedResponseText(
+      response,
+      GUILD_TRANSFER_MAX_BYTES,
+    );
+  } catch {
+    await replyPrivate(interaction, "Could not read that import file safely.");
+    return;
+  }
+  if (responseText === null) {
+    await replyPrivate(interaction, "Import files are limited to 2 MiB.");
+    return;
+  }
   let payload: GuildDataExport;
   try {
-    payload = JSON.parse(await response.text()) as GuildDataExport;
+    payload = JSON.parse(responseText) as GuildDataExport;
   } catch {
     await replyPrivate(interaction, "The import file is not valid JSON.");
     return;
   }
+  if (!(await verifyCurrentGuildOwner(interaction, guildRuntime, actor))) {
+    await replyPrivate(
+      interaction,
+      "Superior could not confirm that you are still the server owner. No stored data was changed.",
+    );
+    return;
+  }
+  runtime.invalidateGuild(guildRuntime.guildId);
   runtime.storage.importGuildData(
     guildRuntime.guildId,
     payload,
     guildRuntime.settings,
   );
-  runtime.invalidateGuild(guildRuntime.guildId);
   await interaction.editReply({
     content:
-      "Import completed in disabled review mode. Run `/setup status`, `/setup validate`, then `/setup enable`.",
+      "Import replacement completed in disabled review mode. Imported ticket configuration remains disabled. Review `/setup status`, run `/setup validate` and `/setup enable`, then inspect `/panel status` and `/ticket status`; use `/ticket setup` to re-enable new tickets.",
     allowedMentions: { parse: [] },
   });
+}
+
+async function readBoundedResponseText(
+  response: Response,
+  maximumBytes: number,
+): Promise<string | null> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > maximumBytes) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(combined);
 }
 
 async function purgeGuild(
@@ -736,6 +822,17 @@ async function purgeGuild(
   guildRuntime: GuildRuntime,
   actor: GuildMember,
 ): Promise<void> {
+  if (
+    actor.guild.id !== guildRuntime.guildId ||
+    interaction.guild?.id !== guildRuntime.guildId ||
+    actor.id !== interaction.guild.ownerId
+  ) {
+    await replyPrivate(
+      interaction,
+      "Only the server owner can permanently purge this server's stored data.",
+    );
+    return;
+  }
   const confirmation = interaction.options
     .getString("confirmation", true)
     .trim();
@@ -746,27 +843,52 @@ async function purgeGuild(
     );
     return;
   }
-  if (
-    actor.guild.id !== guildRuntime.guildId ||
-    interaction.guild?.id !== guildRuntime.guildId
-  ) {
+  await deferPrivate(interaction);
+  if (!(await verifyCurrentGuildOwner(interaction, guildRuntime, actor))) {
     await replyPrivate(
       interaction,
-      "This purge request does not belong to this server.",
+      "Superior could not confirm that you are still the server owner. No stored data was changed.",
     );
     return;
   }
-  await deferPrivate(interaction);
+  runtime.invalidateGuild(guildRuntime.guildId);
   await runtime.storage.purgeGuildData(guildRuntime.guildId);
   clearBackfillStatus(guildRuntime.guildId);
   clearModerationProcessState(guildRuntime.guildId);
   clearPanelProcessState(guildRuntime.guildId);
-  runtime.invalidateGuild(guildRuntime.guildId);
   await interaction.editReply({
     content:
-      "This server's active settings and metrics were permanently purged.",
+      "This server's active settings, metrics, panel records, ticket configuration, tickets, and ticket audit events were permanently purged.",
     allowedMentions: { parse: [] },
   });
+}
+
+async function verifyCurrentGuildOwner(
+  interaction: ChatInputCommandInteraction,
+  guildRuntime: GuildRuntime,
+  actor: GuildMember,
+): Promise<boolean> {
+  if (
+    !interaction.guild ||
+    interaction.guildId !== guildRuntime.guildId ||
+    interaction.guild.id !== guildRuntime.guildId ||
+    actor.guild.id !== guildRuntime.guildId
+  ) {
+    return false;
+  }
+  try {
+    const refreshedGuild = await interaction.client.guilds.fetch({
+      guild: guildRuntime.guildId,
+      cache: false,
+      force: true,
+    });
+    return (
+      refreshedGuild.id === guildRuntime.guildId &&
+      refreshedGuild.ownerId === actor.id
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function validateGuildSetup(

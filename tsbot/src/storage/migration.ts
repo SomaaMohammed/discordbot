@@ -11,7 +11,8 @@ import {
   LEGACY_SILENCE_RECOVERY_METRIC_KEY,
 } from "./legacy-v2-converter.js";
 import {
-  createV3Objects,
+  createV4Objects,
+  createV4OperationalObjects,
   CURRENT_SCHEMA_VERSION,
   databaseIntegrityCheck,
   detectDatabaseSchema,
@@ -20,6 +21,7 @@ import {
   V2_TABLE_NAMES,
   validateV2Schema,
   validateV3Schema,
+  validateV4Schema,
 } from "./schema.js";
 
 export type MigrationFailurePoint =
@@ -43,8 +45,8 @@ export interface MigrationOptions {
 
 export interface MigrationResult {
   status: "migrated" | "dry-run" | "already-current";
-  fromSchema: "legacy-v2" | "current-v3";
-  toSchema: "current-v3";
+  fromSchema: "legacy-v2" | "legacy-v3" | "current-v4";
+  toSchema: "current-v4";
   guilds: number;
   settingsRequiringReview: number;
   metricsPreserved: number;
@@ -57,6 +59,12 @@ export interface DatabaseValidationResult {
   schemaVersion: number | null;
   integrity: string;
   foreignKeyViolations: number;
+}
+
+interface V3Snapshot {
+  guilds: unknown[];
+  settings: unknown[];
+  metrics: unknown[];
 }
 
 interface LegacyGuildRow {
@@ -128,21 +136,63 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       options.onLockAcquired?.();
       assertIntegrity(db);
       const schema = detectDatabaseSchema(db);
-      if (schema === "current-v3") {
-        const issues = validateV3Schema(db);
+      if (schema === "current-v4") {
+        const issues = validateV4Schema(db);
         if (issues.length > 0) {
-          throw new Error(`Schema v3 validation failed: ${issues.join("; ")}`);
+          throw new Error(`Schema v4 validation failed: ${issues.join("; ")}`);
         }
         return {
           status: "already-current",
-          fromSchema: "current-v3",
-          toSchema: "current-v3",
+          fromSchema: "current-v4",
+          toSchema: "current-v4",
           guilds: countRows(db, "guilds"),
           settingsRequiringReview: countReviewRequiredSettings(db),
           metricsPreserved: countRows(db, "metrics"),
           metricsDropped: 0,
           warnings: 0,
         };
+      }
+      if (schema === "legacy-v3") {
+        const v3Issues = validateV3Schema(db);
+        if (v3Issues.length > 0) {
+          throw new Error(
+            `Schema v3 validation failed: ${v3Issues.join("; ")}`,
+          );
+        }
+        const now = (options.now ?? utcNow)();
+        const snapshot = readV3Snapshot(db);
+        const result: MigrationResult = {
+          status: options.dryRun ? "dry-run" : "migrated",
+          fromSchema: "legacy-v3",
+          toSchema: "current-v4",
+          guilds: snapshot.guilds.length,
+          settingsRequiringReview: countReviewRequiredSettings(db),
+          metricsPreserved: snapshot.metrics.length,
+          metricsDropped: 0,
+          warnings: 0,
+        };
+        injectFailure(options, "after-source-read");
+        injectFailure(options, "after-rename");
+        createV4OperationalObjects(db);
+        injectFailure(options, "after-create");
+        injectFailure(options, "after-copy");
+        verifyV3Snapshot(db, snapshot);
+        injectFailure(options, "after-verify");
+        injectFailure(options, "after-drop");
+        recordCurrentSchemaVersion(db, now);
+        injectFailure(options, "after-version");
+        const finalIssues = validateV4Schema(db);
+        if (finalIssues.length > 0) {
+          throw new Error(
+            `Migrated schema validation failed: ${finalIssues.join("; ")}`,
+          );
+        }
+        injectFailure(options, "before-commit");
+        if (options.dryRun) {
+          dryRunResult = result;
+          throw new DryRunRollback("validated dry run");
+        }
+        return result;
       }
       if (schema === "legacy-v1") {
         throw new Error(
@@ -174,7 +224,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       }
       injectFailure(options, "after-rename");
 
-      createV3Objects(db);
+      createV4Objects(db);
       injectFailure(options, "after-create");
 
       copyPreparedRows(db, prepared);
@@ -188,11 +238,11 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       injectFailure(options, "after-drop");
 
       // The marker is deliberately the last data write. A database claiming
-      // version 3 has already passed source and copy verification.
+      // version 4 has already passed source and copy verification.
       recordCurrentSchemaVersion(db, now);
       injectFailure(options, "after-version");
 
-      const finalIssues = validateV3Schema(db);
+      const finalIssues = validateV4Schema(db);
       if (finalIssues.length > 0) {
         throw new Error(
           `Migrated schema validation failed: ${finalIssues.join("; ")}`,
@@ -226,7 +276,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
 
 export function validateDatabaseFile(
   dbFile: string,
-  options: { expect?: 2 | 3; requireCurrent?: boolean } = {},
+  options: { expect: 2 | 3 | 4 },
 ): DatabaseValidationResult {
   const db = new Database(dbFile, {
     readonly: true,
@@ -239,7 +289,7 @@ export function validateDatabaseFile(
     const foreignKeyViolations = (db.pragma("foreign_key_check") as unknown[])
       .length;
     const schemaVersion = readSchemaVersion(db, schema);
-    const expected = options.expect ?? (options.requireCurrent ? 3 : undefined);
+    const expected = options.expect;
     if (integrity.toLowerCase() !== "ok") {
       throw new Error(`Database integrity check failed: ${integrity}`);
     }
@@ -250,7 +300,8 @@ export function validateDatabaseFile(
     }
     if (
       (expected === 2 && schema !== "legacy-v2") ||
-      (expected === 3 && schema !== "current-v3")
+      (expected === 3 && schema !== "legacy-v3") ||
+      (expected === 4 && schema !== "current-v4")
     ) {
       throw new Error(
         `Database schema is ${schema}; expected exact schema v${expected}`,
@@ -374,7 +425,7 @@ function prepareMigration(
     ),
     result: {
       fromSchema: "legacy-v2",
-      toSchema: "current-v3",
+      toSchema: "current-v4",
       guilds: guilds.length,
       settingsRequiringReview,
       metricsPreserved: preparedMetrics.size,
@@ -473,6 +524,31 @@ function verifyPreparedRows(
   const foreignKeyViolations = db.pragma("foreign_key_check") as unknown[];
   if (foreignKeyViolations.length > 0) {
     throw new Error("Migrated candidate has foreign-key violations");
+  }
+}
+
+function readV3Snapshot(db: Database.Database): V3Snapshot {
+  return {
+    guilds: db.prepare("SELECT * FROM guilds ORDER BY guild_id").all(),
+    settings: db
+      .prepare("SELECT * FROM guild_settings ORDER BY guild_id")
+      .all(),
+    metrics: db
+      .prepare("SELECT * FROM metrics ORDER BY guild_id, metric_key")
+      .all(),
+  };
+}
+
+function verifyV3Snapshot(db: Database.Database, expected: V3Snapshot): void {
+  const actual = readV3Snapshot(db);
+  if (!isDeepStrictEqual(actual.guilds, expected.guilds)) {
+    throw new Error("Schema v3 guild metadata changed during migration");
+  }
+  if (!isDeepStrictEqual(actual.settings, expected.settings)) {
+    throw new Error("Schema v3 guild settings changed during migration");
+  }
+  if (!isDeepStrictEqual(actual.metrics, expected.metrics)) {
+    throw new Error("Schema v3 metrics changed during migration");
   }
 }
 
@@ -577,7 +653,11 @@ function readSchemaVersion(
   db: Database.Database,
   schema: DatabaseSchemaKind,
 ): number | null {
-  if (schema !== "legacy-v2" && schema !== "current-v3") {
+  if (
+    schema !== "legacy-v2" &&
+    schema !== "legacy-v3" &&
+    schema !== "current-v4"
+  ) {
     return null;
   }
   const row = db

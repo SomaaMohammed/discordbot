@@ -14,7 +14,29 @@ import type {
   GuildPurgeResult,
   GuildRecord,
   GuildSettings,
+  PanelPreset,
+  PostedPanel,
+  PostedPanelInput,
   ProcessConfig,
+  TicketActivationInput,
+  TicketActivationResult,
+  TicketClaimResult,
+  TicketCloseFinishResult,
+  TicketCloseLogResult,
+  TicketCloseRollbackResult,
+  TicketCloseStartResult,
+  TicketConfiguration,
+  TicketConfigurationInput,
+  TicketCreationFailureResult,
+  TicketCreationInput,
+  TicketEvent,
+  TicketEventInput,
+  TicketRebindInput,
+  TicketRebindResult,
+  TicketRecord,
+  TicketReleaseResult,
+  TicketReservationResult,
+  TicketState,
   UserActivityMetric,
   UserLeaderboardEntry,
   UserMetrics,
@@ -28,9 +50,16 @@ import {
 } from "./metric-keys.js";
 import {
   detectDatabaseSchema,
-  initializeV3Schema,
-  validateV3Schema,
+  initializeV4Schema,
+  validateV4Schema,
 } from "./schema.js";
+import { GuildOperationalRepository } from "./operational-repository.js";
+import {
+  GUILD_DATA_COLLECTION_LIMITS,
+  insertImportedOperationalData,
+  parseGuildDataExport,
+} from "./guild-data.js";
+export { createOpaqueStorageId } from "./operational-repository.js";
 
 interface GuildRow {
   guild_id: string;
@@ -94,7 +123,7 @@ export class BotStorage {
       const memory = new Database(":memory:");
       try {
         memory.pragma("foreign_keys = ON");
-        initializeV3Schema(memory, utcNow());
+        initializeV4Schema(memory, utcNow());
         this.db = memory;
       } catch (error) {
         memory.close();
@@ -127,6 +156,11 @@ export class BotStorage {
         `Database schema v2 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
       );
     }
+    if (schema === "legacy-v3") {
+      throw new Error(
+        `Database schema v3 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
+      );
+    }
     if (schema === "unknown") {
       throw new Error(
         "Database schema is unknown or incomplete; startup refused without modifying it",
@@ -137,9 +171,9 @@ export class BotStorage {
     try {
       writable.pragma("foreign_keys = ON");
       if (schema === "empty") {
-        initializeV3Schema(writable, utcNow());
+        initializeV4Schema(writable, utcNow());
       } else {
-        const issues = validateV3Schema(writable);
+        const issues = validateV4Schema(writable);
         if (issues.length > 0) {
           throw new Error(
             `Database changed after read-only classification: ${issues.join("; ")}`,
@@ -402,32 +436,77 @@ export class BotStorage {
     return sanitizeGuildSettings(saved);
   }
 
-  public exportGuildData(guildId: string): GuildDataExport {
+  public exportGuildData(
+    guildId: string,
+    /** Test/diagnostic hook after the read snapshot has been established. */
+    onSnapshotAcquired?: () => void,
+    maximumMaterializedBytes?: number,
+  ): GuildDataExport {
     const db = this.requireDatabase();
     const normalized = assertDiscordSnowflake(guildId);
-    const metadata = this.requireGuild(normalized);
-    const settings = this.getGuildSettings(normalized);
-    if (!settings) {
-      throw new Error(`Guild ${normalized} has no settings`);
-    }
-    const rows = db
-      .prepare(
-        `SELECT metric_key, metric_value, updated_at
-         FROM metrics WHERE guild_id = ? ORDER BY metric_key`,
-      )
-      .all(normalized) as MetricRow[];
-    return {
-      formatVersion: 2,
-      guildId: normalized,
-      exportedAt: utcNow(),
-      metadata,
-      settings,
-      metrics: rows.map((row): GuildMetricExport => ({
-        key: row.metric_key,
-        value: row.metric_value,
-        updatedAt: row.updated_at,
-      })),
-    };
+    const exportSnapshot = db.transaction((): GuildDataExport => {
+      const metadata = this.requireGuild(normalized);
+      onSnapshotAcquired?.();
+      const counts = this.guildPurgeCounts(normalized);
+      const boundedCollections = [
+        ["metrics", counts.metrics, GUILD_DATA_COLLECTION_LIMITS.metrics],
+        [
+          "posted panels",
+          counts.postedPanels,
+          GUILD_DATA_COLLECTION_LIMITS.postedPanels,
+        ],
+        ["tickets", counts.tickets, GUILD_DATA_COLLECTION_LIMITS.tickets],
+        [
+          "ticket events",
+          counts.ticketEvents,
+          GUILD_DATA_COLLECTION_LIMITS.ticketEvents,
+        ],
+      ] as const;
+      for (const [label, count, maximum] of boundedCollections) {
+        if (count > maximum) {
+          throw new RangeError(
+            `Guild export ${label} exceeds the ${maximum}-record safety limit`,
+          );
+        }
+      }
+      if (
+        maximumMaterializedBytes !== undefined &&
+        this.estimateGuildExportBytes(normalized) > maximumMaterializedBytes
+      ) {
+        throw new RangeError(
+          `Guild export exceeds the ${maximumMaterializedBytes}-byte materialization safety limit`,
+        );
+      }
+      const settings = this.getGuildSettings(normalized);
+      if (!settings) {
+        throw new Error(`Guild ${normalized} has no settings`);
+      }
+      const rows = db
+        .prepare(
+          `SELECT metric_key, metric_value, updated_at
+           FROM metrics WHERE guild_id = ? ORDER BY metric_key`,
+        )
+        .all(normalized) as MetricRow[];
+      const guildStorage = this.forGuild(normalized);
+      const tickets = guildStorage.listTickets().reverse();
+      return {
+        formatVersion: 3,
+        guildId: normalized,
+        exportedAt: utcNow(),
+        metadata,
+        settings,
+        metrics: rows.map((row): GuildMetricExport => ({
+          key: row.metric_key,
+          value: row.metric_value,
+          updatedAt: row.updated_at,
+        })),
+        ticketConfiguration: guildStorage.getTicketConfiguration(),
+        postedPanels: guildStorage.listPostedPanels(),
+        tickets,
+        ticketEvents: guildStorage.listAllTicketEvents(),
+      };
+    });
+    return exportSnapshot.deferred();
   }
 
   public importGuildData(
@@ -456,6 +535,18 @@ export class BotStorage {
       ).run(now, normalized);
       this.upsertSettings(normalized, reviewed, now);
       db.prepare("DELETE FROM metrics WHERE guild_id = ?").run(normalized);
+      if (imported.sourceFormatVersion === 3) {
+        db.prepare("DELETE FROM ticket_events WHERE guild_id = ?").run(
+          normalized,
+        );
+        db.prepare("DELETE FROM tickets WHERE guild_id = ?").run(normalized);
+        db.prepare("DELETE FROM posted_panels WHERE guild_id = ?").run(
+          normalized,
+        );
+        db.prepare("DELETE FROM ticket_configurations WHERE guild_id = ?").run(
+          normalized,
+        );
+      }
       const insert = db.prepare(
         `INSERT INTO metrics (
            guild_id, metric_key, metric_value, updated_at
@@ -463,6 +554,14 @@ export class BotStorage {
       );
       for (const metric of imported.metrics) {
         insert.run(normalized, metric.key, metric.value, metric.updatedAt);
+      }
+      if (imported.sourceFormatVersion === 3) {
+        insertImportedOperationalData(db, normalized, {
+          ...imported,
+          ticketConfiguration: imported.ticketConfiguration
+            ? { ...imported.ticketConfiguration, enabled: false }
+            : null,
+        });
       }
       saved = reviewed;
     });
@@ -485,7 +584,15 @@ export class BotStorage {
     const purge = db.transaction(() => {
       result = this.guildPurgeCounts(normalized);
       db.prepare("DELETE FROM guilds WHERE guild_id = ?").run(normalized);
-      for (const table of ["guilds", "guild_settings", "metrics"] as const) {
+      for (const table of [
+        "guilds",
+        "guild_settings",
+        "metrics",
+        "ticket_configurations",
+        "posted_panels",
+        "tickets",
+        "ticket_events",
+      ] as const) {
         if (this.countGuildRows(table, normalized) !== 0) {
           throw new Error(`Guild purge left rows in ${table}`);
         }
@@ -570,11 +677,93 @@ export class BotStorage {
       guilds: this.countGuildRows("guilds", guildId),
       settings: this.countGuildRows("guild_settings", guildId),
       metrics: this.countGuildRows("metrics", guildId),
+      ticketConfigurations: this.countGuildRows(
+        "ticket_configurations",
+        guildId,
+      ),
+      postedPanels: this.countGuildRows("posted_panels", guildId),
+      tickets: this.countGuildRows("tickets", guildId),
+      ticketEvents: this.countGuildRows("ticket_events", guildId),
     };
   }
 
+  private estimateGuildExportBytes(guildId: string): number {
+    const row = this.requireDatabase()
+      .prepare(
+        `SELECT
+           4096
+           + COALESCE((
+               SELECT length(CAST(COALESCE(name, '') AS BLOB))
+                    + length(CAST(COALESCE(joined_at, '') AS BLOB))
+                    + length(CAST(COALESCE(left_at, '') AS BLOB)) + 512
+               FROM guilds WHERE guild_id = @guildId
+             ), 0)
+           + COALESCE((
+               SELECT length(CAST(settings_json AS BLOB)) + 512
+               FROM guild_settings WHERE guild_id = @guildId
+             ), 0)
+           + COALESCE((
+               SELECT SUM(
+                 length(CAST(metric_key AS BLOB))
+                 + length(CAST(metric_value AS TEXT))
+                 + length(CAST(updated_at AS BLOB)) + 128
+               ) FROM metrics WHERE guild_id = @guildId
+             ), 0)
+           + COALESCE((
+               SELECT length(CAST(category_id AS BLOB))
+                    + length(CAST(log_channel_id AS BLOB))
+                    + length(CAST(support_role_id AS BLOB))
+                    + length(CAST(created_at AS BLOB))
+                    + length(CAST(updated_at AS BLOB)) + 256
+               FROM ticket_configurations WHERE guild_id = @guildId
+             ), 0)
+           + COALESCE((
+               SELECT SUM(
+                 length(CAST(panel_id AS BLOB))
+                 + length(CAST(preset AS BLOB))
+                 + length(CAST(channel_id AS BLOB))
+                 + length(CAST(message_id AS BLOB))
+                 + length(CAST(configuration_json AS BLOB))
+                 + length(CAST(created_at AS BLOB))
+                 + length(CAST(updated_at AS BLOB)) + 256
+               ) FROM posted_panels WHERE guild_id = @guildId
+             ), 0)
+           + COALESCE((
+               SELECT SUM(
+                 length(CAST(ticket_id AS BLOB))
+                 + length(CAST(opener_id AS BLOB))
+                 + length(CAST(COALESCE(channel_id, '') AS BLOB))
+                 + length(CAST(COALESCE(control_message_id, '') AS BLOB))
+                 + length(CAST(subject AS BLOB))
+                 + length(CAST(description AS BLOB))
+                 + length(CAST(COALESCE(close_reason, '') AS BLOB))
+                 + length(CAST(COALESCE(failure_reason, '') AS BLOB)) + 1024
+               ) FROM tickets WHERE guild_id = @guildId
+             ), 0)
+           + COALESCE((
+               SELECT SUM(
+                 length(CAST(ticket_id AS BLOB))
+                 + length(CAST(event_id AS BLOB))
+                 + length(CAST(event_type AS BLOB))
+                 + length(CAST(COALESCE(actor_id, '') AS BLOB))
+                 + length(CAST(details_json AS BLOB))
+                 + length(CAST(created_at AS BLOB)) + 256
+               ) FROM ticket_events WHERE guild_id = @guildId
+             ), 0) AS estimated_bytes`,
+      )
+      .get({ guildId }) as { estimated_bytes: number };
+    return Number(row.estimated_bytes);
+  }
+
   private countGuildRows(
-    table: "guilds" | "guild_settings" | "metrics",
+    table:
+      | "guilds"
+      | "guild_settings"
+      | "metrics"
+      | "ticket_configurations"
+      | "posted_panels"
+      | "tickets"
+      | "ticket_events",
     guildId: string,
   ): number {
     const row = this.requireDatabase()
@@ -585,11 +774,15 @@ export class BotStorage {
 }
 
 export class GuildStorage {
+  private readonly operational: GuildOperationalRepository;
+
   public constructor(
     private readonly db: Database.Database,
     private readonly root: BotStorage,
     public readonly guildId: string,
-  ) {}
+  ) {
+    this.operational = new GuildOperationalRepository(db, guildId);
+  }
 
   public getSettings(): GuildSettings {
     const settings = this.root.getGuildSettings(this.guildId);
@@ -599,10 +792,167 @@ export class GuildStorage {
     return settings;
   }
 
+  public getTicketConfiguration(): TicketConfiguration | null {
+    return this.operational.getTicketConfiguration();
+  }
+
+  public upsertTicketConfiguration(
+    input: TicketConfigurationInput,
+  ): TicketConfiguration {
+    return this.operational.upsertTicketConfiguration(input);
+  }
+
+  public disableTicketConfiguration(): TicketConfiguration | null {
+    return this.operational.disableTicketConfiguration();
+  }
+
+  public createPostedPanel(input: PostedPanelInput): PostedPanel {
+    return this.operational.createPostedPanel(input);
+  }
+
+  public upsertPostedPanel(input: PostedPanelInput): PostedPanel {
+    return this.operational.upsertPostedPanel(input);
+  }
+
+  public listPostedPanels(preset?: PanelPreset): PostedPanel[] {
+    return this.operational.listPostedPanels(preset);
+  }
+
+  public findPostedPanelByToken(panelId: string): PostedPanel | null {
+    return this.operational.findPostedPanelByToken(panelId);
+  }
+
+  public findPostedPanelByPresetAndChannel(
+    preset: PanelPreset,
+    channelId: string,
+  ): PostedPanel | null {
+    return this.operational.findPostedPanelByPresetAndChannel(
+      preset,
+      channelId,
+    );
+  }
+
+  public deletePostedPanel(panelId: string): boolean {
+    return this.operational.deletePostedPanel(panelId);
+  }
+
+  public reserveTicketCreation(
+    input: TicketCreationInput,
+  ): TicketReservationResult {
+    return this.operational.reserveTicketCreation(input);
+  }
+
+  public activateTicketCreation(
+    ticketId: string,
+    input: TicketActivationInput,
+  ): TicketActivationResult {
+    return this.operational.activateTicketCreation(ticketId, input);
+  }
+
+  public failTicketCreation(
+    ticketId: string,
+    reason: string,
+  ): TicketCreationFailureResult {
+    return this.operational.failTicketCreation(ticketId, reason);
+  }
+
+  public getTicketById(ticketId: string): TicketRecord | null {
+    return this.operational.getTicketById(ticketId);
+  }
+
+  public getTicketByNumber(ticketNumber: number): TicketRecord | null {
+    return this.operational.getTicketByNumber(ticketNumber);
+  }
+
+  public getTicketByChannel(channelId: string): TicketRecord | null {
+    return this.operational.getTicketByChannel(channelId);
+  }
+
+  public getTicketByOpener(openerId: string): TicketRecord | null {
+    return this.operational.getTicketByOpener(openerId);
+  }
+
+  public getActiveTicketByOpener(openerId: string): TicketRecord | null {
+    return this.getTicketByOpener(openerId);
+  }
+
+  public listTickets(states?: readonly TicketState[]): TicketRecord[] {
+    return this.operational.listTickets(states);
+  }
+
+  public claimTicket(ticketId: string, staffUserId: string): TicketClaimResult {
+    return this.operational.claimTicket(ticketId, staffUserId);
+  }
+
+  public releaseTicket(
+    ticketId: string,
+    staffUserId: string,
+  ): TicketReleaseResult {
+    return this.operational.releaseTicket(ticketId, staffUserId);
+  }
+
+  public beginTicketClose(
+    ticketId: string,
+    staffUserId: string,
+    reason: string,
+  ): TicketCloseStartResult {
+    return this.operational.beginTicketClose(ticketId, staffUserId, reason);
+  }
+
+  public reopenAfterCloseFailure(
+    ticketId: string,
+    failureReason: string,
+  ): TicketCloseRollbackResult {
+    return this.operational.reopenAfterCloseFailure(ticketId, failureReason);
+  }
+
+  public finishTicketClose(ticketId: string): TicketCloseFinishResult {
+    return this.operational.finishTicketClose(ticketId);
+  }
+
+  public markTicketLogDelivered(
+    ticketId: string,
+    logMessageId: string,
+    expectedUpdatedAt?: string,
+  ): TicketCloseLogResult {
+    return this.operational.markTicketLogDelivered(
+      ticketId,
+      logMessageId,
+      expectedUpdatedAt,
+    );
+  }
+
+  public rebindTicket(
+    ticketId: string,
+    input: TicketRebindInput,
+    actorId?: string | null,
+  ): TicketRebindResult {
+    return this.operational.rebindTicket(ticketId, input, actorId);
+  }
+
+  public appendTicketEvent(
+    ticketId: string,
+    input: TicketEventInput,
+  ): TicketEvent | null {
+    return this.operational.appendTicketEvent(ticketId, input);
+  }
+
+  public listTicketEvents(ticketId: string): TicketEvent[] {
+    return this.operational.listTicketEvents(ticketId);
+  }
+
+  public listAllTicketEvents(): TicketEvent[] {
+    return this.operational.listAllTicketEvents();
+  }
+
   public recordCommandMetric(commandName: string, success = true): void {
     const usageKey = commandMetricKey(commandName);
     const failureKey = success ? null : commandMetricKey(commandName, true);
     const record = this.db.transaction(() => {
+      const guildExists = this.db
+        .prepare("SELECT 1 FROM guilds WHERE guild_id = ?")
+        .get(this.guildId);
+      if (!guildExists) return;
       this.metricsIncrement(usageKey);
       if (failureKey) {
         this.metricsIncrement(failureKey);
@@ -760,51 +1110,6 @@ function parseGuildRow(row: GuildRow): GuildRecord {
     leftAt: row.left_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-  };
-}
-
-function parseGuildDataExport(
-  payload: unknown,
-  guildId: string,
-): GuildDataExport {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new TypeError("Guild import must be an object");
-  }
-  const candidate = payload as Partial<GuildDataExport>;
-  if (candidate.formatVersion !== 2) {
-    throw new TypeError("Guild import formatVersion must be 2");
-  }
-  if (
-    candidate.guildId !== guildId ||
-    candidate.metadata?.guildId !== guildId
-  ) {
-    throw new TypeError("Guild import must belong to the current guild");
-  }
-  const settings = sanitizeGuildSettings(candidate.settings);
-  if (!Array.isArray(candidate.metrics)) {
-    throw new TypeError("Guild import metrics must be an array");
-  }
-  const seen = new Set<string>();
-  const metrics: GuildMetricExport[] = candidate.metrics.map((metric) => {
-    if (!metric || typeof metric !== "object") {
-      throw new TypeError("Guild import contains an invalid metric");
-    }
-    const key = assertActiveMetricKey(String(metric.key));
-    if (seen.has(key)) {
-      throw new TypeError(`Guild import contains duplicate metric ${key}`);
-    }
-    seen.add(key);
-    const value = normalizeMetricValue(metric.value);
-    const updatedAt = normalizeImportedTimestamp(metric.updatedAt);
-    return { key, value, updatedAt };
-  });
-  return {
-    formatVersion: 2,
-    guildId,
-    exportedAt: normalizeImportedTimestamp(candidate.exportedAt),
-    metadata: candidate.metadata as GuildRecord,
-    settings,
-    metrics,
   };
 }
 

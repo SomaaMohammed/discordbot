@@ -16,6 +16,8 @@ The first launch places the immutable bundled runtime in the current Windows use
 
 - `/setup` configures each guild, including feature flags, a log channel, timezone, invocation terms, moderation limits, and reusable greeting profiles.
 - `/superior` provides announcements and panels, message cleanup, channel controls, member timeouts, bounded bulk moderation, activity backfill, and command help.
+- `/panel` posts fixed Superior `help`, `server-info`, `resources`, and `tickets` panels and reports the panels tracked for the guild.
+- `/ticket` configures a private support category, closure-log channel, and support role; posts the ticket launcher; reports status; disables new tickets; and reconciles interrupted ticket records.
 - `/utility` provides `ping`, `avatar`, `userinfo`, `serverinfo`, `roleinfo`, `channelinfo`, `snowflake`, and `timestamp`.
 - `/fun` provides `battle`, `stats`, and `leaderboard` when activity metrics are enabled for the guild.
 - `/greetings send` lets any guild member send a configured greeting. `{user}` always resolves to the member invoking the command.
@@ -28,9 +30,12 @@ Examples include `superior hru`, `hey superior, wyd?`, `superior cmds`, `<@bot> 
 - New and rejoined guilds stay disabled until an owner or Administrator validates and enables them with `/setup`.
 - Disabled, inactive, unconfigured, cross-guild, and DM contexts do not run guild behavior.
 - Administrator actions validate the current guild, actor permissions, bot permissions, role hierarchy, and runtime generation before committing results.
-- The SQLite schema contains only `schema_migrations`, `guilds`, `guild_settings`, and `metrics`. Tenant-owned rows are keyed by `guild_id`.
-- Normal startup creates schema v3 only for a missing or empty database. It refuses v1, v2, partial, or unknown databases and never migrates them implicitly.
-- Existing v2 data requires the explicit backup-and-migrate workflow. A v1 installation must first be upgraded to v2 with the final 4.0.0 release.
+- Guild owners and Administrators can export active same-guild data; only the guild owner can perform the exact-confirmation import-replacement and live-data purge workflows.
+- Panel and ticket configuration is owner-or-Administrator only. Ticket claim, release, information, and closure controls revalidate the current member; staff actions allow the configured support role, guild owner, or an Administrator.
+- Ticket launchers permit one active ticket per member. Ticket channels are private to the opener, configured support role, and bot, subject to Discord's permission model.
+- Schema v4 has eight normalized application tables. Every tenant-owned row, including panel, ticket, and ticket-event rows, is keyed by `guild_id` and cascades with its guild.
+- Normal startup creates schema v4 only for a missing or empty database. It refuses v1, v2, v3, partial, or unknown databases and never migrates them implicitly.
+- Existing schema-v3 and legacy schema-v2 data require an explicit validated backup and offline migration. A v1 installation must first be upgraded to v2 with the final 4.0.0 release.
 
 ## Source development
 

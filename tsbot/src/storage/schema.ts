@@ -4,13 +4,15 @@ import {
   isDiscordSnowflake,
   parseGuildSettingsJson,
 } from "../guild-settings.js";
+import { PANEL_PRESETS, TICKET_EVENT_TYPES, TICKET_STATES } from "../types.js";
 import { isActiveMetricKey } from "./metric-keys.js";
 
-export const CURRENT_SCHEMA_VERSION = 3 as const;
+export const CURRENT_SCHEMA_VERSION = 4 as const;
+export const LEGACY_V3_SCHEMA_VERSION = 3 as const;
 export const LEGACY_V2_SCHEMA_VERSION = 2 as const;
 
 export type DatabaseSchemaKind =
-  "empty" | "legacy-v1" | "legacy-v2" | "current-v3" | "unknown";
+  "empty" | "legacy-v1" | "legacy-v2" | "legacy-v3" | "current-v4" | "unknown";
 
 export const SCHEMA_MIGRATIONS_TABLE_SQL = `
 CREATE TABLE schema_migrations (
@@ -80,6 +82,252 @@ const V3_TABLE_SQL: Record<(typeof V3_TABLE_NAMES)[number], string> = {
 
 const V3_INDEX_SQL: Record<(typeof V3_EXPLICIT_INDEX_NAMES)[number], string> = {
   idx_guilds_enabled_left_at: GUILDS_ENABLED_LEFT_AT_INDEX_SQL,
+};
+
+export const TICKET_CONFIGURATIONS_TABLE_SQL = `
+CREATE TABLE ticket_configurations (
+  guild_id TEXT NOT NULL PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  category_id TEXT NOT NULL
+    CHECK (
+      length(category_id) BETWEEN 17 AND 20
+      AND category_id NOT GLOB '*[^0-9]*'
+    ),
+  log_channel_id TEXT NOT NULL
+    CHECK (
+      length(log_channel_id) BETWEEN 17 AND 20
+      AND log_channel_id NOT GLOB '*[^0-9]*'
+    ),
+  support_role_id TEXT NOT NULL
+    CHECK (
+      length(support_role_id) BETWEEN 17 AND 20
+      AND support_role_id NOT GLOB '*[^0-9]*'
+    ),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const POSTED_PANELS_TABLE_SQL = `
+CREATE TABLE posted_panels (
+  guild_id TEXT NOT NULL,
+  panel_id TEXT NOT NULL
+    CHECK (
+      length(panel_id) BETWEEN 8 AND 24
+      AND panel_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  preset TEXT NOT NULL
+    CHECK (preset IN ('help', 'server-info', 'resources', 'tickets')),
+  channel_id TEXT NOT NULL
+    CHECK (
+      length(channel_id) BETWEEN 17 AND 20
+      AND channel_id NOT GLOB '*[^0-9]*'
+    ),
+  message_id TEXT NOT NULL
+    CHECK (
+      length(message_id) BETWEEN 17 AND 20
+      AND message_id NOT GLOB '*[^0-9]*'
+    ),
+  configuration_json TEXT NOT NULL DEFAULT '{}'
+    CHECK (
+      length(CAST(configuration_json AS BLOB)) BETWEEN 2 AND 16000
+      AND json_valid(configuration_json)
+    ),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, panel_id),
+  UNIQUE (guild_id, preset, channel_id),
+  UNIQUE (guild_id, channel_id, message_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const TICKETS_TABLE_SQL = `
+CREATE TABLE tickets (
+  guild_id TEXT NOT NULL,
+  ticket_id TEXT NOT NULL
+    CHECK (
+      length(ticket_id) BETWEEN 8 AND 24
+      AND ticket_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  ticket_number INTEGER NOT NULL CHECK (ticket_number BETWEEN 1 AND 2147483647),
+  opener_id TEXT NOT NULL
+    CHECK (
+      length(opener_id) BETWEEN 17 AND 20
+      AND opener_id NOT GLOB '*[^0-9]*'
+    ),
+  channel_id TEXT
+    CHECK (
+      channel_id IS NULL OR (
+        length(channel_id) BETWEEN 17 AND 20
+        AND channel_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  control_message_id TEXT
+    CHECK (
+      control_message_id IS NULL OR (
+        length(control_message_id) BETWEEN 17 AND 20
+        AND control_message_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 100),
+  description TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 2000),
+  state TEXT NOT NULL
+    CHECK (state IN ('creating', 'open', 'closing', 'closed', 'failed')),
+  claimed_by TEXT
+    CHECK (
+      claimed_by IS NULL OR (
+        length(claimed_by) BETWEEN 17 AND 20
+        AND claimed_by NOT GLOB '*[^0-9]*'
+      )
+    ),
+  claimed_at TEXT,
+  closed_by TEXT
+    CHECK (
+      closed_by IS NULL OR (
+        length(closed_by) BETWEEN 17 AND 20
+        AND closed_by NOT GLOB '*[^0-9]*'
+      )
+    ),
+  close_reason TEXT CHECK (close_reason IS NULL OR length(close_reason) BETWEEN 1 AND 500),
+  close_log_message_id TEXT
+    CHECK (
+      close_log_message_id IS NULL OR (
+        length(close_log_message_id) BETWEEN 17 AND 20
+        AND close_log_message_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  close_logged_at TEXT,
+  failure_reason TEXT CHECK (failure_reason IS NULL OR length(failure_reason) BETWEEN 1 AND 1000),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  closing_at TEXT,
+  closed_at TEXT,
+  PRIMARY KEY (guild_id, ticket_id),
+  UNIQUE (guild_id, ticket_number),
+  CHECK ((claimed_by IS NULL) = (claimed_at IS NULL)),
+  CHECK (control_message_id IS NULL OR channel_id IS NOT NULL),
+  CHECK (state IN ('creating', 'failed') OR channel_id IS NOT NULL),
+  CHECK ((state = 'failed') = (failure_reason IS NOT NULL)),
+  CHECK ((state IN ('closing', 'closed')) = (closing_at IS NOT NULL)),
+  CHECK ((state = 'closed') = (closed_at IS NOT NULL)),
+  CHECK ((state IN ('closing', 'closed')) = (closed_by IS NOT NULL)),
+  CHECK ((state IN ('closing', 'closed')) = (close_reason IS NOT NULL)),
+  CHECK ((close_log_message_id IS NULL) = (close_logged_at IS NULL)),
+  CHECK (close_logged_at IS NULL OR state IN ('closing', 'closed')),
+  CHECK (state != 'closed' OR close_logged_at IS NOT NULL),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const TICKET_EVENTS_TABLE_SQL = `
+CREATE TABLE ticket_events (
+  guild_id TEXT NOT NULL,
+  ticket_id TEXT NOT NULL,
+  event_id TEXT NOT NULL
+    CHECK (
+      length(event_id) BETWEEN 8 AND 24
+      AND event_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  event_number INTEGER NOT NULL CHECK (event_number BETWEEN 1 AND 2147483647),
+  event_type TEXT NOT NULL
+    CHECK (
+      event_type IN (
+        'creation_reserved', 'creation_activated', 'creation_failed',
+        'claimed', 'released', 'close_started', 'close_logged', 'close_failed', 'closed',
+        'rebound', 'recovery_noted'
+      )
+    ),
+  actor_id TEXT
+    CHECK (
+      actor_id IS NULL OR (
+        length(actor_id) BETWEEN 17 AND 20
+        AND actor_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  details_json TEXT NOT NULL DEFAULT '{}'
+    CHECK (
+      length(CAST(details_json AS BLOB)) BETWEEN 2 AND 4000
+      AND json_valid(details_json)
+    ),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, ticket_id, event_id),
+  UNIQUE (guild_id, ticket_id, event_number),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, ticket_id)
+    REFERENCES tickets(guild_id, ticket_id) ON DELETE CASCADE
+)
+`;
+
+export const POSTED_PANELS_GUILD_PRESET_INDEX_SQL = `
+CREATE INDEX idx_posted_panels_guild_preset
+ON posted_panels (guild_id, preset, channel_id)
+`;
+
+export const TICKETS_GUILD_OPENER_ACTIVE_INDEX_SQL = `
+CREATE UNIQUE INDEX idx_tickets_guild_opener_active
+ON tickets (guild_id, opener_id)
+WHERE state IN ('creating', 'open', 'closing')
+`;
+
+export const TICKETS_GUILD_CHANNEL_INDEX_SQL = `
+CREATE UNIQUE INDEX idx_tickets_guild_channel
+ON tickets (guild_id, channel_id)
+WHERE channel_id IS NOT NULL
+`;
+
+export const TICKETS_GUILD_STATE_INDEX_SQL = `
+CREATE INDEX idx_tickets_guild_state
+ON tickets (guild_id, state, ticket_number DESC)
+`;
+
+export const TICKETS_GUILD_CLOSE_LOG_MESSAGE_INDEX_SQL = `
+CREATE UNIQUE INDEX idx_tickets_guild_close_log_message
+ON tickets (guild_id, close_log_message_id)
+WHERE close_log_message_id IS NOT NULL
+`;
+
+export const TICKET_EVENTS_TICKET_INDEX_SQL = `
+CREATE INDEX idx_ticket_events_ticket
+ON ticket_events (guild_id, ticket_id, event_number)
+`;
+
+export const V4_TABLE_NAMES = [
+  ...V3_TABLE_NAMES,
+  "ticket_configurations",
+  "posted_panels",
+  "tickets",
+  "ticket_events",
+] as const;
+
+export const V4_EXPLICIT_INDEX_NAMES = [
+  ...V3_EXPLICIT_INDEX_NAMES,
+  "idx_posted_panels_guild_preset",
+  "idx_tickets_guild_opener_active",
+  "idx_tickets_guild_channel",
+  "idx_tickets_guild_state",
+  "idx_tickets_guild_close_log_message",
+  "idx_ticket_events_ticket",
+] as const;
+
+const V4_TABLE_SQL: Record<(typeof V4_TABLE_NAMES)[number], string> = {
+  ...V3_TABLE_SQL,
+  ticket_configurations: TICKET_CONFIGURATIONS_TABLE_SQL,
+  posted_panels: POSTED_PANELS_TABLE_SQL,
+  tickets: TICKETS_TABLE_SQL,
+  ticket_events: TICKET_EVENTS_TABLE_SQL,
+};
+
+const V4_INDEX_SQL: Record<(typeof V4_EXPLICIT_INDEX_NAMES)[number], string> = {
+  ...V3_INDEX_SQL,
+  idx_posted_panels_guild_preset: POSTED_PANELS_GUILD_PRESET_INDEX_SQL,
+  idx_tickets_guild_opener_active: TICKETS_GUILD_OPENER_ACTIVE_INDEX_SQL,
+  idx_tickets_guild_channel: TICKETS_GUILD_CHANNEL_INDEX_SQL,
+  idx_tickets_guild_state: TICKETS_GUILD_STATE_INDEX_SQL,
+  idx_tickets_guild_close_log_message:
+    TICKETS_GUILD_CLOSE_LOG_MESSAGE_INDEX_SQL,
+  idx_ticket_events_ticket: TICKET_EVENTS_TICKET_INDEX_SQL,
 };
 
 export const V1_TABLE_NAMES = [
@@ -248,6 +496,61 @@ interface MetricDataRow {
   updated_at: string;
 }
 
+interface TicketConfigurationDataRow {
+  guild_id: string;
+  enabled: number;
+  category_id: string;
+  log_channel_id: string;
+  support_role_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PostedPanelDataRow {
+  guild_id: string;
+  panel_id: string;
+  preset: string;
+  channel_id: string;
+  message_id: string;
+  configuration_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface TicketDataRow {
+  guild_id: string;
+  ticket_id: string;
+  ticket_number: number;
+  opener_id: string;
+  channel_id: string | null;
+  control_message_id: string | null;
+  subject: string;
+  description: string;
+  state: string;
+  claimed_by: string | null;
+  claimed_at: string | null;
+  closed_by: string | null;
+  close_reason: string | null;
+  close_log_message_id: string | null;
+  close_logged_at: string | null;
+  failure_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  closing_at: string | null;
+  closed_at: string | null;
+}
+
+interface TicketEventDataRow {
+  guild_id: string;
+  ticket_id: string;
+  event_id: string;
+  event_number: number;
+  event_type: string;
+  actor_id: string | null;
+  details_json: string;
+  created_at: string;
+}
+
 export function createV3Objects(db: Database.Database): void {
   for (const table of V3_TABLE_NAMES) {
     db.exec(V3_TABLE_SQL[table]);
@@ -255,6 +558,28 @@ export function createV3Objects(db: Database.Database): void {
   for (const index of V3_EXPLICIT_INDEX_NAMES) {
     db.exec(V3_INDEX_SQL[index]);
   }
+}
+
+/** Adds only the operational objects introduced by schema v4. */
+export function createV4OperationalObjects(db: Database.Database): void {
+  for (const table of [
+    "ticket_configurations",
+    "posted_panels",
+    "tickets",
+    "ticket_events",
+  ] as const) {
+    db.exec(V4_TABLE_SQL[table]);
+  }
+  for (const index of V4_EXPLICIT_INDEX_NAMES) {
+    if (!(V3_EXPLICIT_INDEX_NAMES as readonly string[]).includes(index)) {
+      db.exec(V4_INDEX_SQL[index]);
+    }
+  }
+}
+
+export function createV4Objects(db: Database.Database): void {
+  createV3Objects(db);
+  createV4OperationalObjects(db);
 }
 
 export function recordCurrentSchemaVersion(
@@ -272,8 +597,25 @@ export function initializeV3Schema(
 ): void {
   const initialize = db.transaction(() => {
     createV3Objects(db);
-    recordCurrentSchemaVersion(db, appliedAt);
+    db.prepare(
+      "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+    ).run(LEGACY_V3_SCHEMA_VERSION, appliedAt);
     const issues = validateV3Schema(db);
+    if (issues.length > 0) {
+      throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
+    }
+  });
+  initialize.immediate();
+}
+
+export function initializeV4Schema(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  const initialize = db.transaction(() => {
+    createV4Objects(db);
+    recordCurrentSchemaVersion(db, appliedAt);
+    const issues = validateV4Schema(db);
     if (issues.length > 0) {
       throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
     }
@@ -301,8 +643,11 @@ export function detectDatabaseSchema(
     .map((row) => row.name)
     .sort();
 
+  if (sameStrings(tables, [...V4_TABLE_NAMES].sort())) {
+    return validateV4Schema(db).length === 0 ? "current-v4" : "unknown";
+  }
   if (sameStrings(tables, [...V3_TABLE_NAMES].sort())) {
-    return validateV3Schema(db).length === 0 ? "current-v3" : "unknown";
+    return validateV3Schema(db).length === 0 ? "legacy-v3" : "unknown";
   }
   if (sameStrings(tables, [...V2_TABLE_NAMES].sort())) {
     return validateV2Schema(db).length === 0 ? "legacy-v2" : "unknown";
@@ -364,15 +709,148 @@ export function validateV3Schema(db: Database.Database): string[] {
     .all() as Array<{ version: number; applied_at: string }>;
   if (
     versions.length !== 1 ||
-    versions[0]?.version !== CURRENT_SCHEMA_VERSION ||
+    versions[0]?.version !== LEGACY_V3_SCHEMA_VERSION ||
     !isValidTimestamp(versions[0]?.applied_at)
   ) {
     issues.push(
-      `schema_migrations must contain exactly version ${CURRENT_SCHEMA_VERSION}`,
+      `schema_migrations must contain exactly version ${LEGACY_V3_SCHEMA_VERSION}`,
     );
   }
 
   validateV3Data(db, issues);
+  validateDatabaseHealth(db, issues);
+  return issues;
+}
+
+export function validateV4Schema(db: Database.Database): string[] {
+  const issues = validateExactObjects(
+    db,
+    [...V4_TABLE_NAMES],
+    [...V4_EXPLICIT_INDEX_NAMES],
+  );
+  if (issues.length > 0) {
+    return issues;
+  }
+
+  validateSqlDefinitions(db, V4_TABLE_SQL, "table", issues);
+  validateSqlDefinitions(db, V4_INDEX_SQL, "index", issues);
+  validateColumnsAndKeys(
+    db,
+    {
+      schema_migrations: ["version", "applied_at"],
+      guilds: [
+        "guild_id",
+        "enabled",
+        "name",
+        "joined_at",
+        "left_at",
+        "created_at",
+        "updated_at",
+      ],
+      guild_settings: [
+        "guild_id",
+        "settings_version",
+        "settings_json",
+        "updated_at",
+      ],
+      metrics: ["guild_id", "metric_key", "metric_value", "updated_at"],
+      ticket_configurations: [
+        "guild_id",
+        "enabled",
+        "category_id",
+        "log_channel_id",
+        "support_role_id",
+        "created_at",
+        "updated_at",
+      ],
+      posted_panels: [
+        "guild_id",
+        "panel_id",
+        "preset",
+        "channel_id",
+        "message_id",
+        "configuration_json",
+        "created_at",
+        "updated_at",
+      ],
+      tickets: [
+        "guild_id",
+        "ticket_id",
+        "ticket_number",
+        "opener_id",
+        "channel_id",
+        "control_message_id",
+        "subject",
+        "description",
+        "state",
+        "claimed_by",
+        "claimed_at",
+        "closed_by",
+        "close_reason",
+        "close_log_message_id",
+        "close_logged_at",
+        "failure_reason",
+        "created_at",
+        "updated_at",
+        "closing_at",
+        "closed_at",
+      ],
+      ticket_events: [
+        "guild_id",
+        "ticket_id",
+        "event_id",
+        "event_number",
+        "event_type",
+        "actor_id",
+        "details_json",
+        "created_at",
+      ],
+    },
+    {
+      schema_migrations: ["version"],
+      guilds: ["guild_id"],
+      guild_settings: ["guild_id"],
+      metrics: ["guild_id", "metric_key"],
+      ticket_configurations: ["guild_id"],
+      posted_panels: ["guild_id", "panel_id"],
+      tickets: ["guild_id", "ticket_id"],
+      ticket_events: ["guild_id", "ticket_id", "event_id"],
+    },
+    issues,
+  );
+  for (const table of [
+    "guild_settings",
+    "metrics",
+    "ticket_configurations",
+    "posted_panels",
+    "tickets",
+  ]) {
+    validateGuildForeignKey(db, table, issues);
+  }
+  validateTicketEventForeignKeys(db, issues);
+
+  const versions = db
+    .prepare(
+      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
+    )
+    .all() as Array<{ version: number; applied_at: string }>;
+  const validVersionSequence =
+    (versions.length === 1 &&
+      versions[0]?.version === CURRENT_SCHEMA_VERSION) ||
+    (versions.length === 2 &&
+      versions[0]?.version === LEGACY_V3_SCHEMA_VERSION &&
+      versions[1]?.version === CURRENT_SCHEMA_VERSION);
+  if (
+    !validVersionSequence ||
+    versions.some((row) => !isValidTimestamp(row.applied_at))
+  ) {
+    issues.push(
+      "schema_migrations must contain version 4, optionally following version 3",
+    );
+  }
+
+  validateV3Data(db, issues);
+  validateV4Data(db, issues);
   validateDatabaseHealth(db, issues);
   return issues;
 }
@@ -401,8 +879,10 @@ export function validateV2Schema(db: Database.Database): string[] {
   }
 
   const versions = db
-    .prepare("SELECT version FROM schema_migrations ORDER BY version")
-    .all() as Array<{ version: number }>;
+    .prepare(
+      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
+    )
+    .all() as Array<{ version: number; applied_at: string }>;
   if (
     versions.length === 0 ||
     versions.at(-1)?.version !== LEGACY_V2_SCHEMA_VERSION ||
@@ -410,7 +890,8 @@ export function validateV2Schema(db: Database.Database): string[] {
       (row) =>
         !Number.isInteger(row.version) ||
         row.version < 1 ||
-        row.version > LEGACY_V2_SCHEMA_VERSION,
+        row.version > LEGACY_V2_SCHEMA_VERSION ||
+        !isValidTimestamp(row.applied_at),
     )
   ) {
     issues.push("schema_migrations must end at version 2");
@@ -552,6 +1033,176 @@ function validateV3Data(db: Database.Database, issues: string[]): void {
   }
 }
 
+function validateV4Data(db: Database.Database, issues: string[]): void {
+  const guildIds = new Set(
+    (
+      db.prepare("SELECT guild_id FROM guilds").all() as Array<{
+        guild_id: string;
+      }>
+    ).map((row) => row.guild_id),
+  );
+
+  const configurations = db
+    .prepare("SELECT * FROM ticket_configurations ORDER BY guild_id")
+    .all() as TicketConfigurationDataRow[];
+  const configuredGuildIds = new Set(configurations.map((row) => row.guild_id));
+  for (const row of configurations) {
+    if (!guildIds.has(row.guild_id)) {
+      issues.push(`ticket configuration ${row.guild_id} has no guild`);
+    }
+    if (row.enabled !== 0 && row.enabled !== 1) {
+      issues.push(
+        `ticket configuration ${row.guild_id} has invalid enabled state`,
+      );
+    }
+    for (const id of [
+      row.category_id,
+      row.log_channel_id,
+      row.support_role_id,
+    ]) {
+      if (!isDiscordSnowflake(id)) {
+        issues.push(
+          `ticket configuration ${row.guild_id} has an invalid Discord ID`,
+        );
+        break;
+      }
+    }
+    if (
+      !isValidTimestamp(row.created_at) ||
+      !isValidTimestamp(row.updated_at)
+    ) {
+      issues.push(
+        `ticket configuration ${row.guild_id} has invalid timestamps`,
+      );
+    }
+  }
+
+  const panels = db
+    .prepare("SELECT * FROM posted_panels ORDER BY guild_id, panel_id")
+    .all() as PostedPanelDataRow[];
+  for (const row of panels) {
+    if (!guildIds.has(row.guild_id)) {
+      issues.push(`posted panel ${row.panel_id} has no guild`);
+    }
+    if (
+      !isOpaqueId(row.panel_id) ||
+      !(PANEL_PRESETS as readonly string[]).includes(row.preset) ||
+      !isDiscordSnowflake(row.channel_id) ||
+      !isDiscordSnowflake(row.message_id)
+    ) {
+      issues.push(`posted panel ${row.panel_id} has invalid identifiers`);
+    }
+    if (
+      !isValidJson(row.configuration_json) ||
+      Buffer.byteLength(row.configuration_json, "utf8") > 16_000
+    ) {
+      issues.push(
+        `posted panel ${row.panel_id} has invalid configuration JSON`,
+      );
+    }
+    if (
+      !isValidTimestamp(row.created_at) ||
+      !isValidTimestamp(row.updated_at)
+    ) {
+      issues.push(`posted panel ${row.panel_id} has invalid timestamps`);
+    }
+  }
+
+  const tickets = db
+    .prepare("SELECT * FROM tickets ORDER BY guild_id, ticket_number")
+    .all() as TicketDataRow[];
+  for (const row of tickets) {
+    if (!guildIds.has(row.guild_id)) {
+      issues.push(`ticket ${row.ticket_id} has no guild`);
+    }
+    if (
+      (row.state === "creating" ||
+        row.state === "open" ||
+        row.state === "closing") &&
+      !configuredGuildIds.has(row.guild_id)
+    ) {
+      issues.push(`active ticket ${row.ticket_id} has no ticket configuration`);
+    }
+    if (
+      !isOpaqueId(row.ticket_id) ||
+      !Number.isInteger(row.ticket_number) ||
+      row.ticket_number < 1 ||
+      !isDiscordSnowflake(row.opener_id) ||
+      (row.channel_id !== null && !isDiscordSnowflake(row.channel_id)) ||
+      (row.control_message_id !== null &&
+        !isDiscordSnowflake(row.control_message_id)) ||
+      (row.claimed_by !== null && !isDiscordSnowflake(row.claimed_by)) ||
+      (row.closed_by !== null && !isDiscordSnowflake(row.closed_by)) ||
+      (row.close_log_message_id !== null &&
+        !isDiscordSnowflake(row.close_log_message_id)) ||
+      !(TICKET_STATES as readonly string[]).includes(row.state)
+    ) {
+      issues.push(`ticket ${row.ticket_id} has invalid identifiers or state`);
+    }
+    if (
+      !isValidTimestamp(row.created_at) ||
+      !isValidTimestamp(row.updated_at) ||
+      (row.claimed_at !== null && !isValidTimestamp(row.claimed_at)) ||
+      (row.close_logged_at !== null &&
+        !isValidTimestamp(row.close_logged_at)) ||
+      (row.closing_at !== null && !isValidTimestamp(row.closing_at)) ||
+      (row.closed_at !== null && !isValidTimestamp(row.closed_at))
+    ) {
+      issues.push(`ticket ${row.ticket_id} has invalid timestamps`);
+    }
+    if (
+      typeof row.subject !== "string" ||
+      typeof row.description !== "string" ||
+      row.subject.length < 1 ||
+      row.subject.length > 100 ||
+      row.description.length < 1 ||
+      row.description.length > 2000 ||
+      (row.close_reason !== null &&
+        (typeof row.close_reason !== "string" ||
+          row.close_reason.length < 1 ||
+          row.close_reason.length > 500)) ||
+      (row.failure_reason !== null &&
+        (typeof row.failure_reason !== "string" ||
+          row.failure_reason.length < 1 ||
+          row.failure_reason.length > 1000))
+    ) {
+      issues.push(`ticket ${row.ticket_id} has invalid text`);
+    }
+  }
+
+  const events = db
+    .prepare(
+      "SELECT * FROM ticket_events ORDER BY guild_id, ticket_id, created_at, event_id",
+    )
+    .all() as TicketEventDataRow[];
+  for (const row of events) {
+    if (!guildIds.has(row.guild_id)) {
+      issues.push(`ticket event ${row.event_id} has no guild`);
+    }
+    if (
+      !isOpaqueId(row.ticket_id) ||
+      !isOpaqueId(row.event_id) ||
+      !Number.isInteger(row.event_number) ||
+      row.event_number < 1 ||
+      !(TICKET_EVENT_TYPES as readonly string[]).includes(row.event_type) ||
+      (row.actor_id !== null && !isDiscordSnowflake(row.actor_id))
+    ) {
+      issues.push(
+        `ticket event ${row.event_id} has invalid identifiers or type`,
+      );
+    }
+    if (
+      !isValidJson(row.details_json) ||
+      Buffer.byteLength(row.details_json, "utf8") > 4_000
+    ) {
+      issues.push(`ticket event ${row.event_id} has invalid details JSON`);
+    }
+    if (!isValidTimestamp(row.created_at)) {
+      issues.push(`ticket event ${row.event_id} has an invalid timestamp`);
+    }
+  }
+}
+
 function validateExactObjects(
   db: Database.Database,
   expectedTables: string[],
@@ -654,6 +1305,38 @@ function validateGuildForeignKey(
   }
 }
 
+function validateTicketEventForeignKeys(
+  db: Database.Database,
+  issues: string[],
+): void {
+  const rows = db
+    .prepare("PRAGMA foreign_key_list(ticket_events)")
+    .all() as ForeignKeyRow[];
+  const hasGuild = rows.some(
+    (row) =>
+      row.table === "guilds" &&
+      row.from === "guild_id" &&
+      row.to === "guild_id" &&
+      row.on_delete.toUpperCase() === "CASCADE",
+  );
+  const ticketColumns = rows
+    .filter(
+      (row) =>
+        row.table === "tickets" && row.on_delete.toUpperCase() === "CASCADE",
+    )
+    .map((row) => `${row.from}:${row.to}`)
+    .sort();
+  if (
+    rows.length !== 3 ||
+    !hasGuild ||
+    !sameStrings(ticketColumns, ["guild_id:guild_id", "ticket_id:ticket_id"])
+  ) {
+    issues.push(
+      "ticket_events must cascade from its guild and composite ticket identity",
+    );
+  }
+}
+
 function validateDatabaseHealth(db: Database.Database, issues: string[]): void {
   const integrity = databaseIntegrityCheck(db);
   if (integrity.toLowerCase() !== "ok") {
@@ -684,13 +1367,28 @@ function tableInfo(db: Database.Database, table: string): TableInfoRow[] {
 }
 
 function normalizeSql(value: string): string {
-  return value
-    .replaceAll(/["'`\[\]]/g, "")
+  const literals: string[] = [];
+  const protectedValue = value.replace(/'(?:''|[^'])*'/g, (literal) => {
+    const index = literals.push(literal) - 1;
+    return `\u0001${index}\u0002`;
+  });
+  const normalized = protectedValue
+    .replaceAll(/["`\[\]]/g, "")
     .replaceAll(/\s+/g, " ")
     .replaceAll(/\s*([(),])\s*/g, "$1")
     .replace(/;$/, "")
     .trim()
     .toLowerCase();
+  return normalized.replace(
+    /\u0001(\d+)\u0002/g,
+    (_match, rawIndex: string) => {
+      const literal = literals[Number(rawIndex)];
+      if (literal === undefined) {
+        throw new Error("SQL literal normalization lost its placeholder");
+      }
+      return literal;
+    },
+  );
 }
 
 function sameStrings(left: string[], right: string[]): boolean {
@@ -706,6 +1404,27 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isValidTimestamp(value: unknown): value is string {
   return isNonEmptyString(value) && Number.isFinite(Date.parse(value));
+}
+
+function isOpaqueId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 8 &&
+    value.length <= 24 &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+function isValidJson(value: unknown): value is string {
+  if (typeof value !== "string") {
+    return false;
+  }
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function errorMessage(error: unknown): string {

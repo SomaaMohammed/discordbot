@@ -1,7 +1,7 @@
 # Superior terms of service
 
 **Effective date:** NOT YET EFFECTIVE<br>
-**Last updated:** July 28, 2026
+**Last updated:** July 30, 2026
 
 > **Unpublished draft. Do not link this document from the Discord Developer Portal or present it as binding terms.** Replace the operator/contact placeholders, complete the [Privacy Policy](privacy-policy.md) publication prerequisites, verify the hosted service, and obtain appropriate legal review for the operator's jurisdictions.
 
@@ -19,7 +19,7 @@ You must meet Discord's minimum age requirement in your country and be legally a
 
 ## 3. Service
 
-Superior provides configurable conversational replies, greetings, information utilities, announcements and panels, optional activity statistics, message cleanup, channel controls, timeouts, role panels, and other bounded moderation tools. Guild owners and administrators select supported features, permissions, destinations, and limits.
+Superior provides configurable conversational replies, greetings, information utilities, announcements, fixed information/resource panels, private support tickets, optional activity statistics, message cleanup, channel controls, timeouts, role panels, and other bounded moderation tools. Guild owners and administrators select supported features, permissions, destinations, support roles, and limits.
 
 The Bot is not an emergency service, professional adviser, or substitute for human moderation judgment. Features, limits, and availability may change.
 
@@ -34,9 +34,9 @@ You must not use the Bot in a way that causes the Operator to violate Discord's 
 An installer or administrator is responsible for:
 
 - granting only the permissions needed for enabled features and maintaining safe role hierarchy and channel visibility;
-- configuring feature flags, logging, invocation terms, timezone, moderation limits, panels, and greetings appropriately;
+- configuring feature flags, logging, invocation terms, timezone, moderation limits, panels, ticket category/log/support resources, and greetings appropriately;
 - telling members how the Bot is used and making the effective privacy notice and terms available;
-- supervising message cleanup, bulk actions, timeouts, panels, announcements, exports, activity backfill, statistics, and leaderboards;
+- supervising message cleanup, bulk actions, timeouts, panels, tickets, closure transcripts, announcements, exports, activity backfill, statistics, and leaderboards;
 - protecting downloaded exports and administrator-visible logs; and
 - reviewing Bot output and correcting or reversing actions when human judgment is needed.
 
@@ -49,7 +49,7 @@ You must not:
 - violate law, Discord's rules, another person's rights, or applicable guild rules;
 - harass, threaten, exploit, discriminate, impersonate, dox, spam, or deceive;
 - submit malware, credentials, authentication tokens, unlawful content, or sensitive personal information;
-- use panels, exports, statistics, backfill, or moderation tools for unauthorized surveillance, retaliation, profiling, or harm;
+- use panels, tickets, transcripts, exports, statistics, backfill, or moderation tools for unauthorized surveillance, retaliation, profiling, or harm;
 - bypass permissions, role hierarchy, lifecycle checks, input bounds, cooldowns, or other safeguards;
 - disrupt, overload, scrape, probe, or gain unauthorized access to the Bot, host, data, or another guild's data;
 - sell or broker Discord or Bot data; or
@@ -65,11 +65,15 @@ You confirm that you have permission to submit the content and select its destin
 
 A DM-panel submission is delivered through Discord only to the selected recipient. It is not copied to the configured guild log channel, and the aggregate success metric records none of the content, sender, or recipient. Do not use the panel unless you accept delivery to the selected recipient.
 
+A support-ticket submission persists the opener's Discord ID, subject, description, ticket/channel identifiers, lifecycle state, and later claim/closure metadata in the guild-scoped database. The resulting private channel is intended for the opener, configured support role, guild owner, Administrators, and Bot, but actual visibility follows Discord permissions and administrator configuration. Do not submit credentials or sensitive personal information.
+
+When authorized staff close a ticket, the Bot builds a bounded plain-text transcript in memory from up to 1,000 recent channel messages and no more than 7.5 MiB of UTF-8 data. The transcript can include message text, author/timestamp/message identifiers, and attachment URLs. It is delivered with the closure reason to the configured guild log channel, and the Bot attempts the same delivery to the opener by direct message. Only after the log delivery is checkpointed and closure is persisted does the Bot attempt to delete the ticket channel. A failed log or transcript step preserves the channel for retry or recovery. Discord-hosted logs and direct messages can remain after the local ticket channel or Bot database rows are deleted.
+
 Optional member-activity metrics and backfill can produce member-specific statistics and leaderboards from Discord events and eligible history. Administrators must enable and operate those features only with an appropriate, disclosed basis.
 
 ## 8. Privacy and deletion
 
-The effective [Privacy Policy](privacy-policy.md) will explain processing, disclosure, retention, and requests. Removing the Bot currently marks a guild inactive but does not automatically delete active rows. The guild owner can use `/setup purge`; that action does not delete Discord-hosted copies, host logs, backups, or downloaded exports.
+The effective [Privacy Policy](privacy-policy.md) will explain processing, disclosure, retention, and requests. Removing the Bot currently marks a guild inactive but does not automatically delete active rows. Disabling tickets stops new tickets but preserves existing channels and records. Only the guild owner can use `/setup import` to replace validated same-guild live data or `/setup purge` to remove the guild's live database rows. A format-3 import replaces settings, metrics, panel records, ticket configuration, tickets, and ticket events; a legacy format-2 import replaces settings and metrics while preserving current panel and ticket operational rows. Every import leaves the guild disabled for review, and a format-3 imported ticket configuration is also disabled. Neither import nor purge deletes Discord-hosted panel messages, ticket channels, closure logs, direct messages, host logs, backups, or downloaded exports.
 
 This behavior is a publication blocker, not a promise of indefinite retention. Before public operation, the Operator must implement and document appropriate guild-removal, individual-request, log, backup, vendor, and shutdown deletion procedures.
 
