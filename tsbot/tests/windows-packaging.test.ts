@@ -31,7 +31,7 @@ describe("Windows portable packaging", () => {
 
     expect(packageJson).toMatchObject({
       name: "superior-discord-bot",
-      version: "5.2.0",
+      version: "5.2.1",
       private: true,
     });
     expect(packageLock).toMatchObject({

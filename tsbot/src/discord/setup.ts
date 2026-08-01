@@ -39,6 +39,11 @@ const FEATURE_CHOICES: Array<{
   { name: "activity-metrics", value: "activityMetrics" },
 ];
 
+const DEFAULT_GREETING_PROFILE: GuildSettings["greetings"][number] = {
+  name: "Welcome",
+  message: "Welcome, {user}!",
+};
+
 export function getFeatureDisplayName(
   feature: keyof GuildSettings["features"],
 ): string {
@@ -410,6 +415,10 @@ async function enableAllFeatures(
   for (const { value } of FEATURE_CHOICES) {
     next.features[value] = true;
   }
+  const addedDefaultGreeting = next.greetings.length === 0;
+  if (addedDefaultGreeting) {
+    next.greetings.push({ ...DEFAULT_GREETING_PROFILE });
+  }
   const result = await validateGuildSetup(interaction, next);
   if (!result.valid) {
     await replyPrivate(
@@ -422,7 +431,9 @@ async function enableAllFeatures(
   await runtime.setEnabled(true);
   await replyPrivate(
     interaction,
-    "All features and commands are enabled for this server.",
+    addedDefaultGreeting
+      ? "All features and commands are enabled for this server. Added the default **Welcome** greeting profile."
+      : "All features and commands are enabled for this server. Existing greeting profiles were preserved.",
   );
 }
 

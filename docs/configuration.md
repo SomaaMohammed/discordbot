@@ -22,7 +22,7 @@ Copy `.env.example` to `.env` in the application root. For a Windows portable bu
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------- |
 | `DISCORD_TOKEN`             | Yes           | Bot token from the Developer Portal.                                                        |
 | `DB_FILE`                   | No            | SQLite path. A relative value resolves from the application root; default is `superior.db`. |
-| `BOT_VERSION`               | No            | Display override; normally leave blank to use package version 5.2.0.                        |
+| `BOT_VERSION`               | No            | Display override; normally leave blank to use package version 5.2.1.                        |
 | `COMMAND_REGISTRATION_MODE` | No            | `global` for production or `guild` for development. Defaults to `global`.                   |
 | `DEV_GUILD_IDS`             | In guild mode | Comma-separated development guild IDs.                                                      |
 

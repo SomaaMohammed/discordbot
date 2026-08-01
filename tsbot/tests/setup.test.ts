@@ -121,10 +121,84 @@ describe("setup authorization", () => {
 });
 
 describe("active-only setup behavior", () => {
-  it("enables every feature and the server in one command", async () => {
+  it("adds a default greeting and enables every feature and the server", async () => {
     const settings = createDefaultGuildSettings();
-    settings.greetings.push({ name: "Welcome", message: "Hello {user}!" });
-    const saveSettings = vi.fn(async (next: GuildSettings) => next);
+    let persisted = structuredClone(settings);
+    const saveSettings = vi.fn(async (next: GuildSettings) => {
+      persisted = structuredClone(next);
+      return persisted;
+    });
+    const setEnabled = vi.fn(async (enabled: boolean) => {
+      persisted.enabled = enabled;
+      persisted.reviewRequired = !enabled;
+      return structuredClone(persisted);
+    });
+    const editReply = vi.fn(async (_payload: unknown) => undefined);
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+      saveSettings,
+      setEnabled,
+    } as unknown as GuildRuntime;
+    const interaction = {
+      guild: { id: GUILD_ID },
+      guildId: GUILD_ID,
+      options: { getSubcommand: vi.fn(() => "enable-all") },
+      deferred: true,
+      replied: false,
+      editReply,
+    } as never;
+
+    await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    expect(saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        greetings: [{ name: "Welcome", message: "Welcome, {user}!" }],
+        features: {
+          chat: true,
+          replyModeration: true,
+          greetings: true,
+          activityMetrics: true,
+        },
+      }),
+    );
+    expect(setEnabled).toHaveBeenCalledWith(true);
+    expect(saveSettings.mock.invocationCallOrder[0]).toBeLessThan(
+      setEnabled.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+    expect(persisted).toMatchObject({
+      enabled: true,
+      reviewRequired: false,
+      greetings: [{ name: "Welcome", message: "Welcome, {user}!" }],
+      features: {
+        chat: true,
+        replyModeration: true,
+        greetings: true,
+        activityMetrics: true,
+      },
+    });
+    expect(editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("default **Welcome**"),
+      }),
+    );
+  });
+
+  it("preserves existing greetings without adding a default", async () => {
+    const settings = createDefaultGuildSettings();
+    const existingGreetings = [
+      { name: "Custom", message: "Hello there, {user}." },
+      { name: "Brief", message: "Welcome aboard." },
+    ];
+    settings.greetings = structuredClone(existingGreetings);
+    let saved: GuildSettings | null = null;
+    const saveSettings = vi.fn(async (next: GuildSettings) => {
+      saved = structuredClone(next);
+      return next;
+    });
     const setEnabled = vi.fn(async () => settings);
     const guildRuntime = {
       guildId: GUILD_ID,
@@ -146,27 +220,21 @@ describe("active-only setup behavior", () => {
       guild: { id: GUILD_ID },
     } as never);
 
-    expect(saveSettings).toHaveBeenCalledWith(
-      expect.objectContaining({
-        features: {
-          chat: true,
-          replyModeration: true,
-          greetings: true,
-          activityMetrics: true,
-        },
-      }),
-    );
+    expect(saved).not.toBeNull();
+    expect(saved!.greetings).toEqual(existingGreetings);
+    expect(saved!.greetings).toHaveLength(existingGreetings.length);
     expect(setEnabled).toHaveBeenCalledWith(true);
-    expect(saveSettings.mock.invocationCallOrder[0]).toBeLessThan(
-      setEnabled.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
-    );
   });
 
-  it("leaves settings unchanged when enable-all validation fails", async () => {
+  it("leaves settings unchanged when enable-all preflight validation fails", async () => {
     const settings = createDefaultGuildSettings();
+    settings.timezone = "Mars/Olympus_Mons";
+    settings.limits.bulkModerationTargetCap = 0;
+    settings.channels.log = "323456789012345678";
+    const original = structuredClone(settings);
     const saveSettings = vi.fn();
     const setEnabled = vi.fn();
-    const editReply = vi.fn(async () => undefined);
+    const editReply = vi.fn(async (_payload: unknown) => undefined);
     const guildRuntime = {
       guildId: GUILD_ID,
       settings,
@@ -174,7 +242,10 @@ describe("active-only setup behavior", () => {
       setEnabled,
     } as unknown as GuildRuntime;
     const interaction = {
-      guild: { id: GUILD_ID },
+      guild: {
+        id: GUILD_ID,
+        channels: { fetch: vi.fn(async () => null) },
+      },
       guildId: GUILD_ID,
       options: { getSubcommand: vi.fn(() => "enable-all") },
       deferred: true,
@@ -189,13 +260,16 @@ describe("active-only setup behavior", () => {
 
     expect(saveSettings).not.toHaveBeenCalled();
     expect(setEnabled).not.toHaveBeenCalled();
-    expect(editReply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringContaining(
-          "Greetings are enabled but no greeting profile exists.",
-        ),
-      }),
+    expect(settings).toEqual(original);
+    const failure = editReply.mock.calls[0]?.[0] as { content: string };
+    expect(failure.content).toContain("Timezone is invalid.");
+    expect(failure.content).toContain(
+      "Bulk moderation target cap must be between 1 and 1000.",
     );
+    expect(failure.content).toContain(
+      "The configured log channel is unavailable.",
+    );
+    expect(failure.content).toContain("Nothing changed");
   });
 
   it("stores greeting profiles without a fixed user and explains dynamic {user}", async () => {
