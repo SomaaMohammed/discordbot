@@ -1,0 +1,32 @@
+import {
+  GUILD_CAPABILITIES,
+  type GuildCapability,
+  type RoleCapabilityGrant,
+} from "../types.js";
+
+export { GUILD_CAPABILITIES };
+export type { GuildCapability, RoleCapabilityGrant };
+
+export const CAPABILITY_DESCRIPTIONS: Readonly<
+  Record<GuildCapability, string>
+> = Object.freeze({
+  "panels.manage": "Post and refresh Superior panels",
+  "tickets.configure": "Configure ticket departments and launchers",
+  "tickets.manage": "Manage and recover ticket contents",
+  "suggestions.configure": "Configure the suggestion service",
+  "suggestions.review": "Review and decide suggestions",
+  "applications.configure": "Configure staff application forms",
+  "applications.review": "Review and decide staff applications",
+});
+
+export const CAPABILITY_CHOICES = GUILD_CAPABILITIES.map((capability) => ({
+  name: capability,
+  value: capability,
+}));
+
+export function isGuildCapability(value: unknown): value is GuildCapability {
+  return (
+    typeof value === "string" &&
+    (GUILD_CAPABILITIES as readonly string[]).includes(value)
+  );
+}

@@ -7,6 +7,7 @@ import {
   type ChatInputCommandInteraction,
   type Interaction,
   type ModalSubmitInteraction,
+  type StringSelectMenuInteraction,
 } from "discord.js";
 import {
   buildCommandDefinitions,
@@ -14,6 +15,7 @@ import {
   handleButtonInteraction,
   handleChatInputCommand,
   handleModalSubmitInteraction,
+  handleStringSelectMenuInteraction,
 } from "./commands.js";
 import { logError, logInfo } from "../logging.js";
 import { wireMessageRuntime } from "../message-runtime.js";
@@ -229,10 +231,10 @@ export function createDiscordClient(runtime: BotRuntime): Client {
     return workTracker
       .run(async () => {
         try {
-          recordGuildUnavailable(runtime, guild.id);
+          recordGuildRemoved(runtime, guild.id);
           logInfo(
             "discord-lifecycle",
-            "Guild marked inactive; retained data preserved",
+            "Confirmed guild removal purged stored tenant data",
             {
               guildId: guild.id,
               guildName: guild.name,
@@ -274,6 +276,10 @@ export function createDiscordClient(runtime: BotRuntime): Client {
         }
         if (interaction.isModalSubmit()) {
           await handleModalInteraction(interaction, runtime);
+          return;
+        }
+        if (interaction.isStringSelectMenu()) {
+          await handleStringSelectInteraction(interaction, runtime);
         }
       })
       .catch((error) => {
@@ -348,6 +354,22 @@ export function recordGuildUnavailable(
   clearModerationProcessState(guildId);
   clearPanelProcessState(guildId);
   runtime.invalidateGuild(guildId);
+}
+
+export function recordGuildRemoved(
+  runtime: BotRuntime,
+  guildId: string,
+): ReturnType<BotRuntime["storage"]["purgeGuildData"]> {
+  // Invalidate first so work that crossed an asynchronous boundary cannot
+  // persist more tenant data while the confirmed removal is being purged.
+  runtime.invalidateGuild(guildId);
+  try {
+    return runtime.storage.purgeGuildData(guildId);
+  } finally {
+    clearBackfillStatus(guildId);
+    clearModerationProcessState(guildId);
+    clearPanelProcessState(guildId);
+  }
 }
 
 async function handleAutocompleteComponentInteraction(
@@ -426,9 +448,31 @@ async function handleModalInteraction(
   }
 }
 
+async function handleStringSelectInteraction(
+  interaction: StringSelectMenuInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
+  try {
+    await handleStringSelectMenuInteraction(interaction, runtime);
+  } catch (error) {
+    logError("interaction", "Select-menu interaction failed", {
+      guildId: interaction.guildId ?? "dm",
+      customId: interaction.customId,
+      error,
+    });
+    await replyWithUnexpectedError(
+      interaction,
+      "That interaction failed unexpectedly and was logged.",
+    );
+  }
+}
+
 async function replyWithUnexpectedError(
   interaction:
-    ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction,
+    | ChatInputCommandInteraction
+    | ButtonInteraction
+    | ModalSubmitInteraction
+    | StringSelectMenuInteraction,
   content: string,
 ): Promise<void> {
   if (interaction.deferred && !interaction.replied) {

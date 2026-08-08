@@ -4,14 +4,22 @@ import { createDefaultGuildSettings } from "../src/guild-settings.js";
 import type { BotRuntime, GuildRuntime } from "../src/runtime.js";
 import { BotStorage, type GuildStorage } from "../src/storage/db.js";
 import { createOpaqueStorageId } from "../src/storage/operational-repository.js";
+import type { RoleCapabilityGrant } from "../src/types.js";
 import { handleChatInputCommand } from "../src/discord/commands.js";
 import { buildTicketCommandDefinition } from "../src/discord/ticket-command.js";
-import { handleTicketCommand } from "../src/discord/ticket-commands-handler.js";
+import {
+  handleTicketCommand,
+  handleTicketRecoveryCommand,
+} from "../src/discord/ticket-commands-handler.js";
 import {
   handleTicketButton,
   handleTicketModal,
+  handleTicketSelect,
 } from "../src/discord/ticket-interactions.js";
-import { ticketChannelRecoveryMarker } from "../src/discord/ticket-permissions.js";
+import {
+  inspectTicketManagerRoles,
+  ticketChannelRecoveryMarker,
+} from "../src/discord/ticket-permissions.js";
 
 const GUILD_ID = "111111111111111111";
 const OWNER_ID = "222222222222222222";
@@ -32,6 +40,8 @@ const RECOVERY_CHANNEL_B = "191919191919191919";
 const RECOVERY_CONTROL_A = "202020202020202020";
 const RECOVERY_CONTROL_B = "212121212121212121";
 const NEW_SUPPORT_ROLE_ID = "232323232323232323";
+const TICKET_MANAGER_ROLE_ID = "252525252525252525";
+const MANUAL_CHANNEL_ROLE_ID = "262626262626262626";
 
 const openStorages: BotStorage[] = [];
 
@@ -231,7 +241,14 @@ function createHarness(
   guild.members = {
     me: botMember,
     fetchMe: vi.fn(async () => botMember),
-    fetch: vi.fn(async (id: string) => members.get(id) ?? null),
+    fetch: vi.fn(
+      async (
+        input: string | { user: string; cache?: boolean; force?: boolean },
+      ) => {
+        const id = typeof input === "string" ? input : input.user;
+        return members.get(id) ?? null;
+      },
+    ),
   };
 
   storage.upsertTicketConfiguration({
@@ -336,6 +353,30 @@ function createActiveTicket(
   return activated.ticket;
 }
 
+function createEnabledTicketDepartment(
+  harness: Harness,
+  options: {
+    slug?: string;
+    displayName?: string;
+    description?: string;
+    supportRoleId?: string;
+    sortOrder?: number;
+  } = {},
+) {
+  return harness.storage.createTicketDepartment({
+    slug: options.slug ?? "billing-support",
+    displayName: options.displayName ?? "Billing Support",
+    description:
+      options.description ?? "Questions about billing and subscriptions.",
+    categoryId: CATEGORY_ID,
+    logChannelId: LOG_CHANNEL_ID,
+    supportRoleId: options.supportRoleId ?? SUPPORT_ROLE_ID,
+    enabled: true,
+    sortOrder: options.sortOrder ?? 1,
+    bindingsVerifiedAt: "2026-08-01T00:00:00.000Z",
+  });
+}
+
 function createTicketButtonInteraction(
   harness: Harness,
   customId: string,
@@ -368,10 +409,15 @@ function createTicketButtonInteraction(
   return interaction;
 }
 
-function createRecoveryInteraction(harness: Harness, ticketNumber: number) {
+function createRecoveryInteraction(
+  harness: Harness,
+  ticketNumber: number,
+  userId = STAFF_A_ID,
+) {
   return {
     guild: harness.guild,
     guildId: GUILD_ID,
+    user: { id: userId },
     options: {
       getSubcommand: vi.fn(() => "recover"),
       getInteger: vi.fn(() => ticketNumber),
@@ -381,6 +427,23 @@ function createRecoveryInteraction(harness: Harness, ticketNumber: number) {
     reply: vi.fn(async () => undefined),
     editReply: vi.fn(async () => undefined),
     followUp: vi.fn(async () => undefined),
+  };
+}
+
+function readUtf8ResponseAttachment(payload: unknown): {
+  name: string | null;
+  buffer: Buffer;
+  text: string;
+} {
+  const files = (payload as { files?: Array<Record<string, unknown>> }).files;
+  expect(files).toHaveLength(1);
+  const file = files?.[0];
+  expect(Buffer.isBuffer(file?.attachment)).toBe(true);
+  const buffer = file!.attachment as Buffer;
+  return {
+    name: typeof file!.name === "string" ? file!.name : null,
+    buffer,
+    text: buffer.toString("utf8"),
   };
 }
 
@@ -406,8 +469,22 @@ function createRecoveredChannel(
   return { channel, controlDelete };
 }
 
+function ticketManagerGrant(roleId: string): RoleCapabilityGrant {
+  return {
+    guildId: GUILD_ID,
+    principalType: "role",
+    principalId: roleId,
+    roleId,
+    capability: "tickets.manage",
+    active: true,
+    grantedBy: OWNER_ID,
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T00:00:00.000Z",
+  };
+}
+
 describe("ticket command definition", () => {
-  it("registers a bounded guild-only setup, status, panel, disable, and recovery surface", () => {
+  it("registers the bounded guild-only ticket administration surface", () => {
     const command = buildTicketCommandDefinition().toJSON();
     const options = command.options as
       | Array<{
@@ -420,12 +497,15 @@ describe("ticket command definition", () => {
         }>
       | undefined;
     expect(command.dm_permission).toBe(false);
+    expect(command.default_member_permissions).toBeUndefined();
     expect(options?.map(({ name }) => name)).toEqual([
       "setup",
       "status",
       "panel",
       "disable",
       "recover",
+      "department",
+      "field",
     ]);
     expect(
       options?.every((option) => (option.options?.length ?? 0) <= 25),
@@ -438,7 +518,500 @@ describe("ticket command definition", () => {
   });
 });
 
+describe("delegated ticket-manager role inspection", () => {
+  it("continues past a full page of deleted roles to find live grants", async () => {
+    const grants = Array.from({ length: 101 }, (_, index) =>
+      ticketManagerGrant((600_000_000_000_000_000n + BigInt(index)).toString()),
+    );
+    const liveRoleId = grants[100]!.roleId;
+    const guild: Record<string, any> = { id: GUILD_ID };
+    const liveRole = {
+      id: liveRoleId,
+      name: "Live ticket manager",
+      guild,
+      managed: false,
+    };
+    const roleFetch = vi.fn(async (roleId: string) =>
+      roleId === liveRoleId ? liveRole : null,
+    );
+    guild.roles = { fetch: roleFetch };
+    const listCapabilityGrantsForCapability = vi.fn(
+      (_capability: string, limit = 100, offset = 0) =>
+        grants.slice(offset, offset + limit),
+    );
+
+    const result = await inspectTicketManagerRoles(guild as never, {
+      listCapabilityGrantsForCapability,
+    });
+
+    expect(result).toEqual({ roles: [liveRole], issues: [] });
+    expect(
+      listCapabilityGrantsForCapability.mock.calls.map((call) => call.slice(1)),
+    ).toEqual([
+      [100, 0],
+      [100, 100],
+    ]);
+    expect(roleFetch).toHaveBeenCalledTimes(101);
+  });
+
+  it("bounds concurrent Discord role probes to fixed-size batches", async () => {
+    const grants = Array.from({ length: 60 }, (_, index) =>
+      ticketManagerGrant((700_000_000_000_000_000n + BigInt(index)).toString()),
+    );
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const roleFetch = vi.fn(async () => {
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      await Promise.resolve();
+      inFlight -= 1;
+      return null;
+    });
+    const guild = { id: GUILD_ID, roles: { fetch: roleFetch } };
+
+    const result = await inspectTicketManagerRoles(guild as never, {
+      listCapabilityGrantsForCapability: (
+        _capability,
+        limit = 100,
+        offset = 0,
+      ) => grants.slice(offset, offset + limit),
+    });
+
+    expect(result).toEqual({ roles: [], issues: [] });
+    expect(peakInFlight).toBe(25);
+    expect(roleFetch).toHaveBeenCalledTimes(60);
+  });
+
+  it("fails closed after the bounded grant scan ceiling", async () => {
+    const grants = Array.from({ length: 1_001 }, (_, index) =>
+      ticketManagerGrant((800_000_000_000_000_000n + BigInt(index)).toString()),
+    );
+    const roleFetch = vi.fn();
+    const guild = { id: GUILD_ID, roles: { fetch: roleFetch } };
+    const listCapabilityGrantsForCapability = vi.fn(
+      (_capability: string, limit = 100, offset = 0) =>
+        grants.slice(offset, offset + limit),
+    );
+
+    const result = await inspectTicketManagerRoles(guild as never, {
+      listCapabilityGrantsForCapability,
+    });
+
+    expect(result.roles).toEqual([]);
+    expect(result.issues.join(" ")).toContain("more than 1000");
+    expect(roleFetch).not.toHaveBeenCalled();
+    expect(listCapabilityGrantsForCapability).toHaveBeenLastCalledWith(
+      "tickets.manage",
+      1,
+      1_000,
+    );
+  });
+});
+
+describe("department ticket workflow", () => {
+  it("uses an ephemeral selector while freshly verifying the stored launcher", async () => {
+    const harness = createHarness();
+    const department = createEnabledTicketDepartment(harness);
+    expect(harness.storage.countTicketDepartments()).toBe(2);
+    const open = createTicketButtonInteraction(
+      harness,
+      `superior:ticket:open:${harness.panelId}`,
+      OPENER_ID,
+      { channelId: PANEL_CHANNEL_ID, messageId: PANEL_MESSAGE_ID },
+    );
+
+    await handleTicketButton(open as never, harness.runtime);
+
+    expect(open.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("Choose"),
+        ephemeral: true,
+        allowedMentions: { parse: [] },
+      }),
+    );
+    const select = {
+      customId: `superior:ticket:select:${harness.panelId}`,
+      guild: harness.guild,
+      guildId: GUILD_ID,
+      channelId: PANEL_CHANNEL_ID,
+      user: { id: OPENER_ID },
+      client: interactionClient(harness),
+      message: {
+        id: "242424242424242424",
+        author: { id: BOT_ID },
+      },
+      values: [department.departmentId],
+      deferred: false,
+      replied: false,
+      showModal: vi.fn(async (_modal: unknown) => undefined),
+      reply: vi.fn(async () => undefined),
+      editReply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+
+    await handleTicketSelect(select as never, harness.runtime);
+
+    expect(select.message.id).not.toBe(PANEL_MESSAGE_ID);
+    expect(harness.panelChannel.messages.fetch).toHaveBeenCalledWith(
+      PANEL_MESSAGE_ID,
+    );
+    expect(select.showModal).toHaveBeenCalledTimes(1);
+    const shownModal = select.showModal.mock.calls[0]?.[0] as
+      { toJSON(): unknown } | undefined;
+    expect(shownModal?.toJSON()).toMatchObject({
+      custom_id: `superior:ticket:open-modal:${harness.panelId}:${department.departmentId}:${department.definitionVersion}`,
+    });
+  });
+
+  it("rejects a department that was disabled after selection", async () => {
+    const harness = createHarness();
+    const department = createEnabledTicketDepartment(harness);
+    harness.storage.setTicketDepartmentEnabled(department.departmentId, false);
+    const select = {
+      customId: `superior:ticket:select:${harness.panelId}`,
+      guild: harness.guild,
+      guildId: GUILD_ID,
+      channelId: PANEL_CHANNEL_ID,
+      user: { id: OPENER_ID },
+      client: interactionClient(harness),
+      message: {
+        id: "242424242424242424",
+        author: { id: BOT_ID },
+      },
+      values: [department.departmentId],
+      deferred: false,
+      replied: false,
+      showModal: vi.fn(async (_modal: unknown) => undefined),
+      reply: vi.fn(async () => undefined),
+      editReply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+
+    await handleTicketSelect(select as never, harness.runtime);
+
+    expect(select.showModal).not.toHaveBeenCalled();
+    expect(select.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("disabled") }),
+    );
+  });
+
+  it("persists the selected department and its form-response snapshot", async () => {
+    const harness = createHarness();
+    const created = createEnabledTicketDepartment(harness);
+    const field = harness.storage.upsertTicketDepartmentField(
+      created.departmentId,
+      {
+        fieldId: "Field_ABC1",
+        label: "What do you need?",
+        fieldType: "paragraph",
+        required: true,
+        minLength: 3,
+        maxLength: 500,
+        sortOrder: 0,
+      },
+    );
+    const department = harness.storage.getTicketDepartment(
+      created.departmentId,
+    )!;
+    const interaction = createModalInteraction(
+      harness,
+      `superior:ticket:open-modal:${harness.panelId}:${department.departmentId}:${department.definitionVersion}`,
+      OPENER_ID,
+      PANEL_CHANNEL_ID,
+      { [field.fieldId]: "Please correct the duplicate charge." },
+    );
+
+    await handleTicketModal(interaction as never, harness.runtime);
+
+    const ticket = harness.storage.getTicketByOpener(OPENER_ID)!;
+    expect(ticket).toMatchObject({
+      departmentId: department.departmentId,
+      subject: "Please correct the duplicate charge.",
+      state: "open",
+    });
+    expect(harness.storage.listTicketResponses(ticket.ticketId)).toEqual([
+      expect.objectContaining({
+        fieldId: field.fieldId,
+        fieldLabel: "What do you need?",
+        responseText: "Please correct the duplicate charge.",
+        sortOrder: 0,
+      }),
+    ]);
+  });
+
+  it("delivers five complete 4,000-character answers in introduction and Info attachments", async () => {
+    const harness = createHarness();
+    const created = createEnabledTicketDepartment(harness);
+    const fields = Array.from({ length: 5 }, (_, index) =>
+      harness.storage.upsertTicketDepartmentField(created.departmentId, {
+        fieldId: `Field_000${index}`,
+        label: `Maximum answer ${index + 1}`,
+        fieldType: "paragraph",
+        required: true,
+        minLength: 1,
+        maxLength: 4_000,
+        sortOrder: index,
+      }),
+    );
+    const responseTails = fields.map(
+      (_, index) => `TAIL-${index + 1}-@everyone`,
+    );
+    const responses = Object.fromEntries(
+      fields.map((field, index) => {
+        const prefix = `@everyone answer ${index + 1}: `;
+        const tail = responseTails[index]!;
+        return [
+          field.fieldId,
+          `${prefix}${String(index).repeat(4_000 - prefix.length - tail.length)}${tail}`,
+        ];
+      }),
+    );
+    expect(Object.values(responses).map((value) => value.length)).toEqual(
+      Array(5).fill(4_000),
+    );
+    const department = harness.storage.getTicketDepartment(
+      created.departmentId,
+    )!;
+    const submission = createModalInteraction(
+      harness,
+      `superior:ticket:open-modal:${harness.panelId}:${department.departmentId}:${department.definitionVersion}`,
+      OPENER_ID,
+      PANEL_CHANNEL_ID,
+      responses,
+    );
+
+    await handleTicketModal(submission as never, harness.runtime);
+
+    const ticket = harness.storage.getTicketByOpener(OPENER_ID);
+    expect(
+      ticket,
+      JSON.stringify({
+        reply: submission.reply.mock.calls,
+        editReply: submission.editReply.mock.calls,
+        followUp: submission.followUp.mock.calls,
+      }),
+    ).not.toBeNull();
+    if (!ticket) throw new Error("ticket creation failed");
+    expect(harness.storage.listTicketResponses(ticket.ticketId)).toHaveLength(
+      5,
+    );
+    const introductionPayload = harness.ticketChannel.send.mock.calls[0]?.[0];
+    expect(introductionPayload).toMatchObject({
+      allowedMentions: { parse: [] },
+    });
+    const introduction = readUtf8ResponseAttachment(introductionPayload);
+    expect(introduction.name).toBe(
+      `superior-ticket-${ticket.ticketNumber}-responses.txt`,
+    );
+    for (const response of Object.values(responses)) {
+      expect(introduction.text).toContain(response);
+    }
+    expect(introduction.text).toContain(
+      responses[fields[4]!.fieldId]!.slice(-64),
+    );
+
+    const info = createTicketButtonInteraction(
+      harness,
+      `superior:ticket:info:${ticket.ticketId}`,
+      OPENER_ID,
+    );
+    await handleTicketButton(info as never, harness.runtime);
+
+    const infoPayload = info.editReply.mock.calls[0]?.[0];
+    expect(infoPayload).toMatchObject({ allowedMentions: { parse: [] } });
+    const infoAttachment = readUtf8ResponseAttachment(infoPayload);
+    expect(infoAttachment.name).toBe(introduction.name);
+    expect(infoAttachment.buffer.equals(introduction.buffer)).toBe(true);
+    expect(infoAttachment.text).toContain(
+      responses[fields[4]!.fieldId]!.slice(-64),
+    );
+  });
+
+  it("rejects a modal submitted after its department definition changes", async () => {
+    const harness = createHarness();
+    const created = createEnabledTicketDepartment(harness);
+    const originalVersion = created.definitionVersion;
+    const field = harness.storage.upsertTicketDepartmentField(
+      created.departmentId,
+      {
+        label: "Request details",
+        fieldType: "paragraph",
+        required: true,
+        minLength: 3,
+        maxLength: 500,
+        sortOrder: 0,
+      },
+    );
+    const interaction = createModalInteraction(
+      harness,
+      `superior:ticket:open-modal:${harness.panelId}:${created.departmentId}:${originalVersion}`,
+      OPENER_ID,
+      PANEL_CHANNEL_ID,
+      { [field.fieldId]: "A current response" },
+    );
+
+    await handleTicketModal(interaction as never, harness.runtime);
+
+    expect(harness.createChannel).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("changed") }),
+    );
+  });
+
+  it("scopes support-role authorization to the ticket department", async () => {
+    const harness = createHarness();
+    const departmentRole = {
+      id: NEW_SUPPORT_ROLE_ID,
+      name: "Billing Support",
+      guild: harness.guild,
+      managed: false,
+    };
+    harness.guild.roles.cache.set(NEW_SUPPORT_ROLE_ID, departmentRole);
+    harness.guild.roles.fetch.mockImplementation(async (id: string) => {
+      if (id === NEW_SUPPORT_ROLE_ID) return departmentRole;
+      if (id === SUPPORT_ROLE_ID) return harness.supportRole;
+      return null;
+    });
+    harness.staffB.roles.cache = new Map([
+      [NEW_SUPPORT_ROLE_ID, departmentRole],
+    ]);
+    const department = createEnabledTicketDepartment(harness, {
+      supportRoleId: NEW_SUPPORT_ROLE_ID,
+    });
+    const reserved = harness.storage.reserveTicketCreation({
+      departmentId: department.departmentId,
+      openerId: OPENER_ID,
+      subject: "Duplicate charge",
+      description: "Please review the latest invoice.",
+    });
+    if (reserved.status !== "created") throw new Error("expected reservation");
+    const activated = harness.storage.activateTicketCreation(
+      reserved.ticket.ticketId,
+      { channelId: TICKET_CHANNEL_ID, controlMessageId: CONTROL_MESSAGE_ID },
+    );
+    if (activated.status !== "activated")
+      throw new Error("expected activation");
+    const wrongDepartment = createTicketButtonInteraction(
+      harness,
+      `superior:ticket:claim:${activated.ticket.ticketId}`,
+      STAFF_A_ID,
+    );
+    const correctDepartment = createTicketButtonInteraction(
+      harness,
+      `superior:ticket:claim:${activated.ticket.ticketId}`,
+      STAFF_B_ID,
+    );
+
+    await handleTicketButton(wrongDepartment as never, harness.runtime);
+    await handleTicketButton(correctDepartment as never, harness.runtime);
+
+    expect(wrongDepartment.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("department's support role"),
+      }),
+    );
+    expect(
+      harness.storage.getTicketById(activated.ticket.ticketId),
+    ).toMatchObject({ claimedBy: STAFF_B_ID });
+  });
+});
+
 describe("ticket interaction workflow", () => {
+  it("does not let a configure-only support member reactivate imported compatibility bindings", async () => {
+    const harness = createHarness();
+    const configuration = harness.storage.getTicketConfiguration()!;
+    const department = harness.storage.getTicketDepartment(
+      configuration.departmentId!,
+    )!;
+    harness.storage.updateTicketDepartment(department.departmentId, {
+      enabled: false,
+      bindingsVerifiedAt: null,
+    });
+    const interaction: Record<string, any> = {
+      guild: harness.guild,
+      guildId: GUILD_ID,
+      options: {
+        getSubcommand: vi.fn(() => "setup"),
+        getChannel: vi.fn((name: string) =>
+          name === "category" ? harness.category : harness.logChannel,
+        ),
+        getRole: vi.fn(() => harness.supportRole),
+      },
+      deferred: false,
+      replied: false,
+      reply: vi.fn(async () => undefined),
+      editReply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+
+    await handleTicketCommand(
+      interaction as never,
+      harness.runtime,
+      harness.staffA as never,
+    );
+
+    expect(
+      harness.storage.getTicketDepartment(department.departmentId),
+    ).toMatchObject({
+      enabled: false,
+      bindingsVerifiedAt: null,
+    });
+    expect(harness.runtime.invalidate).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("cannot select"),
+      }),
+    );
+  });
+
+  it("prevents a configure-only delegate from rotating support access to a role they hold", async () => {
+    const harness = createHarness();
+    const replacementRole = {
+      id: NEW_SUPPORT_ROLE_ID,
+      name: "Escalations",
+      guild: harness.guild,
+      managed: false,
+    };
+    harness.guild.roles.cache.set(NEW_SUPPORT_ROLE_ID, replacementRole);
+    harness.guild.roles.fetch.mockImplementation(async (id: string) => {
+      if (id === SUPPORT_ROLE_ID) return harness.supportRole;
+      if (id === NEW_SUPPORT_ROLE_ID) return replacementRole;
+      return null;
+    });
+    harness.staffA.roles.cache.set(NEW_SUPPORT_ROLE_ID, replacementRole);
+    const interaction: Record<string, any> = {
+      guild: harness.guild,
+      guildId: GUILD_ID,
+      options: {
+        getSubcommand: vi.fn(() => "setup"),
+        getChannel: vi.fn((name: string) =>
+          name === "category" ? harness.category : harness.logChannel,
+        ),
+        getRole: vi.fn(() => replacementRole),
+      },
+      deferred: false,
+      replied: false,
+      reply: vi.fn(async () => undefined),
+      editReply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+
+    await handleTicketCommand(
+      interaction as never,
+      harness.runtime,
+      harness.staffA as never,
+    );
+
+    expect(harness.storage.getTicketConfiguration()).toMatchObject({
+      supportRoleId: SUPPORT_ROLE_ID,
+    });
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/tickets\.configure.*ticket-content/i),
+      }),
+    );
+  });
+
   it("refuses category or support-role rotation while tickets are active", async () => {
     const harness = createHarness();
     createActiveTicket(harness);
@@ -448,6 +1021,10 @@ describe("ticket interaction workflow", () => {
       guild: harness.guild,
       managed: false,
     };
+    harness.guild.roles.cache.set(NEW_SUPPORT_ROLE_ID, replacementRole);
+    harness.guild.roles.fetch.mockImplementation(
+      async (id: string) => harness.guild.roles.cache.get(id) ?? null,
+    );
     const interaction: Record<string, any> = {
       guild: harness.guild,
       guildId: GUILD_ID,
@@ -534,9 +1111,10 @@ describe("ticket interaction workflow", () => {
       guild: harness.guild,
       managed: false,
     };
-    harness.guild.roles.fetch.mockRejectedValueOnce(
-      new Error("synthetic Discord role lookup outage"),
-    );
+    harness.guild.roles.cache.set(NEW_SUPPORT_ROLE_ID, replacementRole);
+    harness.guild.roles.fetch
+      .mockResolvedValueOnce(replacementRole)
+      .mockRejectedValueOnce(new Error("synthetic Discord role lookup outage"));
     const interaction: Record<string, any> = {
       guild: harness.guild,
       guildId: GUILD_ID,
@@ -571,7 +1149,7 @@ describe("ticket interaction workflow", () => {
     );
   });
 
-  it("allows a log-channel-only update while tickets are active", async () => {
+  it("refuses a log-channel-only update while tickets are active", async () => {
     const harness = createHarness();
     createActiveTicket(harness);
     const interaction: Record<string, any> = {
@@ -600,9 +1178,12 @@ describe("ticket interaction workflow", () => {
     expect(harness.storage.getTicketConfiguration()).toMatchObject({
       categoryId: CATEGORY_ID,
       supportRoleId: SUPPORT_ROLE_ID,
-      logChannelId: PANEL_CHANNEL_ID,
+      logChannelId: LOG_CHANNEL_ID,
     });
-    expect(harness.runtime.invalidate).toHaveBeenCalledTimes(1);
+    expect(harness.runtime.invalidate).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("active") }),
+    );
   });
 
   it("does not disable a newer ticket configuration from a stale runtime", async () => {
@@ -677,6 +1258,47 @@ describe("ticket interaction workflow", () => {
     );
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining("is ready") }),
+    );
+  });
+
+  it("adds every verified tickets.manage delegate to a new private ticket", async () => {
+    const harness = createHarness();
+    const managerRole = {
+      id: TICKET_MANAGER_ROLE_ID,
+      name: "Ticket Managers",
+      guild: harness.guild,
+      managed: false,
+    };
+    harness.guild.roles.cache.set(TICKET_MANAGER_ROLE_ID, managerRole);
+    harness.guild.roles.fetch.mockImplementation(async (id: string) => {
+      if (id === SUPPORT_ROLE_ID) return harness.supportRole;
+      if (id === TICKET_MANAGER_ROLE_ID) return managerRole;
+      return null;
+    });
+    harness.storage.grantRoleCapability(
+      TICKET_MANAGER_ROLE_ID,
+      "tickets.manage",
+      OWNER_ID,
+    );
+    const interaction = createModalInteraction(
+      harness,
+      `superior:ticket:open-modal:${harness.panelId}`,
+      OPENER_ID,
+      PANEL_CHANNEL_ID,
+      { subject: "Login issue", description: "I cannot sign in." },
+    );
+
+    await handleTicketModal(interaction as never, harness.runtime);
+
+    expect(harness.createChannel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        topic: expect.stringContaining(
+          `superior-acl:${TICKET_MANAGER_ROLE_ID},${SUPPORT_ROLE_ID}`,
+        ),
+        permissionOverwrites: expect.arrayContaining([
+          expect.objectContaining({ id: TICKET_MANAGER_ROLE_ID }),
+        ]),
+      }),
     );
   });
 
@@ -868,13 +1490,16 @@ describe("ticket interaction workflow", () => {
     (harness.runtime.isCurrent as ReturnType<typeof vi.fn>).mockImplementation(
       () => current,
     );
-    harness.guild.members.fetch.mockImplementation(async (id: string) => {
-      if (id === OPENER_ID) {
-        current = false;
-        return harness.opener;
-      }
-      return null;
-    });
+    harness.guild.members.fetch.mockImplementation(
+      async (input: string | { user: string }) => {
+        const id = typeof input === "string" ? input : input.user;
+        if (id === OPENER_ID) {
+          current = false;
+          return harness.opener;
+        }
+        return null;
+      },
+    );
     const interaction = createTicketButtonInteraction(
       harness,
       `superior:ticket:info:${ticket.ticketId}`,
@@ -1311,6 +1936,96 @@ describe("ticket interaction workflow", () => {
     );
   });
 
+  it("blocks a checkpointed close modal until imported department bindings are verified", async () => {
+    const harness = createHarness();
+    const ticket = createActiveTicket(harness)!;
+    harness.storage.beginTicketClose(
+      ticket.ticketId,
+      STAFF_A_ID,
+      "Resolved before import",
+    );
+    harness.storage.markTicketLogDelivered(
+      ticket.ticketId,
+      "242424242424242424",
+    );
+    const department = harness.storage.getTicketDepartment(
+      ticket.departmentId,
+    )!;
+    harness.storage.updateTicketDepartment(department.departmentId, {
+      enabled: false,
+      bindingsVerifiedAt: null,
+    });
+    const interaction = createModalInteraction(
+      harness,
+      `superior:ticket:close-modal:${ticket.ticketId}`,
+      STAFF_A_ID,
+      TICKET_CHANNEL_ID,
+      { reason: "Resume" },
+    );
+
+    await handleTicketModal(interaction as never, harness.runtime);
+
+    expect(harness.storage.getTicketById(ticket.ticketId)).toMatchObject({
+      state: "closing",
+      closeLogMessageId: "242424242424242424",
+    });
+    expect(harness.ticketChannel.delete).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("binding verification"),
+      }),
+    );
+  });
+
+  it("authorizes the ticket department support role for recovery", async () => {
+    const harness = createHarness();
+    const ticket = createActiveTicket(harness)!;
+    const interaction = createRecoveryInteraction(
+      harness,
+      ticket.ticketNumber,
+      STAFF_A_ID,
+    );
+
+    await handleTicketRecoveryCommand(interaction as never, harness.runtime);
+
+    expect(harness.ticketControlEdit).toHaveBeenCalledTimes(1);
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("Refreshed"),
+      }),
+    );
+  });
+
+  it("does not let another department's support role probe ticket recovery", async () => {
+    const harness = createHarness();
+    const ticket = createActiveTicket(harness)!;
+    const otherRole = {
+      id: NEW_SUPPORT_ROLE_ID,
+      name: "Other Department",
+      guild: harness.guild,
+      managed: false,
+    };
+    harness.guild.roles.cache.set(NEW_SUPPORT_ROLE_ID, otherRole);
+    harness.guild.roles.fetch.mockImplementation(
+      async (id: string) => harness.guild.roles.cache.get(id) ?? null,
+    );
+    harness.staffB.roles.cache = new Map([[NEW_SUPPORT_ROLE_ID, otherRole]]);
+    const interaction = createRecoveryInteraction(
+      harness,
+      ticket.ticketNumber,
+      STAFF_B_ID,
+    );
+
+    await handleTicketRecoveryCommand(interaction as never, harness.runtime);
+
+    expect(harness.ticketControlEdit).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("not found or you are not authorized"),
+      }),
+    );
+  });
+
   it("recovers a missing channel as staff-only when the opener left", async () => {
     const harness = createHarness();
     const ticket = createActiveTicket(harness)!;
@@ -1320,11 +2035,14 @@ describe("ticket interaction workflow", () => {
       if (id === PANEL_CHANNEL_ID) return harness.panelChannel;
       return null;
     });
-    harness.guild.members.fetch.mockImplementation(async (id: string) => {
-      if (id === STAFF_A_ID) return harness.staffA;
-      if (id === BOT_ID) return harness.botMember;
-      return null;
-    });
+    harness.guild.members.fetch.mockImplementation(
+      async (input: string | { user: string }) => {
+        const id = typeof input === "string" ? input : input.user;
+        if (id === STAFF_A_ID) return harness.staffA;
+        if (id === BOT_ID) return harness.botMember;
+        return null;
+      },
+    );
     const interaction = createRecoveryInteraction(harness, ticket.ticketNumber);
 
     await handleTicketCommand(
@@ -1427,6 +2145,39 @@ describe("ticket interaction workflow", () => {
         content: expect.stringContaining("Refreshed"),
       }),
     );
+  });
+
+  it("removes stale bot-managed delegates while preserving manual overwrites", async () => {
+    const harness = createHarness();
+    const ticket = createActiveTicket(harness)!;
+    harness.ticketChannel.topic = `Superior ticket · ${ticketChannelRecoveryMarker(ticket.ticketId)} · superior-acl:${SUPPORT_ROLE_ID},${TICKET_MANAGER_ROLE_ID} · Existing`;
+    harness.ticketChannel.permissionOverwrites = {
+      cache: new Map([
+        [
+          TICKET_MANAGER_ROLE_ID,
+          { id: TICKET_MANAGER_ROLE_ID, type: 0, allow: [], deny: [] },
+        ],
+        [
+          MANUAL_CHANNEL_ROLE_ID,
+          { id: MANUAL_CHANNEL_ROLE_ID, type: 0, allow: [], deny: [] },
+        ],
+      ]),
+    };
+    const interaction = createRecoveryInteraction(harness, ticket.ticketNumber);
+
+    await handleTicketCommand(
+      interaction as never,
+      harness.runtime,
+      harness.staffA as never,
+    );
+
+    const edit = harness.ticketChannel.edit.mock.calls[0]?.[0];
+    const overwriteIds = edit.permissionOverwrites.map(
+      ({ id }: { id: string }) => id,
+    );
+    expect(overwriteIds).not.toContain(TICKET_MANAGER_ROLE_ID);
+    expect(overwriteIds).toContain(MANUAL_CHANNEL_ROLE_ID);
+    expect(overwriteIds).toContain(SUPPORT_ROLE_ID);
   });
 
   it("refreshes the tracked control instead of accumulating recovery messages", async () => {
@@ -1611,8 +2362,16 @@ describe("ticket interaction workflow", () => {
   it("does not remove opener access when member lookup fails transiently", async () => {
     const harness = createHarness();
     const ticket = createActiveTicket(harness)!;
-    harness.guild.members.fetch.mockRejectedValue(
-      new Error("synthetic Discord API outage"),
+    harness.guild.members.fetch.mockImplementation(
+      async (input: string | { user: string }) => {
+        const id = typeof input === "string" ? input : input.user;
+        if (id === STAFF_A_ID) return harness.staffA;
+        if (id === BOT_ID) return harness.botMember;
+        if (id === OPENER_ID) {
+          throw new Error("synthetic Discord API outage");
+        }
+        return null;
+      },
     );
     const interaction = createRecoveryInteraction(harness, ticket.ticketNumber);
 
@@ -1689,6 +2448,181 @@ describe("ticket interaction workflow", () => {
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("No channel"),
+      }),
+    );
+  });
+
+  it("rechecks support authorization before deleting a recovered closed channel", async () => {
+    const harness = createHarness();
+    const ticket = createActiveTicket(harness)!;
+    harness.storage.beginTicketClose(ticket.ticketId, STAFF_A_ID, "Resolved");
+    harness.storage.markTicketLogDelivered(
+      ticket.ticketId,
+      "252525252525252525",
+    );
+    harness.storage.finishTicketClose(ticket.ticketId);
+    const revokedMember = {
+      ...harness.staffA,
+      roles: {
+        ...harness.staffA.roles,
+        cache: new Map(),
+      },
+    };
+    let actorFetches = 0;
+    harness.guild.members.fetch.mockImplementation(
+      async (input: string | { user: string }) => {
+        const id = typeof input === "string" ? input : input.user;
+        if (id === STAFF_A_ID) {
+          actorFetches += 1;
+          return actorFetches === 1 ? harness.staffA : revokedMember;
+        }
+        if (id === BOT_ID) return harness.botMember;
+        if (id === OPENER_ID) return harness.opener;
+        return null;
+      },
+    );
+    const interaction = createRecoveryInteraction(harness, ticket.ticketNumber);
+
+    await handleTicketRecoveryCommand(interaction as never, harness.runtime);
+
+    expect(actorFetches).toBeGreaterThanOrEqual(2);
+    expect(harness.ticketChannel.delete).not.toHaveBeenCalled();
+    expect(harness.storage.getTicketById(ticket.ticketId)).toMatchObject({
+      state: "closed",
+      channelId: TICKET_CHANNEL_ID,
+    });
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("not found or you are not authorized"),
+      }),
+    );
+  });
+
+  it("preserves a recreated channel adopted by a competing recovery", async () => {
+    const harness = createHarness();
+    const ticket = createActiveTicket(harness)!;
+    harness.guild.channels.fetch.mockImplementation(async (id: string) => {
+      if (id === CATEGORY_ID) return harness.category;
+      if (id === LOG_CHANNEL_ID) return harness.logChannel;
+      if (id === PANEL_CHANNEL_ID) return harness.panelChannel;
+      return null;
+    });
+    const recovered = createRecoveredChannel(
+      harness,
+      RECOVERY_CHANNEL_A,
+      RECOVERY_CONTROL_A,
+    );
+    recovered.channel.send.mockImplementationOnce(async () => {
+      const adopted = harness.storage.rebindTicket(
+        ticket.ticketId,
+        {
+          channelId: RECOVERY_CHANNEL_A,
+          controlMessageId: RECOVERY_CONTROL_A,
+          expectedChannelId: TICKET_CHANNEL_ID,
+          expectedControlMessageId: CONTROL_MESSAGE_ID,
+          expectedState: ticket.state,
+          expectedUpdatedAt: ticket.updatedAt,
+        },
+        STAFF_B_ID,
+      );
+      expect(adopted.status).toBe("rebound");
+      return {
+        id: RECOVERY_CONTROL_A,
+        author: { id: BOT_ID },
+        delete: recovered.controlDelete,
+      };
+    });
+    harness.createChannel.mockResolvedValueOnce(recovered.channel);
+    const interaction = createRecoveryInteraction(harness, ticket.ticketNumber);
+
+    await handleTicketCommand(
+      interaction as never,
+      harness.runtime,
+      harness.staffA as never,
+    );
+
+    expect(recovered.channel.delete).not.toHaveBeenCalled();
+    expect(recovered.channel.edit).not.toHaveBeenCalled();
+    expect(recovered.controlDelete).not.toHaveBeenCalled();
+    expect(harness.storage.getTicketById(ticket.ticketId)).toMatchObject({
+      channelId: RECOVERY_CHANNEL_A,
+      controlMessageId: RECOVERY_CONTROL_A,
+    });
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("preserved"),
+      }),
+    );
+  });
+
+  it("repairs a pending-delete adoption after runtime invalidation", async () => {
+    const harness = createHarness();
+    const ticket = createActiveTicket(harness)!;
+    let current = true;
+    (harness.runtime.isCurrent as ReturnType<typeof vi.fn>).mockImplementation(
+      () => current,
+    );
+    harness.guild.channels.fetch.mockImplementation(async (id: string) => {
+      if (id === CATEGORY_ID) return harness.category;
+      if (id === LOG_CHANNEL_ID) return harness.logChannel;
+      if (id === PANEL_CHANNEL_ID) return harness.panelChannel;
+      return null;
+    });
+    const recovered = createRecoveredChannel(
+      harness,
+      RECOVERY_CHANNEL_A,
+      RECOVERY_CONTROL_A,
+    );
+    recovered.channel.send.mockRejectedValueOnce(
+      new Error("synthetic control delivery failure"),
+    );
+    let markDeleteStarted!: () => void;
+    let releaseDelete!: () => void;
+    const deleteStarted = new Promise<void>((resolve) => {
+      markDeleteStarted = resolve;
+    });
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    recovered.channel.delete.mockImplementationOnce(async () => {
+      markDeleteStarted();
+      await deleteGate;
+    });
+    harness.createChannel.mockResolvedValueOnce(recovered.channel);
+    const interaction = createRecoveryInteraction(harness, ticket.ticketNumber);
+
+    const recovery = handleTicketCommand(
+      interaction as never,
+      harness.runtime,
+      harness.staffA as never,
+    );
+    await deleteStarted;
+    const adopted = harness.storage.rebindTicket(
+      ticket.ticketId,
+      {
+        channelId: RECOVERY_CHANNEL_A,
+        controlMessageId: RECOVERY_CONTROL_A,
+        expectedChannelId: TICKET_CHANNEL_ID,
+        expectedControlMessageId: CONTROL_MESSAGE_ID,
+        expectedState: ticket.state,
+        expectedUpdatedAt: ticket.updatedAt,
+      },
+      STAFF_B_ID,
+    );
+    expect(adopted.status).toBe("rebound");
+    current = false;
+    releaseDelete();
+    await recovery;
+
+    expect(recovered.channel.delete).toHaveBeenCalledTimes(1);
+    expect(harness.storage.getTicketById(ticket.ticketId)).toMatchObject({
+      channelId: TICKET_CHANNEL_ID,
+      controlMessageId: null,
+      state: "open",
+    });
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("server changed"),
       }),
     );
   });
@@ -1793,7 +2727,7 @@ describe("ticket command authorization", () => {
 
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining("Only the server owner"),
+        content: expect.stringContaining("tickets.configure"),
       }),
     );
   });

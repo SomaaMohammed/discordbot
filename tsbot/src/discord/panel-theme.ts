@@ -16,6 +16,8 @@ export const SUPERIOR_PANEL_COLOR = 0xd4af37;
 export const SUPERIOR_PANEL_FOOTER_TEXT = "Superior";
 export const DISCORD_CUSTOM_ID_LIMIT = 100;
 export const TICKET_OPEN_CUSTOM_ID_PREFIX = "superior:ticket:open:";
+export const SUGGESTION_OPEN_CUSTOM_ID_PREFIX = "superior:suggestion:open:";
+export const APPLICATION_OPEN_CUSTOM_ID_PREFIX = "superior:application:open:";
 
 export const RESOURCE_PANEL_LIMITS = Object.freeze({
   title: 256,
@@ -39,6 +41,8 @@ export const PANEL_PRESET_DESCRIPTIONS: Readonly<Record<PanelPreset, string>> =
     "server-info": "A concise snapshot of the current server",
     resources: "Administrator-curated information and HTTPS links",
     tickets: "The configured support-ticket launcher",
+    suggestions: "The configured member-suggestion launcher",
+    applications: "The configured private staff-application launcher",
   });
 
 export interface PanelFeatureState {
@@ -47,6 +51,8 @@ export interface PanelFeatureState {
   greetings: boolean;
   activityMetrics: boolean;
   tickets: boolean;
+  suggestions?: boolean;
+  applications?: boolean;
 }
 
 export interface ResourcePanelLinkInput {
@@ -76,7 +82,9 @@ export type SuperiorPanelRequest =
   | { preset: "help"; features: Readonly<PanelFeatureState> }
   | { preset: "server-info"; guild: Guild }
   | { preset: "resources"; resource: ResourcePanelInput }
-  | { preset: "tickets"; panelToken: string };
+  | { preset: "tickets"; panelToken: string }
+  | { preset: "suggestions"; panelToken: string }
+  | { preset: "applications"; panelToken: string };
 
 export interface SuperiorPanelPayload {
   embeds: readonly [EmbedBuilder];
@@ -182,6 +190,10 @@ export function renderSuperiorPanel(
       return renderResourcesPanel(request.resource);
     case "tickets":
       return renderTicketLauncherPanel(request.panelToken);
+    case "suggestions":
+      return renderSuggestionLauncherPanel(request.panelToken);
+    case "applications":
+      return renderApplicationLauncherPanel(request.panelToken);
   }
 }
 
@@ -219,22 +231,33 @@ export function renderHelpPanel(
       "Support tickets are active. Use the server's ticket launcher to contact staff privately.",
     );
   }
+  if (features.suggestions) {
+    activeServices.push(
+      "Suggestions are active. Use `/suggestion submit` or the server's suggestion panel.",
+    );
+  }
+  if (features.applications) {
+    activeServices.push(
+      "Staff applications are active. Use `/application submit` or the server's application panel.",
+    );
+  }
   if (activeServices.length === 0) {
     activeServices.push(
       "No optional member services are active. Administrators can review configuration with `/setup status`.",
     );
   }
 
-  const administratorCommands = [
+  const ownerAdministratorCommands = [
     "`/setup` - review and validate server configuration.",
-    "`/superior` - use moderation, announcements, and established role or DM panels.",
-    "`/panel` - post and inspect Superior information panels.",
+    "`/access` - grant or revoke delegated role capabilities.",
   ];
-  if (features.tickets) {
-    administratorCommands.push(
-      "`/ticket` - inspect and manage the server's support workflow.",
-    );
-  }
+  const workflowCommands = [
+    "`/superior` - use commands permitted by your current Discord permissions.",
+    "`/panel` - post or inspect panels when you hold panel-management access.",
+    "`/ticket` - configure departments or recover tickets when authorized.",
+    "`/suggestion` - submit or withdraw suggestions; authorized reviewers can manage them.",
+    "`/application` - submit, check, or withdraw applications; authorized staff can review them.",
+  ];
 
   const embed = createSuperiorEmbed()
     .setTitle("Superior Help")
@@ -245,8 +268,12 @@ export function renderHelpPanel(
       { name: "Member commands", value: memberActions.join("\n") },
       { name: "Active services", value: activeServices.join("\n") },
       {
-        name: "Administrator commands",
-        value: administratorCommands.join("\n"),
+        name: "Owner / Administrator commands",
+        value: ownerAdministratorCommands.join("\n"),
+      },
+      {
+        name: "Member and delegated commands",
+        value: workflowCommands.join("\n"),
       },
       {
         name: "Need assistance?",
@@ -340,12 +367,66 @@ export function renderTicketLauncherPanel(
     .addFields({
       name: "Before opening",
       value:
-        "One open ticket is allowed per member. Please keep requests focused and avoid sensitive information.",
+        "You may have one active ticket per department and up to three across this server. Keep requests focused and avoid sensitive information.",
     });
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(customId)
       .setLabel("Open Ticket")
+      .setStyle(ButtonStyle.Primary),
+  );
+  return createPanelPayload(embed, [row]);
+}
+
+export function renderSuggestionLauncherPanel(
+  panelToken: string,
+): SuperiorPanelPayload {
+  const customId = createFeaturePanelCustomId(
+    SUGGESTION_OPEN_CUSTOM_ID_PREFIX,
+    panelToken,
+    "Suggestion",
+  );
+  const embed = createSuperiorEmbed()
+    .setTitle("Suggestions")
+    .setDescription(
+      "Share a clear proposal with the server. Suggestions are attributed to their authors and can be reviewed by staff.",
+    )
+    .addFields({
+      name: "Before submitting",
+      value:
+        "Keep the title focused and explain the expected benefit. Submission cooldowns apply.",
+    });
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(customId)
+      .setLabel("Share Suggestion")
+      .setStyle(ButtonStyle.Primary),
+  );
+  return createPanelPayload(embed, [row]);
+}
+
+export function renderApplicationLauncherPanel(
+  panelToken: string,
+): SuperiorPanelPayload {
+  const customId = createFeaturePanelCustomId(
+    APPLICATION_OPEN_CUSTOM_ID_PREFIX,
+    panelToken,
+    "Application",
+  );
+  const embed = createSuperiorEmbed()
+    .setTitle("Staff Applications")
+    .setDescription(
+      "Choose an available staff application. Your answers are sent only to the configured review channel.",
+    )
+    .addFields({
+      name: "Privacy",
+      value:
+        "Application answers are never posted publicly. You can review your own status with `/application status`.",
+    });
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(customId)
+      .setLabel("Apply")
       .setStyle(ButtonStyle.Primary),
   );
   return createPanelPayload(embed, [row]);
@@ -360,6 +441,42 @@ function createPanelPayload(
     components,
     allowedMentions: SAFE_PANEL_ALLOWED_MENTIONS,
   };
+}
+
+export function parseSuggestionOpenCustomId(customId: string): string | null {
+  return parseFeaturePanelCustomId(SUGGESTION_OPEN_CUSTOM_ID_PREFIX, customId);
+}
+
+export function parseApplicationOpenCustomId(customId: string): string | null {
+  return parseFeaturePanelCustomId(APPLICATION_OPEN_CUSTOM_ID_PREFIX, customId);
+}
+
+function createFeaturePanelCustomId(
+  prefix: string,
+  panelToken: string,
+  label: string,
+): string {
+  if (!isTicketPanelToken(panelToken)) {
+    throw new TypeError(
+      `${label} panel token must be ${TICKET_PANEL_TOKEN_LIMITS.minimum}-${TICKET_PANEL_TOKEN_LIMITS.maximum} URL-safe opaque characters.`,
+    );
+  }
+  const customId = `${prefix}${panelToken}`;
+  if (customId.length > DISCORD_CUSTOM_ID_LIMIT) {
+    throw new RangeError(
+      `${label} panel control exceeds Discord's custom ID limit.`,
+    );
+  }
+  return customId;
+}
+
+function parseFeaturePanelCustomId(
+  prefix: string,
+  customId: string,
+): string | null {
+  if (!customId.startsWith(prefix)) return null;
+  const token = customId.slice(prefix.length);
+  return isTicketPanelToken(token) ? token : null;
 }
 
 function normalizeSingleLine(

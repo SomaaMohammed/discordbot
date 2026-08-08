@@ -4,15 +4,48 @@ import {
   isDiscordSnowflake,
   parseGuildSettingsJson,
 } from "../guild-settings.js";
-import { PANEL_PRESETS, TICKET_EVENT_TYPES, TICKET_STATES } from "../types.js";
 import { isActiveMetricKey } from "./metric-keys.js";
 
-export const CURRENT_SCHEMA_VERSION = 4 as const;
+export const CURRENT_SCHEMA_VERSION = 5 as const;
+export const LEGACY_V4_SCHEMA_VERSION = 4 as const;
 export const LEGACY_V3_SCHEMA_VERSION = 3 as const;
 export const LEGACY_V2_SCHEMA_VERSION = 2 as const;
 
+const V4_PANEL_PRESETS = [
+  "help",
+  "server-info",
+  "resources",
+  "tickets",
+] as const;
+const V4_TICKET_STATES = [
+  "creating",
+  "open",
+  "closing",
+  "closed",
+  "failed",
+] as const;
+const V4_TICKET_EVENT_TYPES = [
+  "creation_reserved",
+  "creation_activated",
+  "creation_failed",
+  "claimed",
+  "released",
+  "close_started",
+  "close_logged",
+  "close_failed",
+  "closed",
+  "rebound",
+  "recovery_noted",
+] as const;
+
 export type DatabaseSchemaKind =
-  "empty" | "legacy-v1" | "legacy-v2" | "legacy-v3" | "current-v4" | "unknown";
+  | "empty"
+  | "legacy-v1"
+  | "legacy-v2"
+  | "legacy-v3"
+  | "legacy-v4"
+  | "current-v5"
+  | "unknown";
 
 export const SCHEMA_MIGRATIONS_TABLE_SQL = `
 CREATE TABLE schema_migrations (
@@ -330,6 +363,888 @@ const V4_INDEX_SQL: Record<(typeof V4_EXPLICIT_INDEX_NAMES)[number], string> = {
   idx_ticket_events_ticket: TICKET_EVENTS_TICKET_INDEX_SQL,
 };
 
+export const DELEGATED_CAPABILITIES = [
+  "panels.manage",
+  "tickets.configure",
+  "tickets.manage",
+  "suggestions.configure",
+  "suggestions.review",
+  "applications.configure",
+  "applications.review",
+] as const;
+
+export const FORM_FIELD_TYPES = ["short", "paragraph"] as const;
+export const SUGGESTION_STATES = [
+  "open",
+  "under-review",
+  "accepted",
+  "declined",
+  "implemented",
+  "withdrawn",
+] as const;
+export const DELIVERY_STATES = [
+  "reserved",
+  "posted",
+  "failed",
+  "missing",
+] as const;
+export const SUGGESTION_EVENT_TYPES = [
+  "submission_reserved",
+  "submission_posted",
+  "submission_failed",
+  "vote_changed",
+  "state_changed",
+  "withdrawn",
+  "rebound",
+  "recovery_noted",
+] as const;
+export const APPLICATION_STATES = [
+  "submitted",
+  "under-review",
+  "accepted",
+  "rejected",
+  "withdrawn",
+] as const;
+export const APPLICATION_EVENT_TYPES = [
+  "submission_reserved",
+  "submission_posted",
+  "submission_failed",
+  "claimed",
+  "decision_recorded",
+  "withdrawn",
+  "rebound",
+  "recovery_noted",
+] as const;
+
+export const DELEGATED_CAPABILITY_GRANTS_TABLE_SQL = `
+CREATE TABLE delegated_capability_grants (
+  guild_id TEXT NOT NULL,
+  principal_type TEXT NOT NULL CHECK (principal_type = 'role'),
+  principal_id TEXT NOT NULL
+    CHECK (
+      length(principal_id) BETWEEN 17 AND 20
+      AND principal_id NOT GLOB '*[^0-9]*'
+    ),
+  capability TEXT NOT NULL
+    CHECK (
+      capability IN (
+        'panels.manage', 'tickets.configure', 'tickets.manage',
+        'suggestions.configure', 'suggestions.review',
+        'applications.configure', 'applications.review'
+      )
+    ),
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  granted_by TEXT NOT NULL
+    CHECK (
+      length(granted_by) BETWEEN 17 AND 20
+      AND granted_by NOT GLOB '*[^0-9]*'
+    ),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, principal_type, principal_id, capability),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const TICKET_DEPARTMENTS_TABLE_SQL = `
+CREATE TABLE ticket_departments (
+  guild_id TEXT NOT NULL,
+  department_id TEXT NOT NULL
+    CHECK (
+      length(department_id) BETWEEN 8 AND 24
+      AND department_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  slug TEXT NOT NULL
+    CHECK (
+      length(slug) BETWEEN 1 AND 32
+      AND slug NOT GLOB '*[^a-z0-9-]*'
+      AND substr(slug, 1, 1) NOT GLOB '[^a-z0-9]'
+      AND substr(slug, -1, 1) NOT GLOB '[^a-z0-9]'
+      AND instr(slug, '--') = 0
+    ),
+  display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 100),
+  description TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 1000),
+  emoji TEXT CHECK (emoji IS NULL OR length(emoji) BETWEEN 1 AND 16),
+  category_id TEXT
+    CHECK (
+      category_id IS NULL OR (
+        length(category_id) BETWEEN 17 AND 20
+        AND category_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  log_channel_id TEXT
+    CHECK (
+      log_channel_id IS NULL OR (
+        length(log_channel_id) BETWEEN 17 AND 20
+        AND log_channel_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  support_role_id TEXT
+    CHECK (
+      support_role_id IS NULL OR (
+        length(support_role_id) BETWEEN 17 AND 20
+        AND support_role_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  sort_order INTEGER NOT NULL DEFAULT 0 CHECK (sort_order BETWEEN 0 AND 9),
+  definition_version INTEGER NOT NULL DEFAULT 1
+    CHECK (definition_version BETWEEN 1 AND 2147483647),
+  bindings_verified_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, department_id),
+  UNIQUE (guild_id, slug),
+  CHECK (
+    enabled = 0 OR (
+      category_id IS NOT NULL
+      AND log_channel_id IS NOT NULL
+      AND support_role_id IS NOT NULL
+    )
+  ),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const TICKET_DEPARTMENT_FIELDS_TABLE_SQL = `
+CREATE TABLE ticket_department_fields (
+  guild_id TEXT NOT NULL,
+  department_id TEXT NOT NULL,
+  field_id TEXT NOT NULL
+    CHECK (
+      length(field_id) BETWEEN 8 AND 24
+      AND field_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  label TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 45),
+  description TEXT CHECK (description IS NULL OR length(description) BETWEEN 1 AND 100),
+  placeholder TEXT CHECK (placeholder IS NULL OR length(placeholder) BETWEEN 1 AND 100),
+  field_type TEXT NOT NULL CHECK (field_type IN ('short', 'paragraph')),
+  required INTEGER NOT NULL DEFAULT 1 CHECK (required IN (0, 1)),
+  min_length INTEGER NOT NULL DEFAULT 0 CHECK (min_length BETWEEN 0 AND 4000),
+  max_length INTEGER NOT NULL CHECK (max_length BETWEEN 1 AND 4000),
+  sort_order INTEGER NOT NULL CHECK (sort_order BETWEEN 0 AND 4),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, department_id, field_id),
+  UNIQUE (guild_id, department_id, sort_order),
+  CHECK (min_length <= max_length),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, department_id)
+    REFERENCES ticket_departments(guild_id, department_id) ON DELETE CASCADE
+)
+`;
+
+export const V5_POSTED_PANELS_TABLE_SQL = `
+CREATE TABLE posted_panels (
+  guild_id TEXT NOT NULL,
+  panel_id TEXT NOT NULL
+    CHECK (
+      length(panel_id) BETWEEN 8 AND 24
+      AND panel_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  preset TEXT NOT NULL
+    CHECK (preset IN ('help', 'server-info', 'resources', 'tickets', 'suggestions', 'applications')),
+  channel_id TEXT NOT NULL
+    CHECK (
+      length(channel_id) BETWEEN 17 AND 20
+      AND channel_id NOT GLOB '*[^0-9]*'
+    ),
+  message_id TEXT NOT NULL
+    CHECK (
+      length(message_id) BETWEEN 17 AND 20
+      AND message_id NOT GLOB '*[^0-9]*'
+    ),
+  configuration_json TEXT NOT NULL DEFAULT '{}'
+    CHECK (
+      length(CAST(configuration_json AS BLOB)) BETWEEN 2 AND 16000
+      AND json_valid(configuration_json)
+    ),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, panel_id),
+  UNIQUE (guild_id, preset, channel_id),
+  UNIQUE (guild_id, channel_id, message_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const V5_TICKETS_TABLE_SQL = `
+CREATE TABLE tickets (
+  guild_id TEXT NOT NULL,
+  ticket_id TEXT NOT NULL
+    CHECK (
+      length(ticket_id) BETWEEN 8 AND 24
+      AND ticket_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  ticket_number INTEGER NOT NULL CHECK (ticket_number BETWEEN 1 AND 2147483647),
+  department_id TEXT NOT NULL
+    CHECK (
+      length(department_id) BETWEEN 8 AND 24
+      AND department_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  opener_id TEXT NOT NULL
+    CHECK (
+      length(opener_id) BETWEEN 17 AND 20
+      AND opener_id NOT GLOB '*[^0-9]*'
+    ),
+  channel_id TEXT
+    CHECK (
+      channel_id IS NULL OR (
+        length(channel_id) BETWEEN 17 AND 20
+        AND channel_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  control_message_id TEXT
+    CHECK (
+      control_message_id IS NULL OR (
+        length(control_message_id) BETWEEN 17 AND 20
+        AND control_message_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 100),
+  description TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 2000),
+  state TEXT NOT NULL
+    CHECK (state IN ('creating', 'open', 'closing', 'closed', 'failed')),
+  claimed_by TEXT
+    CHECK (
+      claimed_by IS NULL OR (
+        length(claimed_by) BETWEEN 17 AND 20
+        AND claimed_by NOT GLOB '*[^0-9]*'
+      )
+    ),
+  claimed_at TEXT,
+  closed_by TEXT
+    CHECK (
+      closed_by IS NULL OR (
+        length(closed_by) BETWEEN 17 AND 20
+        AND closed_by NOT GLOB '*[^0-9]*'
+      )
+    ),
+  close_reason TEXT CHECK (close_reason IS NULL OR length(close_reason) BETWEEN 1 AND 500),
+  close_log_message_id TEXT
+    CHECK (
+      close_log_message_id IS NULL OR (
+        length(close_log_message_id) BETWEEN 17 AND 20
+        AND close_log_message_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  close_logged_at TEXT,
+  failure_reason TEXT CHECK (failure_reason IS NULL OR length(failure_reason) BETWEEN 1 AND 1000),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  closing_at TEXT,
+  closed_at TEXT,
+  PRIMARY KEY (guild_id, ticket_id),
+  UNIQUE (guild_id, ticket_number),
+  CHECK ((claimed_by IS NULL) = (claimed_at IS NULL)),
+  CHECK (control_message_id IS NULL OR channel_id IS NOT NULL),
+  CHECK (state IN ('creating', 'failed') OR channel_id IS NOT NULL),
+  CHECK ((state = 'failed') = (failure_reason IS NOT NULL)),
+  CHECK ((state IN ('closing', 'closed')) = (closing_at IS NOT NULL)),
+  CHECK ((state = 'closed') = (closed_at IS NOT NULL)),
+  CHECK ((state IN ('closing', 'closed')) = (closed_by IS NOT NULL)),
+  CHECK ((state IN ('closing', 'closed')) = (close_reason IS NOT NULL)),
+  CHECK ((close_log_message_id IS NULL) = (close_logged_at IS NULL)),
+  CHECK (close_logged_at IS NULL OR state IN ('closing', 'closed')),
+  CHECK (state != 'closed' OR close_logged_at IS NOT NULL),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, department_id)
+    REFERENCES ticket_departments(guild_id, department_id)
+)
+`;
+
+export const TICKET_FORM_RESPONSES_TABLE_SQL = `
+CREATE TABLE ticket_form_responses (
+  guild_id TEXT NOT NULL,
+  ticket_id TEXT NOT NULL,
+  response_id TEXT NOT NULL
+    CHECK (
+      length(response_id) BETWEEN 8 AND 24
+      AND response_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  field_id TEXT NOT NULL
+    CHECK (
+      length(field_id) BETWEEN 8 AND 24
+      AND field_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  field_label TEXT NOT NULL CHECK (length(field_label) BETWEEN 1 AND 45),
+  field_type TEXT NOT NULL CHECK (field_type IN ('short', 'paragraph')),
+  response_text TEXT NOT NULL CHECK (length(response_text) BETWEEN 0 AND 4000),
+  sort_order INTEGER NOT NULL CHECK (sort_order BETWEEN 0 AND 4),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, ticket_id, response_id),
+  UNIQUE (guild_id, ticket_id, field_id),
+  UNIQUE (guild_id, ticket_id, sort_order),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, ticket_id)
+    REFERENCES tickets(guild_id, ticket_id) ON DELETE CASCADE
+)
+`;
+
+export const SUGGESTION_CONFIGURATIONS_TABLE_SQL = `
+CREATE TABLE suggestion_configurations (
+  guild_id TEXT NOT NULL PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  suggestion_channel_id TEXT NOT NULL
+    CHECK (
+      length(suggestion_channel_id) BETWEEN 17 AND 20
+      AND suggestion_channel_id NOT GLOB '*[^0-9]*'
+    ),
+  review_channel_id TEXT
+    CHECK (
+      review_channel_id IS NULL OR (
+        length(review_channel_id) BETWEEN 17 AND 20
+        AND review_channel_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  reviewer_role_id TEXT NOT NULL
+    CHECK (
+      length(reviewer_role_id) BETWEEN 17 AND 20
+      AND reviewer_role_id NOT GLOB '*[^0-9]*'
+    ),
+  create_threads INTEGER NOT NULL DEFAULT 0 CHECK (create_threads IN (0, 1)),
+  cooldown_limit INTEGER NOT NULL DEFAULT 3 CHECK (cooldown_limit BETWEEN 1 AND 10),
+  cooldown_window_seconds INTEGER NOT NULL DEFAULT 600
+    CHECK (cooldown_window_seconds BETWEEN 60 AND 86400),
+  allow_self_votes INTEGER NOT NULL DEFAULT 0 CHECK (allow_self_votes IN (0, 1)),
+  bindings_verified_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const SUGGESTIONS_TABLE_SQL = `
+CREATE TABLE suggestions (
+  guild_id TEXT NOT NULL,
+  suggestion_id TEXT NOT NULL
+    CHECK (
+      length(suggestion_id) BETWEEN 8 AND 24
+      AND suggestion_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  suggestion_number INTEGER NOT NULL CHECK (suggestion_number BETWEEN 1 AND 2147483647),
+  author_id TEXT NOT NULL
+    CHECK (
+      length(author_id) BETWEEN 17 AND 20
+      AND author_id NOT GLOB '*[^0-9]*'
+    ),
+  title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 100),
+  details TEXT NOT NULL CHECK (length(details) BETWEEN 1 AND 4000),
+  state TEXT NOT NULL DEFAULT 'open'
+    CHECK (state IN ('open', 'under-review', 'accepted', 'declined', 'implemented', 'withdrawn')),
+  delivery_state TEXT NOT NULL DEFAULT 'reserved'
+    CHECK (delivery_state IN ('reserved', 'posted', 'failed', 'missing')),
+  channel_id TEXT
+    CHECK (
+      channel_id IS NULL OR (
+        length(channel_id) BETWEEN 17 AND 20
+        AND channel_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  message_id TEXT
+    CHECK (
+      message_id IS NULL OR (
+        length(message_id) BETWEEN 17 AND 20
+        AND message_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  thread_id TEXT
+    CHECK (
+      thread_id IS NULL OR (
+        length(thread_id) BETWEEN 17 AND 20
+        AND thread_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  reviewer_id TEXT
+    CHECK (
+      reviewer_id IS NULL OR (
+        length(reviewer_id) BETWEEN 17 AND 20
+        AND reviewer_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  review_reason TEXT CHECK (review_reason IS NULL OR length(review_reason) BETWEEN 1 AND 1000),
+  reviewed_at TEXT,
+  withdrawn_at TEXT,
+  failure_reason TEXT CHECK (failure_reason IS NULL OR length(failure_reason) BETWEEN 1 AND 1000),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, suggestion_id),
+  UNIQUE (guild_id, suggestion_number),
+  CHECK ((message_id IS NULL) = (channel_id IS NULL)),
+  CHECK (thread_id IS NULL OR message_id IS NOT NULL),
+  CHECK ((delivery_state IN ('posted', 'missing')) = (message_id IS NOT NULL)),
+  CHECK ((delivery_state = 'failed') = (failure_reason IS NOT NULL)),
+  CHECK (
+    (state IN ('under-review', 'accepted', 'declined', 'implemented')) =
+    (reviewer_id IS NOT NULL AND review_reason IS NOT NULL AND reviewed_at IS NOT NULL)
+  ),
+  CHECK ((state = 'withdrawn') = (withdrawn_at IS NOT NULL)),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const SUGGESTION_VOTES_TABLE_SQL = `
+CREATE TABLE suggestion_votes (
+  guild_id TEXT NOT NULL,
+  suggestion_id TEXT NOT NULL,
+  voter_id TEXT NOT NULL
+    CHECK (
+      length(voter_id) BETWEEN 17 AND 20
+      AND voter_id NOT GLOB '*[^0-9]*'
+    ),
+  vote INTEGER NOT NULL CHECK (vote IN (-1, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, suggestion_id, voter_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, suggestion_id)
+    REFERENCES suggestions(guild_id, suggestion_id) ON DELETE CASCADE
+)
+`;
+
+export const SUGGESTION_EVENTS_TABLE_SQL = `
+CREATE TABLE suggestion_events (
+  guild_id TEXT NOT NULL,
+  suggestion_id TEXT NOT NULL,
+  event_id TEXT NOT NULL
+    CHECK (
+      length(event_id) BETWEEN 8 AND 24
+      AND event_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  event_number INTEGER NOT NULL CHECK (event_number BETWEEN 1 AND 2147483647),
+  event_type TEXT NOT NULL
+    CHECK (
+      event_type IN (
+        'submission_reserved', 'submission_posted', 'submission_failed',
+        'vote_changed', 'state_changed', 'withdrawn', 'rebound', 'recovery_noted'
+      )
+    ),
+  actor_id TEXT
+    CHECK (
+      actor_id IS NULL OR (
+        length(actor_id) BETWEEN 17 AND 20
+        AND actor_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  details_json TEXT NOT NULL DEFAULT '{}'
+    CHECK (
+      length(CAST(details_json AS BLOB)) BETWEEN 2 AND 4000
+      AND json_valid(details_json)
+    ),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, suggestion_id, event_id),
+  UNIQUE (guild_id, suggestion_id, event_number),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, suggestion_id)
+    REFERENCES suggestions(guild_id, suggestion_id) ON DELETE CASCADE
+)
+`;
+
+export const APPLICATION_FORMS_TABLE_SQL = `
+CREATE TABLE application_forms (
+  guild_id TEXT NOT NULL,
+  form_id TEXT NOT NULL
+    CHECK (
+      length(form_id) BETWEEN 8 AND 24
+      AND form_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  slug TEXT NOT NULL
+    CHECK (
+      length(slug) BETWEEN 1 AND 32
+      AND slug NOT GLOB '*[^a-z0-9-]*'
+      AND substr(slug, 1, 1) NOT GLOB '[^a-z0-9]'
+      AND substr(slug, -1, 1) NOT GLOB '[^a-z0-9]'
+      AND instr(slug, '--') = 0
+    ),
+  display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 100),
+  description TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 1000),
+  reviewer_role_id TEXT NOT NULL
+    CHECK (
+      length(reviewer_role_id) BETWEEN 17 AND 20
+      AND reviewer_role_id NOT GLOB '*[^0-9]*'
+    ),
+  review_channel_id TEXT NOT NULL
+    CHECK (
+      length(review_channel_id) BETWEEN 17 AND 20
+      AND review_channel_id NOT GLOB '*[^0-9]*'
+    ),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  sort_order INTEGER NOT NULL DEFAULT 0 CHECK (sort_order BETWEEN 0 AND 24),
+  definition_version INTEGER NOT NULL DEFAULT 1
+    CHECK (definition_version BETWEEN 1 AND 2147483647),
+  bindings_verified_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, form_id),
+  UNIQUE (guild_id, slug),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const APPLICATION_FORM_FIELDS_TABLE_SQL = `
+CREATE TABLE application_form_fields (
+  guild_id TEXT NOT NULL,
+  form_id TEXT NOT NULL,
+  field_id TEXT NOT NULL
+    CHECK (
+      length(field_id) BETWEEN 8 AND 24
+      AND field_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  label TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 45),
+  description TEXT CHECK (description IS NULL OR length(description) BETWEEN 1 AND 100),
+  placeholder TEXT CHECK (placeholder IS NULL OR length(placeholder) BETWEEN 1 AND 100),
+  field_type TEXT NOT NULL CHECK (field_type IN ('short', 'paragraph')),
+  required INTEGER NOT NULL DEFAULT 1 CHECK (required IN (0, 1)),
+  min_length INTEGER NOT NULL DEFAULT 0 CHECK (min_length BETWEEN 0 AND 4000),
+  max_length INTEGER NOT NULL CHECK (max_length BETWEEN 1 AND 4000),
+  sort_order INTEGER NOT NULL CHECK (sort_order BETWEEN 0 AND 4),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, form_id, field_id),
+  UNIQUE (guild_id, form_id, sort_order),
+  CHECK (min_length <= max_length),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, form_id)
+    REFERENCES application_forms(guild_id, form_id) ON DELETE CASCADE
+)
+`;
+
+export const APPLICATIONS_TABLE_SQL = `
+CREATE TABLE applications (
+  guild_id TEXT NOT NULL,
+  application_id TEXT NOT NULL
+    CHECK (
+      length(application_id) BETWEEN 8 AND 24
+      AND application_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  application_number INTEGER NOT NULL CHECK (application_number BETWEEN 1 AND 2147483647),
+  form_id TEXT NOT NULL
+    CHECK (
+      length(form_id) BETWEEN 8 AND 24
+      AND form_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  applicant_id TEXT NOT NULL
+    CHECK (
+      length(applicant_id) BETWEEN 17 AND 20
+      AND applicant_id NOT GLOB '*[^0-9]*'
+    ),
+  state TEXT NOT NULL DEFAULT 'submitted'
+    CHECK (state IN ('submitted', 'under-review', 'accepted', 'rejected', 'withdrawn')),
+  delivery_state TEXT NOT NULL DEFAULT 'reserved'
+    CHECK (delivery_state IN ('reserved', 'posted', 'failed', 'missing')),
+  review_channel_id TEXT
+    CHECK (
+      review_channel_id IS NULL OR (
+        length(review_channel_id) BETWEEN 17 AND 20
+        AND review_channel_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  review_message_id TEXT
+    CHECK (
+      review_message_id IS NULL OR (
+        length(review_message_id) BETWEEN 17 AND 20
+        AND review_message_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  claimed_by TEXT
+    CHECK (
+      claimed_by IS NULL OR (
+        length(claimed_by) BETWEEN 17 AND 20
+        AND claimed_by NOT GLOB '*[^0-9]*'
+      )
+    ),
+  claimed_at TEXT,
+  decision_by TEXT
+    CHECK (
+      decision_by IS NULL OR (
+        length(decision_by) BETWEEN 17 AND 20
+        AND decision_by NOT GLOB '*[^0-9]*'
+      )
+    ),
+  decision_reason TEXT CHECK (decision_reason IS NULL OR length(decision_reason) BETWEEN 1 AND 1000),
+  decided_at TEXT,
+  withdrawn_at TEXT,
+  failure_reason TEXT CHECK (failure_reason IS NULL OR length(failure_reason) BETWEEN 1 AND 1000),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, application_id),
+  UNIQUE (guild_id, application_number),
+  CHECK ((review_message_id IS NULL) = (review_channel_id IS NULL)),
+  CHECK ((delivery_state IN ('posted', 'missing')) = (review_message_id IS NOT NULL)),
+  CHECK ((delivery_state = 'failed') = (failure_reason IS NOT NULL)),
+  CHECK ((claimed_by IS NULL) = (claimed_at IS NULL)),
+  CHECK (state != 'under-review' OR claimed_by IS NOT NULL),
+  CHECK (
+    (state IN ('accepted', 'rejected')) =
+    (decision_by IS NOT NULL AND decision_reason IS NOT NULL AND decided_at IS NOT NULL)
+  ),
+  CHECK ((state = 'withdrawn') = (withdrawn_at IS NOT NULL)),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, form_id)
+    REFERENCES application_forms(guild_id, form_id)
+)
+`;
+
+export const APPLICATION_RESPONSES_TABLE_SQL = `
+CREATE TABLE application_responses (
+  guild_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  response_id TEXT NOT NULL
+    CHECK (
+      length(response_id) BETWEEN 8 AND 24
+      AND response_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  field_id TEXT NOT NULL
+    CHECK (
+      length(field_id) BETWEEN 8 AND 24
+      AND field_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  field_label TEXT NOT NULL CHECK (length(field_label) BETWEEN 1 AND 45),
+  field_type TEXT NOT NULL CHECK (field_type IN ('short', 'paragraph')),
+  response_text TEXT NOT NULL CHECK (length(response_text) BETWEEN 0 AND 4000),
+  sort_order INTEGER NOT NULL CHECK (sort_order BETWEEN 0 AND 4),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, application_id, response_id),
+  UNIQUE (guild_id, application_id, field_id),
+  UNIQUE (guild_id, application_id, sort_order),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, application_id)
+    REFERENCES applications(guild_id, application_id) ON DELETE CASCADE
+)
+`;
+
+export const APPLICATION_EVENTS_TABLE_SQL = `
+CREATE TABLE application_events (
+  guild_id TEXT NOT NULL,
+  application_id TEXT NOT NULL,
+  event_id TEXT NOT NULL
+    CHECK (
+      length(event_id) BETWEEN 8 AND 24
+      AND event_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  event_number INTEGER NOT NULL CHECK (event_number BETWEEN 1 AND 2147483647),
+  event_type TEXT NOT NULL
+    CHECK (
+      event_type IN (
+        'submission_reserved', 'submission_posted', 'submission_failed',
+        'claimed', 'decision_recorded', 'withdrawn', 'rebound', 'recovery_noted'
+      )
+    ),
+  actor_id TEXT
+    CHECK (
+      actor_id IS NULL OR (
+        length(actor_id) BETWEEN 17 AND 20
+        AND actor_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  details_json TEXT NOT NULL DEFAULT '{}'
+    CHECK (
+      length(CAST(details_json AS BLOB)) BETWEEN 2 AND 4000
+      AND json_valid(details_json)
+    ),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, application_id, event_id),
+  UNIQUE (guild_id, application_id, event_number),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, application_id)
+    REFERENCES applications(guild_id, application_id) ON DELETE CASCADE
+)
+`;
+
+export const CAPABILITY_GRANTS_GUILD_CAPABILITY_INDEX_SQL = `
+CREATE INDEX idx_capability_grants_guild_capability
+ON delegated_capability_grants (guild_id, active, capability, principal_type, principal_id)
+`;
+export const CAPABILITY_GRANTS_GUILD_PRINCIPAL_INDEX_SQL = `
+CREATE INDEX idx_capability_grants_guild_principal
+ON delegated_capability_grants (guild_id, principal_type, principal_id, active)
+`;
+export const TICKET_DEPARTMENTS_GUILD_ENABLED_INDEX_SQL = `
+CREATE INDEX idx_ticket_departments_guild_enabled
+ON ticket_departments (guild_id, enabled, sort_order, department_id)
+`;
+export const TICKET_DEPARTMENT_FIELDS_ORDER_INDEX_SQL = `
+CREATE INDEX idx_ticket_department_fields_order
+ON ticket_department_fields (guild_id, department_id, sort_order)
+`;
+export const V5_TICKETS_GUILD_OPENER_DEPARTMENT_ACTIVE_INDEX_SQL = `
+CREATE UNIQUE INDEX idx_tickets_guild_opener_department_active
+ON tickets (guild_id, department_id, opener_id)
+WHERE state IN ('creating', 'open', 'closing')
+`;
+export const V5_TICKETS_GUILD_OPENER_STATE_INDEX_SQL = `
+CREATE INDEX idx_tickets_guild_opener_state
+ON tickets (guild_id, opener_id, state, ticket_number DESC)
+`;
+export const V5_TICKETS_GUILD_DEPARTMENT_STATE_INDEX_SQL = `
+CREATE INDEX idx_tickets_guild_department_state
+ON tickets (guild_id, department_id, state, ticket_number DESC)
+`;
+export const SUGGESTIONS_GUILD_STATE_INDEX_SQL = `
+CREATE INDEX idx_suggestions_guild_state
+ON suggestions (guild_id, state, suggestion_number DESC)
+`;
+export const SUGGESTIONS_GUILD_AUTHOR_CREATED_INDEX_SQL = `
+CREATE INDEX idx_suggestions_guild_author_created
+ON suggestions (guild_id, author_id, created_at DESC, suggestion_number DESC)
+`;
+export const SUGGESTIONS_GUILD_MESSAGE_INDEX_SQL = `
+CREATE UNIQUE INDEX idx_suggestions_guild_message
+ON suggestions (guild_id, channel_id, message_id)
+WHERE message_id IS NOT NULL
+`;
+export const SUGGESTION_VOTES_TALLY_INDEX_SQL = `
+CREATE INDEX idx_suggestion_votes_tally
+ON suggestion_votes (guild_id, suggestion_id, vote)
+`;
+export const SUGGESTION_EVENTS_SUGGESTION_INDEX_SQL = `
+CREATE INDEX idx_suggestion_events_suggestion
+ON suggestion_events (guild_id, suggestion_id, event_number)
+`;
+export const APPLICATION_FORMS_GUILD_ENABLED_INDEX_SQL = `
+CREATE INDEX idx_application_forms_guild_enabled
+ON application_forms (guild_id, enabled, sort_order, form_id)
+`;
+export const APPLICATION_FORM_FIELDS_ORDER_INDEX_SQL = `
+CREATE INDEX idx_application_form_fields_order
+ON application_form_fields (guild_id, form_id, sort_order)
+`;
+export const APPLICATIONS_GUILD_APPLICANT_FORM_ACTIVE_INDEX_SQL = `
+CREATE UNIQUE INDEX idx_applications_guild_applicant_form_active
+ON applications (guild_id, form_id, applicant_id)
+WHERE state IN ('submitted', 'under-review')
+`;
+export const APPLICATIONS_GUILD_STATE_INDEX_SQL = `
+CREATE INDEX idx_applications_guild_state
+ON applications (guild_id, state, application_number DESC)
+`;
+export const APPLICATIONS_GUILD_FORM_STATE_INDEX_SQL = `
+CREATE INDEX idx_applications_guild_form_state
+ON applications (guild_id, form_id, state, application_number DESC)
+`;
+export const APPLICATIONS_GUILD_APPLICANT_CREATED_INDEX_SQL = `
+CREATE INDEX idx_applications_guild_applicant_created
+ON applications (guild_id, applicant_id, created_at DESC, application_number DESC)
+`;
+export const APPLICATIONS_GUILD_REVIEW_MESSAGE_INDEX_SQL = `
+CREATE UNIQUE INDEX idx_applications_guild_review_message
+ON applications (guild_id, review_channel_id, review_message_id)
+WHERE review_message_id IS NOT NULL
+`;
+export const APPLICATION_EVENTS_APPLICATION_INDEX_SQL = `
+CREATE INDEX idx_application_events_application
+ON application_events (guild_id, application_id, event_number)
+`;
+
+export const V5_TABLE_NAMES = [
+  ...V3_TABLE_NAMES,
+  "delegated_capability_grants",
+  "ticket_departments",
+  "ticket_department_fields",
+  "posted_panels",
+  "tickets",
+  "ticket_form_responses",
+  "ticket_events",
+  "suggestion_configurations",
+  "suggestions",
+  "suggestion_votes",
+  "suggestion_events",
+  "application_forms",
+  "application_form_fields",
+  "applications",
+  "application_responses",
+  "application_events",
+] as const;
+
+export const V5_EXPLICIT_INDEX_NAMES = [
+  ...V3_EXPLICIT_INDEX_NAMES,
+  "idx_capability_grants_guild_capability",
+  "idx_capability_grants_guild_principal",
+  "idx_ticket_departments_guild_enabled",
+  "idx_ticket_department_fields_order",
+  "idx_posted_panels_guild_preset",
+  "idx_tickets_guild_opener_department_active",
+  "idx_tickets_guild_opener_state",
+  "idx_tickets_guild_channel",
+  "idx_tickets_guild_state",
+  "idx_tickets_guild_department_state",
+  "idx_tickets_guild_close_log_message",
+  "idx_ticket_events_ticket",
+  "idx_suggestions_guild_state",
+  "idx_suggestions_guild_author_created",
+  "idx_suggestions_guild_message",
+  "idx_suggestion_votes_tally",
+  "idx_suggestion_events_suggestion",
+  "idx_application_forms_guild_enabled",
+  "idx_application_form_fields_order",
+  "idx_applications_guild_applicant_form_active",
+  "idx_applications_guild_state",
+  "idx_applications_guild_form_state",
+  "idx_applications_guild_applicant_created",
+  "idx_applications_guild_review_message",
+  "idx_application_events_application",
+] as const;
+
+const V5_TABLE_SQL: Record<(typeof V5_TABLE_NAMES)[number], string> = {
+  ...V3_TABLE_SQL,
+  delegated_capability_grants: DELEGATED_CAPABILITY_GRANTS_TABLE_SQL,
+  ticket_departments: TICKET_DEPARTMENTS_TABLE_SQL,
+  ticket_department_fields: TICKET_DEPARTMENT_FIELDS_TABLE_SQL,
+  posted_panels: V5_POSTED_PANELS_TABLE_SQL,
+  tickets: V5_TICKETS_TABLE_SQL,
+  ticket_form_responses: TICKET_FORM_RESPONSES_TABLE_SQL,
+  ticket_events: TICKET_EVENTS_TABLE_SQL,
+  suggestion_configurations: SUGGESTION_CONFIGURATIONS_TABLE_SQL,
+  suggestions: SUGGESTIONS_TABLE_SQL,
+  suggestion_votes: SUGGESTION_VOTES_TABLE_SQL,
+  suggestion_events: SUGGESTION_EVENTS_TABLE_SQL,
+  application_forms: APPLICATION_FORMS_TABLE_SQL,
+  application_form_fields: APPLICATION_FORM_FIELDS_TABLE_SQL,
+  applications: APPLICATIONS_TABLE_SQL,
+  application_responses: APPLICATION_RESPONSES_TABLE_SQL,
+  application_events: APPLICATION_EVENTS_TABLE_SQL,
+};
+
+const V5_INDEX_SQL: Record<(typeof V5_EXPLICIT_INDEX_NAMES)[number], string> = {
+  ...V3_INDEX_SQL,
+  idx_capability_grants_guild_capability:
+    CAPABILITY_GRANTS_GUILD_CAPABILITY_INDEX_SQL,
+  idx_capability_grants_guild_principal:
+    CAPABILITY_GRANTS_GUILD_PRINCIPAL_INDEX_SQL,
+  idx_ticket_departments_guild_enabled:
+    TICKET_DEPARTMENTS_GUILD_ENABLED_INDEX_SQL,
+  idx_ticket_department_fields_order: TICKET_DEPARTMENT_FIELDS_ORDER_INDEX_SQL,
+  idx_posted_panels_guild_preset: POSTED_PANELS_GUILD_PRESET_INDEX_SQL,
+  idx_tickets_guild_opener_department_active:
+    V5_TICKETS_GUILD_OPENER_DEPARTMENT_ACTIVE_INDEX_SQL,
+  idx_tickets_guild_opener_state: V5_TICKETS_GUILD_OPENER_STATE_INDEX_SQL,
+  idx_tickets_guild_channel: TICKETS_GUILD_CHANNEL_INDEX_SQL,
+  idx_tickets_guild_state: TICKETS_GUILD_STATE_INDEX_SQL,
+  idx_tickets_guild_department_state:
+    V5_TICKETS_GUILD_DEPARTMENT_STATE_INDEX_SQL,
+  idx_tickets_guild_close_log_message:
+    TICKETS_GUILD_CLOSE_LOG_MESSAGE_INDEX_SQL,
+  idx_ticket_events_ticket: TICKET_EVENTS_TICKET_INDEX_SQL,
+  idx_suggestions_guild_state: SUGGESTIONS_GUILD_STATE_INDEX_SQL,
+  idx_suggestions_guild_author_created:
+    SUGGESTIONS_GUILD_AUTHOR_CREATED_INDEX_SQL,
+  idx_suggestions_guild_message: SUGGESTIONS_GUILD_MESSAGE_INDEX_SQL,
+  idx_suggestion_votes_tally: SUGGESTION_VOTES_TALLY_INDEX_SQL,
+  idx_suggestion_events_suggestion: SUGGESTION_EVENTS_SUGGESTION_INDEX_SQL,
+  idx_application_forms_guild_enabled:
+    APPLICATION_FORMS_GUILD_ENABLED_INDEX_SQL,
+  idx_application_form_fields_order: APPLICATION_FORM_FIELDS_ORDER_INDEX_SQL,
+  idx_applications_guild_applicant_form_active:
+    APPLICATIONS_GUILD_APPLICANT_FORM_ACTIVE_INDEX_SQL,
+  idx_applications_guild_state: APPLICATIONS_GUILD_STATE_INDEX_SQL,
+  idx_applications_guild_form_state: APPLICATIONS_GUILD_FORM_STATE_INDEX_SQL,
+  idx_applications_guild_applicant_created:
+    APPLICATIONS_GUILD_APPLICANT_CREATED_INDEX_SQL,
+  idx_applications_guild_review_message:
+    APPLICATIONS_GUILD_REVIEW_MESSAGE_INDEX_SQL,
+  idx_application_events_application: APPLICATION_EVENTS_APPLICATION_INDEX_SQL,
+};
+
 export const V1_TABLE_NAMES = [
   "kv",
   "posts",
@@ -582,6 +1497,34 @@ export function createV4Objects(db: Database.Database): void {
   createV4OperationalObjects(db);
 }
 
+/** Creates only the objects introduced by schema v5 on top of schema v3. */
+export function createV5OperationalObjects(db: Database.Database): void {
+  for (const table of V5_TABLE_NAMES) {
+    if (!(V3_TABLE_NAMES as readonly string[]).includes(table)) {
+      db.exec(V5_TABLE_SQL[table]);
+    }
+  }
+  for (const index of V5_EXPLICIT_INDEX_NAMES) {
+    if (!(V3_EXPLICIT_INDEX_NAMES as readonly string[]).includes(index)) {
+      db.exec(V5_INDEX_SQL[index]);
+    }
+  }
+}
+
+export function createV5Objects(db: Database.Database): void {
+  createV3Objects(db);
+  createV5OperationalObjects(db);
+}
+
+export function recordV4SchemaVersion(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  db.prepare(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+  ).run(LEGACY_V4_SCHEMA_VERSION, appliedAt);
+}
+
 export function recordCurrentSchemaVersion(
   db: Database.Database,
   appliedAt: string,
@@ -614,8 +1557,23 @@ export function initializeV4Schema(
 ): void {
   const initialize = db.transaction(() => {
     createV4Objects(db);
-    recordCurrentSchemaVersion(db, appliedAt);
+    recordV4SchemaVersion(db, appliedAt);
     const issues = validateV4Schema(db);
+    if (issues.length > 0) {
+      throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
+    }
+  });
+  initialize.immediate();
+}
+
+export function initializeV5Schema(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  const initialize = db.transaction(() => {
+    createV5Objects(db);
+    recordCurrentSchemaVersion(db, appliedAt);
+    const issues = validateV5Schema(db);
     if (issues.length > 0) {
       throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
     }
@@ -643,8 +1601,11 @@ export function detectDatabaseSchema(
     .map((row) => row.name)
     .sort();
 
+  if (sameStrings(tables, [...V5_TABLE_NAMES].sort())) {
+    return validateV5Schema(db).length === 0 ? "current-v5" : "unknown";
+  }
   if (sameStrings(tables, [...V4_TABLE_NAMES].sort())) {
-    return validateV4Schema(db).length === 0 ? "current-v4" : "unknown";
+    return validateV4Schema(db).length === 0 ? "legacy-v4" : "unknown";
   }
   if (sameStrings(tables, [...V3_TABLE_NAMES].sort())) {
     return validateV3Schema(db).length === 0 ? "legacy-v3" : "unknown";
@@ -836,10 +1797,10 @@ export function validateV4Schema(db: Database.Database): string[] {
     .all() as Array<{ version: number; applied_at: string }>;
   const validVersionSequence =
     (versions.length === 1 &&
-      versions[0]?.version === CURRENT_SCHEMA_VERSION) ||
+      versions[0]?.version === LEGACY_V4_SCHEMA_VERSION) ||
     (versions.length === 2 &&
       versions[0]?.version === LEGACY_V3_SCHEMA_VERSION &&
-      versions[1]?.version === CURRENT_SCHEMA_VERSION);
+      versions[1]?.version === LEGACY_V4_SCHEMA_VERSION);
   if (
     !validVersionSequence ||
     versions.some((row) => !isValidTimestamp(row.applied_at))
@@ -851,6 +1812,53 @@ export function validateV4Schema(db: Database.Database): string[] {
 
   validateV3Data(db, issues);
   validateV4Data(db, issues);
+  validateDatabaseHealth(db, issues);
+  return issues;
+}
+
+export function validateV5Schema(db: Database.Database): string[] {
+  const issues = validateExactObjects(
+    db,
+    [...V5_TABLE_NAMES],
+    [...V5_EXPLICIT_INDEX_NAMES],
+  );
+  if (issues.length > 0) {
+    return issues;
+  }
+
+  validateSqlDefinitions(db, V5_TABLE_SQL, "table", issues);
+  validateSqlDefinitions(db, V5_INDEX_SQL, "index", issues);
+
+  const versions = db
+    .prepare(
+      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
+    )
+    .all() as Array<{ version: number; applied_at: string }>;
+  const versionNumbers = versions.map((row) => row.version);
+  const validVersionSequence = [
+    [CURRENT_SCHEMA_VERSION],
+    [LEGACY_V4_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION],
+    [
+      LEGACY_V3_SCHEMA_VERSION,
+      LEGACY_V4_SCHEMA_VERSION,
+      CURRENT_SCHEMA_VERSION,
+    ],
+  ].some(
+    (expected) =>
+      expected.length === versionNumbers.length &&
+      expected.every((version, index) => versionNumbers[index] === version),
+  );
+  if (
+    !validVersionSequence ||
+    versions.some((row) => !isValidTimestamp(row.applied_at))
+  ) {
+    issues.push(
+      "schema_migrations must contain version 5, optionally following version 4 or versions 3 and 4",
+    );
+  }
+
+  validateV3Data(db, issues);
+  validateV5Data(db, issues);
   validateDatabaseHealth(db, issues);
   return issues;
 }
@@ -1086,7 +2094,7 @@ function validateV4Data(db: Database.Database, issues: string[]): void {
     }
     if (
       !isOpaqueId(row.panel_id) ||
-      !(PANEL_PRESETS as readonly string[]).includes(row.preset) ||
+      !(V4_PANEL_PRESETS as readonly string[]).includes(row.preset) ||
       !isDiscordSnowflake(row.channel_id) ||
       !isDiscordSnowflake(row.message_id)
     ) {
@@ -1135,7 +2143,7 @@ function validateV4Data(db: Database.Database, issues: string[]): void {
       (row.closed_by !== null && !isDiscordSnowflake(row.closed_by)) ||
       (row.close_log_message_id !== null &&
         !isDiscordSnowflake(row.close_log_message_id)) ||
-      !(TICKET_STATES as readonly string[]).includes(row.state)
+      !(V4_TICKET_STATES as readonly string[]).includes(row.state)
     ) {
       issues.push(`ticket ${row.ticket_id} has invalid identifiers or state`);
     }
@@ -1184,7 +2192,7 @@ function validateV4Data(db: Database.Database, issues: string[]): void {
       !isOpaqueId(row.event_id) ||
       !Number.isInteger(row.event_number) ||
       row.event_number < 1 ||
-      !(TICKET_EVENT_TYPES as readonly string[]).includes(row.event_type) ||
+      !(V4_TICKET_EVENT_TYPES as readonly string[]).includes(row.event_type) ||
       (row.actor_id !== null && !isDiscordSnowflake(row.actor_id))
     ) {
       issues.push(
@@ -1200,6 +2208,442 @@ function validateV4Data(db: Database.Database, issues: string[]): void {
     if (!isValidTimestamp(row.created_at)) {
       issues.push(`ticket event ${row.event_id} has an invalid timestamp`);
     }
+  }
+}
+
+function validateV5Data(db: Database.Database, issues: string[]): void {
+  const textColumns: ReadonlyArray<
+    readonly [
+      table: string,
+      required: readonly string[],
+      nullable: readonly string[],
+    ]
+  > = [
+    [
+      "delegated_capability_grants",
+      [
+        "guild_id",
+        "principal_type",
+        "principal_id",
+        "capability",
+        "granted_by",
+        "created_at",
+        "updated_at",
+      ],
+      [],
+    ],
+    [
+      "ticket_departments",
+      [
+        "guild_id",
+        "department_id",
+        "slug",
+        "display_name",
+        "description",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "emoji",
+        "category_id",
+        "log_channel_id",
+        "support_role_id",
+        "bindings_verified_at",
+      ],
+    ],
+    [
+      "ticket_department_fields",
+      [
+        "guild_id",
+        "department_id",
+        "field_id",
+        "label",
+        "field_type",
+        "created_at",
+        "updated_at",
+      ],
+      ["description", "placeholder"],
+    ],
+    [
+      "posted_panels",
+      [
+        "guild_id",
+        "panel_id",
+        "preset",
+        "channel_id",
+        "message_id",
+        "configuration_json",
+        "created_at",
+        "updated_at",
+      ],
+      [],
+    ],
+    [
+      "tickets",
+      [
+        "guild_id",
+        "ticket_id",
+        "department_id",
+        "opener_id",
+        "subject",
+        "description",
+        "state",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "channel_id",
+        "control_message_id",
+        "claimed_by",
+        "claimed_at",
+        "closed_by",
+        "close_reason",
+        "close_log_message_id",
+        "close_logged_at",
+        "failure_reason",
+        "closing_at",
+        "closed_at",
+      ],
+    ],
+    [
+      "ticket_form_responses",
+      [
+        "guild_id",
+        "ticket_id",
+        "response_id",
+        "field_id",
+        "field_label",
+        "field_type",
+        "response_text",
+        "created_at",
+      ],
+      [],
+    ],
+    [
+      "ticket_events",
+      [
+        "guild_id",
+        "ticket_id",
+        "event_id",
+        "event_type",
+        "details_json",
+        "created_at",
+      ],
+      ["actor_id"],
+    ],
+    [
+      "suggestion_configurations",
+      [
+        "guild_id",
+        "suggestion_channel_id",
+        "reviewer_role_id",
+        "created_at",
+        "updated_at",
+      ],
+      ["review_channel_id", "bindings_verified_at"],
+    ],
+    [
+      "suggestions",
+      [
+        "guild_id",
+        "suggestion_id",
+        "author_id",
+        "title",
+        "details",
+        "state",
+        "delivery_state",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "channel_id",
+        "message_id",
+        "thread_id",
+        "reviewer_id",
+        "review_reason",
+        "reviewed_at",
+        "withdrawn_at",
+        "failure_reason",
+      ],
+    ],
+    [
+      "suggestion_votes",
+      ["guild_id", "suggestion_id", "voter_id", "created_at", "updated_at"],
+      [],
+    ],
+    [
+      "suggestion_events",
+      [
+        "guild_id",
+        "suggestion_id",
+        "event_id",
+        "event_type",
+        "details_json",
+        "created_at",
+      ],
+      ["actor_id"],
+    ],
+    [
+      "application_forms",
+      [
+        "guild_id",
+        "form_id",
+        "slug",
+        "display_name",
+        "description",
+        "reviewer_role_id",
+        "review_channel_id",
+        "created_at",
+        "updated_at",
+      ],
+      ["bindings_verified_at"],
+    ],
+    [
+      "application_form_fields",
+      [
+        "guild_id",
+        "form_id",
+        "field_id",
+        "label",
+        "field_type",
+        "created_at",
+        "updated_at",
+      ],
+      ["description", "placeholder"],
+    ],
+    [
+      "applications",
+      [
+        "guild_id",
+        "application_id",
+        "form_id",
+        "applicant_id",
+        "state",
+        "delivery_state",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "review_channel_id",
+        "review_message_id",
+        "claimed_by",
+        "claimed_at",
+        "decision_by",
+        "decision_reason",
+        "decided_at",
+        "withdrawn_at",
+        "failure_reason",
+      ],
+    ],
+    [
+      "application_responses",
+      [
+        "guild_id",
+        "application_id",
+        "response_id",
+        "field_id",
+        "field_label",
+        "field_type",
+        "response_text",
+        "created_at",
+      ],
+      [],
+    ],
+    [
+      "application_events",
+      [
+        "guild_id",
+        "application_id",
+        "event_id",
+        "event_type",
+        "details_json",
+        "created_at",
+      ],
+      ["actor_id"],
+    ],
+  ];
+  for (const [table, required, nullable] of textColumns) {
+    validateTextColumnTypes(db, table, required, nullable, issues);
+  }
+
+  const timestampColumns: ReadonlyArray<
+    readonly [
+      table: string,
+      required: readonly string[],
+      nullable: readonly string[],
+    ]
+  > = [
+    ["delegated_capability_grants", ["created_at", "updated_at"], []],
+    [
+      "ticket_departments",
+      ["created_at", "updated_at"],
+      ["bindings_verified_at"],
+    ],
+    ["ticket_department_fields", ["created_at", "updated_at"], []],
+    ["posted_panels", ["created_at", "updated_at"], []],
+    [
+      "tickets",
+      ["created_at", "updated_at"],
+      ["claimed_at", "close_logged_at", "closing_at", "closed_at"],
+    ],
+    ["ticket_form_responses", ["created_at"], []],
+    ["ticket_events", ["created_at"], []],
+    [
+      "suggestion_configurations",
+      ["created_at", "updated_at"],
+      ["bindings_verified_at"],
+    ],
+    [
+      "suggestions",
+      ["created_at", "updated_at"],
+      ["reviewed_at", "withdrawn_at"],
+    ],
+    ["suggestion_votes", ["created_at", "updated_at"], []],
+    ["suggestion_events", ["created_at"], []],
+    [
+      "application_forms",
+      ["created_at", "updated_at"],
+      ["bindings_verified_at"],
+    ],
+    ["application_form_fields", ["created_at", "updated_at"], []],
+    [
+      "applications",
+      ["created_at", "updated_at"],
+      ["claimed_at", "decided_at", "withdrawn_at"],
+    ],
+    ["application_responses", ["created_at"], []],
+    ["application_events", ["created_at"], []],
+  ];
+  for (const [table, required, nullable] of timestampColumns) {
+    validateTimestampColumns(db, table, required, nullable, issues);
+  }
+
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM ticket_departments
+     GROUP BY guild_id HAVING COUNT(*) > 10 LIMIT 1`,
+    "a guild has more than 10 ticket departments",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM ticket_department_fields
+     GROUP BY guild_id, department_id HAVING COUNT(*) > 5 LIMIT 1`,
+    "a ticket department has more than 5 form fields",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM tickets
+     WHERE state IN ('creating', 'open', 'closing')
+     GROUP BY guild_id, opener_id HAVING COUNT(*) > 3 LIMIT 1`,
+    "a guild member has more than 3 active tickets",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM application_forms
+     GROUP BY guild_id HAVING COUNT(*) > 25 LIMIT 1`,
+    "a guild has more than 25 application forms",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM application_form_fields
+     GROUP BY guild_id, form_id HAVING COUNT(*) > 5 LIMIT 1`,
+    "an application form has more than 5 fields",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1
+     FROM application_forms AS forms
+     LEFT JOIN application_form_fields AS fields
+       ON fields.guild_id = forms.guild_id AND fields.form_id = forms.form_id
+     WHERE forms.enabled = 1
+     GROUP BY forms.guild_id, forms.form_id
+     HAVING COUNT(fields.field_id) NOT BETWEEN 1 AND 5
+     LIMIT 1`,
+    "an enabled application form does not have 1-5 fields",
+    issues,
+  );
+
+  for (const [table, column] of [
+    ["posted_panels", "configuration_json"],
+    ["ticket_events", "details_json"],
+    ["suggestion_events", "details_json"],
+    ["application_events", "details_json"],
+  ] as const) {
+    const maximum = table === "posted_panels" ? 16_000 : 4_000;
+    validateNoMatchingRows(
+      db,
+      `SELECT 1 FROM ${quoteIdentifier(table)}
+       WHERE json_valid(${quoteIdentifier(column)}) = 0
+          OR length(CAST(${quoteIdentifier(column)} AS BLOB)) > ${maximum}
+       LIMIT 1`,
+      `${table} contains invalid or oversized JSON`,
+      issues,
+    );
+  }
+}
+
+function validateTextColumnTypes(
+  db: Database.Database,
+  table: string,
+  required: readonly string[],
+  nullable: readonly string[],
+  issues: string[],
+): void {
+  const predicates = [
+    ...required.map((column) => `typeof(${quoteIdentifier(column)}) != 'text'`),
+    ...nullable.map(
+      (column) =>
+        `(${quoteIdentifier(column)} IS NOT NULL AND typeof(${quoteIdentifier(column)}) != 'text')`,
+    ),
+  ];
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM ${quoteIdentifier(table)} WHERE ${predicates.join(" OR ")} LIMIT 1`,
+    `${table} contains non-text data in a text column`,
+    issues,
+  );
+}
+
+function validateTimestampColumns(
+  db: Database.Database,
+  table: string,
+  required: readonly string[],
+  nullable: readonly string[],
+  issues: string[],
+): void {
+  const columns = [...required, ...nullable];
+  if (columns.length === 0) return;
+  const rows = db
+    .prepare(
+      `SELECT ${columns.map(quoteIdentifier).join(", ")} FROM ${quoteIdentifier(table)}`,
+    )
+    .all() as Array<Record<string, unknown>>;
+  for (const row of rows) {
+    if (
+      required.some((column) => !isValidTimestamp(row[column])) ||
+      nullable.some(
+        (column) => row[column] !== null && !isValidTimestamp(row[column]),
+      )
+    ) {
+      issues.push(`${table} contains invalid timestamps`);
+      return;
+    }
+  }
+}
+
+function validateNoMatchingRows(
+  db: Database.Database,
+  sql: string,
+  issue: string,
+  issues: string[],
+): void {
+  if (db.prepare(sql).get()) {
+    issues.push(issue);
   }
 }
 

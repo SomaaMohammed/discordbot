@@ -5,15 +5,23 @@ import {
   type GuildMember,
   type InteractionReplyOptions,
   type ModalSubmitInteraction,
+  type StringSelectMenuInteraction,
   type TextChannel,
 } from "discord.js";
 import type { GuildRuntime } from "../runtime.js";
-import type { TicketRecord } from "../types.js";
+import type {
+  TicketConfiguration,
+  TicketDepartment,
+  TicketDepartmentField,
+  TicketFormResponseInput,
+  TicketRecord,
+  PostedPanel,
+} from "../types.js";
 import {
   SAFE_PANEL_ALLOWED_MENTIONS,
   parseTicketOpenCustomId,
 } from "./panel-theme.js";
-import { evaluateTicketStaff } from "./ticket-authorization.js";
+import { authorizeSupportRoleOrCapability } from "./authorization.js";
 import {
   TICKET_CLOSE_REASON_INPUT_ID,
   TICKET_DESCRIPTION_INPUT_ID,
@@ -21,13 +29,23 @@ import {
   TICKET_SUBJECT_INPUT_ID,
   buildTicketClosureEmbed,
   buildTicketControlRow,
+  buildTicketDepartmentSelect,
   buildTicketInfoPayload,
   buildTicketWelcomePayload,
   createTicketCloseModal,
   createTicketOpenModal,
   normalizeTicketInput,
   parseTicketComponentId,
+  parseTicketDepartmentSelectCustomId,
+  toTicketFormFieldInput,
+  toTicketFormResponse,
 } from "./ticket-components.js";
+import {
+  FORM_LIMITS,
+  validateFormResponses,
+  type FormResponse,
+} from "./forms.js";
+import { isConfiguredDepartment } from "./phase2-permissions.js";
 import {
   canDeliverTicketLog,
   createPrivateTicketChannel,
@@ -40,8 +58,14 @@ import {
 } from "./ticket-transcript.js";
 
 const TICKET_COMPONENT_NAMESPACE = "superior:ticket:";
+const TICKET_FORM_SUMMARY_INPUT_LIMIT =
+  FORM_LIMITS.fields *
+    (FORM_LIMITS.label + FORM_LIMITS.response + ": ".length) +
+  (FORM_LIMITS.fields - 1) * "\n".length;
 
 type TicketInteraction = ButtonInteraction | ModalSubmitInteraction;
+type TicketComponentInteraction =
+  TicketInteraction | StringSelectMenuInteraction;
 
 export async function handleTicketButton(
   interaction: ButtonInteraction,
@@ -73,8 +97,15 @@ export async function handleTicketButton(
     parsed.ticketId,
   );
   if (!ticket) return true;
+  if (!ticketRoutingConfiguration(runtime, ticket)) {
+    await replyPrivate(
+      interaction,
+      "This ticket department is awaiting binding verification. Ask an administrator to verify its routing before using ticket controls.",
+    );
+    return true;
+  }
   if (parsed.kind === "close") {
-    const actor = await requireTicketStaff(interaction, runtime);
+    const actor = await requireTicketStaff(interaction, runtime, ticket);
     if (!actor) return true;
     const current = runtime.storage.getTicketById(ticket.ticketId);
     if (
@@ -102,7 +133,12 @@ export async function handleTicketButton(
       return true;
     }
     if (actor.id !== ticket.openerId) {
-      const staff = await isTicketStaff(interaction.guild!, runtime, actor);
+      const staff = await isTicketStaff(
+        interaction.guild!,
+        runtime,
+        actor.id,
+        ticket,
+      );
       if (!staff) {
         await replyPrivate(
           interaction,
@@ -123,11 +159,14 @@ export async function handleTicketButton(
       );
       return true;
     }
-    await replyPrivate(interaction, buildTicketInfoPayload(current));
+    await replyPrivate(
+      interaction,
+      buildTicketInfoPayload(current, ticketDisplayContext(runtime, current)),
+    );
     runtime.storage.recordCommandMetric("ticket.info");
     return true;
   }
-  const actor = await requireTicketStaff(interaction, runtime);
+  const actor = await requireTicketStaff(interaction, runtime, ticket);
   if (!actor) return true;
   if (!runtime.isCurrent()) {
     await replyPrivate(interaction, "This server changed. Please try again.");
@@ -213,10 +252,64 @@ export async function handleTicketModal(
     return true;
   }
   if (parsed.kind === "open-modal") {
-    await handleOpenModal(interaction, runtime, parsed.panelId);
+    await handleOpenModal(
+      interaction,
+      runtime,
+      parsed.panelId,
+      parsed.departmentId,
+      parsed.definitionVersion,
+    );
   } else {
     await handleCloseModal(interaction, runtime, parsed.ticketId);
   }
+  return true;
+}
+
+export async function handleTicketSelect(
+  interaction: StringSelectMenuInteraction,
+  runtime: GuildRuntime,
+): Promise<boolean> {
+  if (!interaction.customId.startsWith(TICKET_COMPONENT_NAMESPACE)) {
+    return false;
+  }
+  const panelId = parseTicketDepartmentSelectCustomId(interaction.customId);
+  if (!panelId) {
+    await replyPrivate(
+      interaction,
+      "This ticket department selection is outdated. Open the launcher again.",
+    );
+    return true;
+  }
+  const panel = await verifyTicketPanelSelection(interaction, runtime, panelId);
+  if (!panel) {
+    await replyPrivate(
+      interaction,
+      "This ticket launcher is outdated or missing. Ask an administrator to refresh it.",
+    );
+    return true;
+  }
+  if (interaction.values.length !== 1) {
+    await replyPrivate(
+      interaction,
+      "Choose exactly one current ticket department.",
+    );
+    return true;
+  }
+  const department = runtime.storage.getTicketDepartment(
+    interaction.values[0]!,
+  );
+  if (
+    !department?.enabled ||
+    department.guildId !== runtime.guildId ||
+    !runtime.isCurrent()
+  ) {
+    await replyPrivate(
+      interaction,
+      "That ticket department is disabled, deleted, or no longer available. Open the launcher again.",
+    );
+    return true;
+  }
+  await showDepartmentModal(interaction, runtime, panel.panelId, department);
   return true;
 }
 
@@ -225,40 +318,151 @@ async function handleOpenButton(
   runtime: GuildRuntime,
   panelId: string,
 ): Promise<void> {
-  const panel = runtime.storage.findPostedPanelByToken(panelId);
-  const configuration = runtime.storage.getTicketConfiguration();
-  if (
-    !panel ||
-    panel.preset !== "tickets" ||
-    panel.channelId !== interaction.channelId ||
-    panel.messageId !== interaction.message.id ||
-    interaction.message.author.id !== interaction.client.user?.id ||
-    !configuration?.enabled ||
-    interaction.guild?.id !== runtime.guildId ||
-    !runtime.isCurrent()
-  ) {
+  const panel = verifyTicketPanelInteraction(interaction, runtime, panelId);
+  if (!panel) {
     await replyPrivate(
       interaction,
       "This ticket panel is outdated or tickets are unavailable. Ask an administrator to refresh it.",
     );
     return;
   }
-  await interaction.showModal(createTicketOpenModal(panel.panelId));
+  const departments = enabledTicketDepartments(runtime);
+  if (departments.length === 0) {
+    await replyPrivate(
+      interaction,
+      "Tickets are currently unavailable. Ask an administrator to review the enabled departments.",
+    );
+    return;
+  }
+  if (departments.length === 1) {
+    await showDepartmentModal(
+      interaction,
+      runtime,
+      panel.panelId,
+      departments[0]!,
+    );
+    return;
+  }
+  await interaction.reply({
+    content: "Choose the support department that best matches your request:",
+    components: [buildTicketDepartmentSelect(panel.panelId, departments)],
+    ephemeral: true,
+    allowedMentions: { parse: [] },
+  });
   runtime.storage.recordCommandMetric("panel.tickets.use");
+}
+
+function verifyTicketPanelInteraction(
+  interaction: ButtonInteraction,
+  runtime: GuildRuntime,
+  panelId: string,
+): PostedPanel | null {
+  const panel = runtime.storage.findPostedPanelByToken(panelId);
+  return panel &&
+    panel.guildId === runtime.guildId &&
+    panel.preset === "tickets" &&
+    panel.channelId === interaction.channelId &&
+    panel.messageId === interaction.message.id &&
+    interaction.message.author.id === interaction.client.user?.id &&
+    interaction.guild?.id === runtime.guildId &&
+    runtime.isCurrent()
+    ? panel
+    : null;
+}
+
+async function verifyTicketPanelSelection(
+  interaction: StringSelectMenuInteraction,
+  runtime: GuildRuntime,
+  panelId: string,
+): Promise<PostedPanel | null> {
+  const panel = runtime.storage.findPostedPanelByToken(panelId);
+  const guild = interaction.guild;
+  if (
+    !panel ||
+    panel.guildId !== runtime.guildId ||
+    panel.preset !== "tickets" ||
+    panel.channelId !== interaction.channelId ||
+    !guild ||
+    guild.id !== runtime.guildId ||
+    !runtime.isCurrent()
+  ) {
+    return null;
+  }
+  const channel = await guild.channels.fetch(panel.channelId).catch(() => null);
+  if (
+    !channel ||
+    (channel.type !== ChannelType.GuildText &&
+      channel.type !== ChannelType.GuildAnnouncement)
+  ) {
+    return null;
+  }
+  const launcher = await channel.messages
+    .fetch(panel.messageId)
+    .catch(() => null);
+  return launcher?.author.id === interaction.client.user?.id &&
+    runtime.isCurrent()
+    ? panel
+    : null;
+}
+
+function enabledTicketDepartments(runtime: GuildRuntime): TicketDepartment[] {
+  return runtime.storage
+    .listTicketDepartments({ enabled: true, limit: 10 })
+    .filter(
+      (department) =>
+        department.guildId === runtime.guildId && department.enabled,
+    )
+    .slice(0, 10);
+}
+
+async function showDepartmentModal(
+  interaction: ButtonInteraction | StringSelectMenuInteraction,
+  runtime: GuildRuntime,
+  panelId: string,
+  department: TicketDepartment,
+): Promise<void> {
+  if (
+    department.guildId !== runtime.guildId ||
+    !department.enabled ||
+    !runtime.isCurrent()
+  ) {
+    await replyPrivate(
+      interaction,
+      "That ticket department is no longer available. Open the current launcher again.",
+    );
+    return;
+  }
+  try {
+    const fields = ticketDepartmentFields(runtime, department);
+    await interaction.showModal(
+      createTicketOpenModal(panelId, {
+        departmentId: department.departmentId,
+        definitionVersion: department.definitionVersion,
+        departmentName: department.displayName,
+        fields: fields.map(toTicketFormFieldInput),
+      }),
+    );
+    runtime.storage.recordCommandMetric("panel.tickets.use");
+  } catch (error) {
+    await replyPrivate(
+      interaction,
+      `That ticket form is invalid: ${errorMessage(error)}`,
+    );
+  }
 }
 
 async function handleOpenModal(
   interaction: ModalSubmitInteraction,
   runtime: GuildRuntime,
   panelId: string,
+  departmentId: string | null = null,
+  definitionVersion: number | null = null,
 ): Promise<void> {
   const panel = runtime.storage.findPostedPanelByToken(panelId);
-  const configuration = runtime.storage.getTicketConfiguration();
   if (
     !panel ||
     panel.preset !== "tickets" ||
     panel.channelId !== interaction.channelId ||
-    !configuration?.enabled ||
     interaction.guild?.id !== runtime.guildId
   ) {
     await replyPrivate(
@@ -267,18 +471,31 @@ async function handleOpenModal(
     );
     return;
   }
-  let subject: string;
-  let description: string;
-  try {
-    subject = normalizeTicketInput(
-      interaction.fields.getTextInputValue(TICKET_SUBJECT_INPUT_ID),
-      "Subject",
-      TICKET_INPUT_LIMITS.subject,
+  const opening = resolveOpeningDepartment(runtime, departmentId);
+  if (!opening) {
+    await replyPrivate(
+      interaction,
+      "This ticket form points to a disabled, deleted, or incomplete department. Open the current launcher again.",
     );
-    description = normalizeTicketInput(
-      interaction.fields.getTextInputValue(TICKET_DESCRIPTION_INPUT_ID),
-      "Description",
-      TICKET_INPUT_LIMITS.description,
+    return;
+  }
+  if (
+    departmentId !== null &&
+    (definitionVersion === null ||
+      definitionVersion !== opening.department?.definitionVersion)
+  ) {
+    await replyPrivate(
+      interaction,
+      "That ticket form changed after it was opened. Open a fresh form and submit again.",
+    );
+    return;
+  }
+  let submission: TicketSubmission;
+  try {
+    submission = readTicketSubmission(
+      interaction,
+      departmentId === null ? [] : opening.fields,
+      opening.department?.displayName ?? "Support",
     );
   } catch (error) {
     await replyPrivate(interaction, errorMessage(error));
@@ -321,7 +538,8 @@ async function handleOpenModal(
   }
   const resources = await inspectTicketConfigurationResources(
     guild,
-    configuration,
+    opening.configuration,
+    runtime.storage,
   );
   if (resources.issues.length > 0) {
     await replyPrivate(
@@ -335,13 +553,46 @@ async function handleOpenModal(
     await replyPrivate(interaction, "This server changed. Please try again.");
     return;
   }
-  const reservation = runtime.storage.reserveTicketCreation({
-    openerId: opener.id,
-    subject,
-    description,
-  });
+  if (
+    opening.department &&
+    !sameDepartmentSnapshot(
+      opening.department,
+      runtime.storage.getTicketDepartment(opening.department.departmentId),
+    )
+  ) {
+    await replyPrivate(
+      interaction,
+      "That ticket department changed while the form was being verified. Open a fresh form and submit again.",
+    );
+    return;
+  }
+  let reservation;
+  try {
+    reservation = runtime.storage.reserveTicketCreation({
+      openerId: opener.id,
+      subject: submission.subject,
+      description: submission.description,
+      ...(departmentId && opening.department
+        ? { departmentId: opening.department.departmentId }
+        : {}),
+      ...(submission.responses ? { responses: submission.responses } : {}),
+    });
+  } catch {
+    await replyPrivate(
+      interaction,
+      "That ticket department or form changed before the request could be reserved. Open a fresh form and try again.",
+    );
+    return;
+  }
   if (reservation.status === "existing") {
     await replyPrivate(interaction, existingTicketMessage(reservation.ticket));
+    return;
+  }
+  if (reservation.status === "limit") {
+    await replyPrivate(
+      interaction,
+      `You already have ${reservation.activeCount} active tickets in this server. Close one before opening another.`,
+    );
     return;
   }
   let channel: TextChannel | null = null;
@@ -382,7 +633,10 @@ async function handleOpenModal(
       throw new Error("Ticket reservation was no longer available.");
     }
     controlMessage = await channel.send(
-      buildTicketWelcomePayload(activated.ticket),
+      buildTicketWelcomePayload(
+        activated.ticket,
+        ticketDisplayContext(runtime, activated.ticket),
+      ),
     );
     if (!runtime.isCurrent()) {
       throw new Error("Server configuration changed while controls were sent.");
@@ -534,7 +788,14 @@ async function handleCloseModal(
     );
     return;
   }
-  const actor = await requireTicketStaff(interaction, runtime);
+  if (!ticketRoutingConfiguration(runtime, ticket)) {
+    await replyPrivate(
+      interaction,
+      "This ticket department is awaiting binding verification. Verify its routing before closing or finalizing this ticket.",
+    );
+    return;
+  }
+  const actor = await requireTicketStaff(interaction, runtime, ticket);
   if (!actor) return;
   if (ticket.state === "closed") {
     await replyPrivate(
@@ -566,17 +827,18 @@ async function handleCloseModal(
     return;
   }
   const guild = interaction.guild!;
-  const configuration = runtime.storage.getTicketConfiguration();
+  const configuration = ticketRoutingConfiguration(runtime, ticket);
   if (!configuration) {
     await replyPrivate(
       interaction,
-      "Ticket configuration is missing. Restore it before closing this ticket.",
+      "This ticket department no longer has complete routing. Restore its log channel and support role before closing this ticket.",
     );
     return;
   }
   const resources = await inspectTicketConfigurationResources(
     guild,
     configuration,
+    runtime.storage,
   );
   if (
     !resources.logChannel ||
@@ -641,7 +903,12 @@ async function handleCloseModal(
     const channel = rawChannel;
     const transcript = await collectTicketTranscript(
       channel as unknown as TranscriptChannelLike,
-      { expectedGuildId: runtime.guildId },
+      {
+        expectedGuildId: runtime.guildId,
+        headerFields: ticketTranscriptHeaderFields(
+          ticketDisplayContext(runtime, closingTicket),
+        ),
+      },
     );
     if (!runtime.isCurrent()) {
       throw new Error("Server configuration changed during ticket closure.");
@@ -651,7 +918,8 @@ async function handleCloseModal(
       name: `superior-ticket-${closingTicket.ticketNumber}.txt`,
       description: `Plain-text transcript for ticket #${closingTicket.ticketNumber}`,
     };
-    const closureEmbed = buildTicketClosureEmbed(closingTicket);
+    const displayContext = ticketDisplayContext(runtime, closingTicket);
+    const closureEmbed = buildTicketClosureEmbed(closingTicket, displayContext);
     const logMessage = await resources.logChannel.send({
       embeds: [closureEmbed],
       files: [transcriptFile],
@@ -897,41 +1165,310 @@ function isCurrentTicketControl(
   );
 }
 
+interface OpeningDepartment {
+  department: TicketDepartment | null;
+  configuration: TicketConfiguration;
+  fields: TicketDepartmentField[];
+}
+
+interface TicketSubmission {
+  subject: string;
+  description: string;
+  responses?: TicketFormResponseInput[];
+}
+
+function resolveOpeningDepartment(
+  runtime: GuildRuntime,
+  departmentId: string | null,
+): OpeningDepartment | null {
+  if (departmentId) {
+    const department = runtime.storage.getTicketDepartment(departmentId);
+    if (
+      !department ||
+      department.guildId !== runtime.guildId ||
+      !department.enabled ||
+      department.bindingsVerifiedAt === null ||
+      !isConfiguredDepartment(department)
+    ) {
+      return null;
+    }
+    try {
+      return {
+        department,
+        configuration: departmentConfiguration(department),
+        fields: ticketDepartmentFields(runtime, department),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  const compatibility = runtime.storage.getTicketConfiguration();
+  if (!compatibility?.enabled || compatibility.guildId !== runtime.guildId) {
+    return null;
+  }
+  const department = compatibility.departmentId
+    ? runtime.storage.getTicketDepartment(compatibility.departmentId)
+    : runtime.storage.getTicketDepartmentBySlug("general-support");
+  if (
+    department &&
+    (department.guildId !== runtime.guildId ||
+      department.bindingsVerifiedAt === null)
+  ) {
+    return null;
+  }
+  if (!department && compatibility.departmentId) return null;
+  try {
+    return {
+      department,
+      configuration:
+        department && isConfiguredDepartment(department)
+          ? departmentConfiguration(department)
+          : compatibility,
+      fields: department ? ticketDepartmentFields(runtime, department) : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function ticketDepartmentFields(
+  runtime: GuildRuntime,
+  department: TicketDepartment,
+): TicketDepartmentField[] {
+  const fields = runtime.storage
+    .listTicketDepartmentFields(department.departmentId)
+    .filter(
+      (field) =>
+        field.guildId === runtime.guildId &&
+        field.departmentId === department.departmentId,
+    )
+    .sort(
+      (left, right) =>
+        left.sortOrder - right.sortOrder ||
+        left.fieldId.localeCompare(right.fieldId),
+    );
+  if (fields.length > 5) {
+    throw new RangeError("Ticket forms support at most five fields.");
+  }
+  return fields;
+}
+
+function readTicketSubmission(
+  interaction: ModalSubmitInteraction,
+  fields: readonly TicketDepartmentField[],
+  departmentName: string,
+): TicketSubmission {
+  if (fields.length === 0) {
+    return {
+      subject: normalizeTicketInput(
+        interaction.fields.getTextInputValue(TICKET_SUBJECT_INPUT_ID),
+        "Subject",
+        TICKET_INPUT_LIMITS.subject,
+      ),
+      description: normalizeTicketInput(
+        interaction.fields.getTextInputValue(TICKET_DESCRIPTION_INPUT_ID),
+        "Description",
+        TICKET_INPUT_LIMITS.description,
+      ),
+    };
+  }
+  const responses = validateFormResponses(
+    fields.map(toTicketFormFieldInput),
+    (fieldId) => interaction.fields.getTextInputValue(fieldId),
+  );
+  const responseById = new Map(
+    responses.map((response) => [response.fieldId, response]),
+  );
+  const storedResponses = fields.map((field) => {
+    const response = responseById.get(field.fieldId)!;
+    return {
+      fieldId: field.fieldId,
+      fieldLabel: field.label,
+      fieldType: field.fieldType,
+      responseText: response.value,
+      sortOrder: field.sortOrder,
+    };
+  });
+  const firstAnswer = responses.find((response) => response.value)?.value;
+  const rawSubject = (firstAnswer ?? `${departmentName} request`)
+    .replace(/\s+/gu, " ")
+    .trim();
+  const rawDescription = responses
+    .map((response) => `${response.label}: ${response.value || "No response"}`)
+    .join("\n");
+  return {
+    subject: truncateNormalizedTicketText(
+      rawSubject,
+      "Subject",
+      TICKET_INPUT_LIMITS.subject,
+    ),
+    description: truncateNormalizedTicketText(
+      rawDescription || `Submitted the ${departmentName} ticket form.`,
+      "Description",
+      TICKET_INPUT_LIMITS.description,
+    ),
+    responses: storedResponses,
+  };
+}
+
+function truncateNormalizedTicketText(
+  value: string,
+  label: string,
+  maximum: number,
+): string {
+  const normalized = normalizeTicketInput(
+    value,
+    label,
+    TICKET_FORM_SUMMARY_INPUT_LIMIT,
+  );
+  return normalized.length <= maximum
+    ? normalized
+    : normalized.slice(0, maximum).trimEnd();
+}
+
+function departmentConfiguration(
+  department: TicketDepartment & {
+    categoryId: string;
+    logChannelId: string;
+    supportRoleId: string;
+  },
+): TicketConfiguration {
+  return {
+    guildId: department.guildId,
+    departmentId: department.departmentId,
+    enabled: department.enabled,
+    categoryId: department.categoryId,
+    logChannelId: department.logChannelId,
+    supportRoleId: department.supportRoleId,
+    createdAt: department.createdAt,
+    updatedAt: department.updatedAt,
+  };
+}
+
+function ticketRoutingConfiguration(
+  runtime: GuildRuntime,
+  ticket: TicketRecord,
+): TicketConfiguration | null {
+  const department = runtime.storage.getTicketDepartment(ticket.departmentId);
+  if (
+    department?.guildId === runtime.guildId &&
+    department.bindingsVerifiedAt !== null &&
+    isConfiguredDepartment(department)
+  ) {
+    return departmentConfiguration(department);
+  }
+  if (department) return null;
+  const compatibility = runtime.storage.getTicketConfiguration();
+  return compatibility?.guildId === runtime.guildId &&
+    !compatibility.departmentId
+    ? compatibility
+    : null;
+}
+
+function ticketSupportRoleId(
+  runtime: GuildRuntime,
+  ticket: TicketRecord,
+): string | null {
+  return ticketRoutingConfiguration(runtime, ticket)?.supportRoleId ?? null;
+}
+
+function sameDepartmentSnapshot(
+  expected: TicketDepartment,
+  current: TicketDepartment | null,
+): boolean {
+  return Boolean(
+    current &&
+    current.guildId === expected.guildId &&
+    current.departmentId === expected.departmentId &&
+    current.enabled === expected.enabled &&
+    current.definitionVersion === expected.definitionVersion &&
+    current.categoryId === expected.categoryId &&
+    current.logChannelId === expected.logChannelId &&
+    current.supportRoleId === expected.supportRoleId &&
+    current.updatedAt === expected.updatedAt,
+  );
+}
+
+function ticketDisplayContext(
+  runtime: GuildRuntime,
+  ticket: TicketRecord,
+): {
+  department: { displayName: string } | null;
+  responses: FormResponse[];
+} {
+  const department = runtime.storage.getTicketDepartment(ticket.departmentId);
+  const responses = runtime.storage
+    .listTicketResponses(ticket.ticketId)
+    .filter(
+      (response) =>
+        response.guildId === runtime.guildId &&
+        response.ticketId === ticket.ticketId,
+    )
+    .map(toTicketFormResponse);
+  return {
+    department:
+      department?.guildId === runtime.guildId
+        ? { displayName: department.displayName }
+        : null,
+    responses,
+  };
+}
+
+function ticketTranscriptHeaderFields(
+  context: ReturnType<typeof ticketDisplayContext>,
+): Array<{ label: string; value: string }> {
+  return [
+    ...(context.department
+      ? [{ label: "Department", value: context.department.displayName }]
+      : []),
+    ...context.responses.map((response) => ({
+      label: `Form - ${response.label}`,
+      value: response.value || "No response",
+    })),
+  ];
+}
+
 async function requireTicketStaff(
   interaction: TicketInteraction,
   runtime: GuildRuntime,
+  ticket: TicketRecord,
 ): Promise<GuildMember | null> {
-  const member = await fetchInteractionMember(interaction, runtime.guildId);
-  if (!member || !interaction.guild) {
+  if (!interaction.guild || ticket.guildId !== runtime.guildId) {
     await replyPrivate(interaction, "Could not verify your server membership.");
     return null;
   }
-  if (!(await isTicketStaff(interaction.guild, runtime, member))) {
+  const decision = await authorizeSupportRoleOrCapability({
+    guild: interaction.guild,
+    userId: interaction.user.id,
+    capability: "tickets.manage",
+    grants: runtime.storage,
+    configuredRoleId: ticketSupportRoleId(runtime, ticket),
+  });
+  if (!decision.allowed) {
     await replyPrivate(
       interaction,
-      "Only the configured support role, server owner, or an Administrator can manage this ticket.",
+      "Only this department's support role, the server owner, an Administrator, or a tickets.manage delegate can manage this ticket.",
     );
     return null;
   }
-  return member;
+  return decision.member;
 }
 
 async function isTicketStaff(
   guild: Guild,
   runtime: GuildRuntime,
-  member: GuildMember,
+  userId: string,
+  ticket: TicketRecord,
 ): Promise<boolean> {
-  const configuration = runtime.storage.getTicketConfiguration();
-  const supportRole = configuration
-    ? await guild.roles.fetch(configuration.supportRoleId).catch(() => null)
-    : null;
-  return evaluateTicketStaff({
-    guildId: runtime.guildId,
-    ownerId: guild.ownerId,
-    member,
-    supportRoleId: configuration?.supportRoleId ?? null,
-    supportRole,
-  }).allowed;
+  const decision = await authorizeSupportRoleOrCapability({
+    guild,
+    userId,
+    capability: "tickets.manage",
+    grants: runtime.storage,
+    configuredRoleId: ticketSupportRoleId(runtime, ticket),
+  });
+  return decision.allowed;
 }
 
 async function fetchInteractionMember(
@@ -940,7 +1477,7 @@ async function fetchInteractionMember(
 ): Promise<GuildMember | null> {
   if (!interaction.guild || interaction.guild.id !== guildId) return null;
   const member = await interaction.guild.members
-    .fetch(interaction.user.id)
+    .fetch({ user: interaction.user.id, cache: true, force: true })
     .catch(() => null);
   return member?.guild.id === guildId ? member : null;
 }
@@ -1011,8 +1548,8 @@ async function deferPrivate(interaction: TicketInteraction): Promise<void> {
 }
 
 async function replyPrivate(
-  interaction: TicketInteraction,
-  value: string | Pick<InteractionReplyOptions, "content" | "embeds">,
+  interaction: TicketComponentInteraction,
+  value: string | Pick<InteractionReplyOptions, "content" | "embeds" | "files">,
 ): Promise<void> {
   const payload = typeof value === "string" ? { content: value } : value;
   if (interaction.deferred && !interaction.replied) {

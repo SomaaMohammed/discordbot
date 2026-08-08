@@ -8,6 +8,14 @@ export const TRANSCRIPT_FETCH_BATCH_SIZE = DEFAULT_TRANSCRIPT_FETCH_BATCH_SIZE;
 
 const MIN_TRANSCRIPT_BYTE_LIMIT = 256;
 const MAX_ATTACHMENTS_PER_MESSAGE = 10;
+const MAX_TRANSCRIPT_HEADER_FIELDS = 10;
+const MAX_TRANSCRIPT_HEADER_LABEL = 80;
+const MAX_TRANSCRIPT_HEADER_VALUE = 4_000;
+
+export interface TranscriptHeaderField {
+  label: string;
+  value: string;
+}
 
 export interface TranscriptAttachmentLike {
   url: string;
@@ -56,6 +64,8 @@ export interface TicketTranscriptOptions {
   batchSize?: number;
   /** Timestamp used in transcript metadata. */
   generatedAt?: Date | number;
+  /** Bounded ticket metadata rendered before channel messages. */
+  headerFields?: readonly TranscriptHeaderField[];
 }
 
 export type TranscriptTruncationReason = "message-limit" | "byte-limit";
@@ -86,6 +96,7 @@ interface ResolvedTranscriptOptions {
   maxBytes: number;
   batchSize: number;
   generatedAt: Date;
+  headerFields: TranscriptHeaderField[];
 }
 
 interface CollectedMessages {
@@ -288,6 +299,9 @@ function assembleTranscript(
     `Limits: ${options.maxMessages} messages; ${options.maxBytes} UTF-8 bytes`,
     `Truncated: ${reasons.length > 0 ? "yes" : "no"}`,
     ...(reasons.length > 0 ? [`Truncation: ${reasons.join("; ")}`] : []),
+    ...options.headerFields.map(
+      ({ label, value }) => `${singleLine(label)}: ${singleLine(value)}`,
+    ),
     "",
     "=".repeat(72),
     "",
@@ -413,5 +427,45 @@ function resolveOptions(
     maxBytes,
     batchSize,
     generatedAt,
+    headerFields: normalizeHeaderFields(options.headerFields ?? []),
   };
+}
+
+function normalizeHeaderFields(
+  fields: readonly TranscriptHeaderField[],
+): TranscriptHeaderField[] {
+  if (!Array.isArray(fields) || fields.length > MAX_TRANSCRIPT_HEADER_FIELDS) {
+    throw new RangeError(
+      `Transcript metadata supports at most ${MAX_TRANSCRIPT_HEADER_FIELDS} fields.`,
+    );
+  }
+  return fields.map((field) => {
+    if (!field || typeof field !== "object") {
+      throw new TypeError("Transcript metadata fields must be objects.");
+    }
+    const label = boundedSingleLine(
+      field.label,
+      MAX_TRANSCRIPT_HEADER_LABEL,
+      "Transcript metadata label",
+    );
+    const value = boundedSingleLine(
+      field.value,
+      MAX_TRANSCRIPT_HEADER_VALUE,
+      "Transcript metadata value",
+    );
+    return { label, value };
+  });
+}
+
+function boundedSingleLine(
+  value: string,
+  maximum: number,
+  label: string,
+): string {
+  if (typeof value !== "string") throw new TypeError(`${label} must be text.`);
+  const normalized = singleLine(value);
+  if (!normalized) throw new TypeError(`${label} cannot be empty.`);
+  return normalized.length <= maximum
+    ? normalized
+    : `${normalized.slice(0, maximum - 1)}…`;
 }

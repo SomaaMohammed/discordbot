@@ -77,6 +77,11 @@ describe("Superior panel theme and presets", () => {
         resource: { title: "Resources", body: "Useful server information." },
       },
       tickets: { preset: "tickets", panelToken: "PanelToken_1234" },
+      suggestions: { preset: "suggestions", panelToken: "PanelToken_1234" },
+      applications: {
+        preset: "applications",
+        panelToken: "PanelToken_1234",
+      },
     } as const;
 
     expect(Object.keys(requests)).toEqual(PANEL_PRESETS);
@@ -92,7 +97,7 @@ describe("Superior panel theme and presets", () => {
     expect(isPanelPreset("custom")).toBe(false);
   });
 
-  it("changes help copy to reflect only active optional features", () => {
+  it("changes active-service copy while showing member and delegated families", () => {
     const inactive = embedJson(renderHelpPanel(DISABLED_FEATURES));
     const active = embedJson(
       renderHelpPanel({
@@ -108,14 +113,33 @@ describe("Superior panel theme and presets", () => {
 
     expect(inactiveCopy).not.toContain("/greetings send");
     expect(inactiveCopy).not.toContain("/fun stats");
-    expect(inactiveCopy).not.toContain("`/ticket`");
     expect(inactiveCopy).toContain("No optional member services");
     expect(activeCopy).toContain("/greetings send");
     expect(activeCopy).toContain("/fun stats");
     expect(activeCopy).toContain("Natural chat");
     expect(activeCopy).toContain("Reply moderation");
     expect(activeCopy).toContain("Support tickets are active");
-    expect(activeCopy).toContain("`/ticket`");
+    for (const command of [
+      "`/access`",
+      "`/ticket`",
+      "`/suggestion`",
+      "`/application`",
+    ]) {
+      expect(inactiveCopy).toContain(command);
+      expect(activeCopy).toContain(command);
+    }
+    expect(inactive.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "Owner / Administrator commands",
+          value: expect.stringContaining("`/access`"),
+        }),
+        expect.objectContaining({
+          name: "Member and delegated commands",
+          value: expect.stringContaining("`/suggestion`"),
+        }),
+      ]),
+    );
   });
 
   it("builds a bounded server snapshot from aggregate Guild properties", () => {

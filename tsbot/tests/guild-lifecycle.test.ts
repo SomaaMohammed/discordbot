@@ -4,6 +4,7 @@ import {
   createDiscordClient,
   getDiscordClientWorkLifecycle,
   recordGuildAvailable,
+  recordGuildRemoved,
   recordGuildUnavailable,
 } from "../src/discord/bot.js";
 import type { BotRuntime } from "../src/runtime.js";
@@ -160,12 +161,12 @@ describe("guild lifecycle", () => {
     client.removeAllListeners();
   });
 
-  it("marks a departed guild inactive without invoking purge", () => {
+  it("marks an offline-unavailable guild inactive without invoking purge", () => {
     const markGuildLeft = vi.fn();
-    const purgeGuild = vi.fn();
+    const purgeGuildData = vi.fn();
     const invalidateGuild = vi.fn();
     const runtime = {
-      storage: { markGuildLeft, purgeGuild },
+      storage: { markGuildLeft, purgeGuildData },
       invalidateGuild,
     } as unknown as BotRuntime;
 
@@ -173,6 +174,43 @@ describe("guild lifecycle", () => {
 
     expect(markGuildLeft).toHaveBeenCalledWith(GUILD_ID);
     expect(invalidateGuild).toHaveBeenCalledWith(GUILD_ID);
-    expect(purgeGuild).not.toHaveBeenCalled();
+    expect(purgeGuildData).not.toHaveBeenCalled();
+  });
+
+  it("purges tenant data for a confirmed guild removal", () => {
+    const markGuildLeft = vi.fn();
+    const purgeGuildData = vi.fn(() => ({ guilds: 1 }));
+    const invalidateGuild = vi.fn();
+    const runtime = {
+      storage: { markGuildLeft, purgeGuildData },
+      invalidateGuild,
+    } as unknown as BotRuntime;
+
+    expect(recordGuildRemoved(runtime, GUILD_ID)).toEqual({ guilds: 1 });
+
+    expect(invalidateGuild).toHaveBeenCalledWith(GUILD_ID);
+    expect(purgeGuildData).toHaveBeenCalledWith(GUILD_ID);
+    expect(markGuildLeft).not.toHaveBeenCalled();
+  });
+
+  it("routes guildDelete through permanent tenant purge", async () => {
+    const purgeGuildData = vi.fn(() => ({ guilds: 1 }));
+    const runtime = {
+      storage: { purgeGuildData },
+      invalidateGuild: vi.fn(),
+    } as unknown as BotRuntime;
+    const client = createDiscordClient(runtime);
+
+    client.emit("guildDelete", {
+      id: GUILD_ID,
+      name: "Guild",
+    } as Guild);
+    const workLifecycle = getDiscordClientWorkLifecycle(client);
+
+    await expect(workLifecycle?.drain(1_000)).resolves.toBe(true);
+    expect(purgeGuildData).toHaveBeenCalledWith(GUILD_ID);
+
+    workLifecycle?.stop();
+    client.removeAllListeners();
   });
 });

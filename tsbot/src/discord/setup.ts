@@ -216,7 +216,7 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
       subcommand
         .setName("import")
         .setDescription(
-          "Owner-only replacement from a same-server v2 or v3 export",
+          "Owner-only replacement from a same-server v2, v3, or v4 export",
         )
         .addAttachmentOption((option) =>
           option
@@ -702,7 +702,7 @@ async function exportGuild(
   });
   await interaction.editReply({
     content:
-      "Active settings, metrics, panel records, ticket configuration, tickets, and ticket audit events for this server only.",
+      "Format-4 snapshot for this server only: metadata, settings, metrics, delegated grants, panels, ticket departments/fields/tickets/responses/events, suggestion configuration/suggestions/votes/events, application forms/fields/applications/responses/events, and delivery identifiers.",
     files: [attachment],
     allowedMentions: { parse: [] },
   });

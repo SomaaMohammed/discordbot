@@ -4,7 +4,7 @@ import {
   sanitizeGuildSettings,
 } from "../guild-settings.js";
 import {
-  PANEL_PRESETS,
+  MAX_TICKET_EVENTS_PER_TICKET,
   TICKET_EVENT_TYPES,
   TICKET_STATES,
   type GuildDataExport,
@@ -18,19 +18,32 @@ import {
   type TicketState,
 } from "../types.js";
 import { assertActiveMetricKey } from "./metric-keys.js";
+import {
+  emptyPhase2OperationalData,
+  insertPhase2OperationalData,
+  parsePhase2OperationalData,
+  PHASE2_COLLECTION_LIMITS,
+  upgradeLegacyV3OperationalData,
+} from "./guild-data-v4.js";
 
 const MAX_IMPORTED_METRICS = 50_000;
+const LEGACY_V3_PANEL_PRESETS = [
+  "help",
+  "server-info",
+  "resources",
+  "tickets",
+] as const;
 
 export const GUILD_DATA_COLLECTION_LIMITS = Object.freeze({
   metrics: MAX_IMPORTED_METRICS,
-  postedPanels: 5_000,
-  tickets: 10_000,
-  ticketEvents: 100_000,
+  ...PHASE2_COLLECTION_LIMITS,
 });
 
 export interface ParsedGuildDataImport extends GuildDataExport {
-  sourceFormatVersion: 2 | 3;
+  sourceFormatVersion: 2 | 3 | 4;
 }
+
+type LegacyTicketRecord = Omit<TicketRecord, "departmentId">;
 
 export function parseGuildDataExport(
   payload: unknown,
@@ -39,7 +52,7 @@ export function parseGuildDataExport(
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new TypeError("Guild import must be an object");
   }
-  const candidate = payload as {
+  const candidate = payload as Record<string, unknown> & {
     formatVersion?: unknown;
     guildId?: unknown;
     exportedAt?: unknown;
@@ -51,8 +64,12 @@ export function parseGuildDataExport(
     tickets?: unknown;
     ticketEvents?: unknown;
   };
-  if (candidate.formatVersion !== 2 && candidate.formatVersion !== 3) {
-    throw new TypeError("Guild import formatVersion must be 2 or 3");
+  if (
+    candidate.formatVersion !== 2 &&
+    candidate.formatVersion !== 3 &&
+    candidate.formatVersion !== 4
+  ) {
+    throw new TypeError("Guild import formatVersion must be 2, 3, or 4");
   }
   if (
     candidate.guildId !== guildId ||
@@ -94,16 +111,20 @@ export function parseGuildDataExport(
     candidate.formatVersion === 3
       ? parseImportedPostedPanels(candidate.postedPanels, guildId)
       : [];
-  const tickets =
+  const legacyTickets =
     candidate.formatVersion === 3
       ? parseImportedTickets(candidate.tickets, guildId)
       : [];
   const ticketEvents =
     candidate.formatVersion === 3
-      ? parseImportedTicketEvents(candidate.ticketEvents, guildId, tickets)
+      ? parseImportedTicketEvents(
+          candidate.ticketEvents,
+          guildId,
+          legacyTickets,
+        )
       : [];
   if (
-    tickets.some(({ state }) =>
+    legacyTickets.some(({ state }) =>
       (["creating", "open", "closing"] as TicketState[]).includes(state),
     ) &&
     !ticketConfiguration
@@ -112,18 +133,28 @@ export function parseGuildDataExport(
       "Guild import with active tickets requires ticket configuration",
     );
   }
+  const exportedAt = normalizeImportedTimestamp(candidate.exportedAt);
+  const operational =
+    candidate.formatVersion === 4
+      ? parsePhase2OperationalData(candidate, guildId)
+      : candidate.formatVersion === 3
+        ? upgradeLegacyV3OperationalData({
+            ticketConfiguration,
+            postedPanels,
+            tickets: legacyTickets,
+            ticketEvents,
+            fallbackTimestamp: exportedAt,
+          })
+        : emptyPhase2OperationalData();
   return {
     sourceFormatVersion: candidate.formatVersion,
-    formatVersion: 3,
+    formatVersion: 4,
     guildId,
-    exportedAt: normalizeImportedTimestamp(candidate.exportedAt),
+    exportedAt,
     metadata: candidate.metadata as GuildRecord,
     settings,
     metrics,
-    ticketConfiguration,
-    postedPanels,
-    tickets,
-    ticketEvents,
+    ...operational,
   };
 }
 
@@ -208,7 +239,10 @@ function parseImportedPostedPanels(
   });
 }
 
-function parseImportedTickets(value: unknown, guildId: string): TicketRecord[] {
+function parseImportedTickets(
+  value: unknown,
+  guildId: string,
+): LegacyTicketRecord[] {
   const rows = requireBoundedArray(
     value,
     GUILD_DATA_COLLECTION_LIMITS.tickets,
@@ -218,7 +252,7 @@ function parseImportedTickets(value: unknown, guildId: string): TicketRecord[] {
   const numbers = new Set<number>();
   const channels = new Set<string>();
   const activeOpeners = new Set<string>();
-  return rows.map((value): TicketRecord => {
+  return rows.map((value): LegacyTicketRecord => {
     const row = requireRecord(value, "Imported ticket");
     assertImportedGuildId(row.guildId, guildId, "ticket");
     const ticketId = assertOpaqueStorageId(row.ticketId, "ticket ID");
@@ -357,7 +391,7 @@ function parseImportedTickets(value: unknown, guildId: string): TicketRecord[] {
 function parseImportedTicketEvents(
   value: unknown,
   guildId: string,
-  tickets: TicketRecord[],
+  tickets: LegacyTicketRecord[],
 ): TicketEvent[] {
   const rows = requireBoundedArray(
     value,
@@ -367,6 +401,7 @@ function parseImportedTicketEvents(
   const ticketIds = new Set(tickets.map((ticket) => ticket.ticketId));
   const eventIds = new Set<string>();
   const eventNumbers = new Set<string>();
+  const eventCounts = new Map<string, number>();
   return rows.map((value): TicketEvent => {
     const row = requireRecord(value, "Imported ticket event");
     assertImportedGuildId(row.guildId, guildId, "ticket event");
@@ -376,6 +411,13 @@ function parseImportedTicketEvents(
         `Imported ticket event references unknown ticket ${ticketId}`,
       );
     }
+    const eventCount = (eventCounts.get(ticketId) ?? 0) + 1;
+    if (eventCount > MAX_TICKET_EVENTS_PER_TICKET) {
+      throw new RangeError(
+        `An imported ticket can have at most ${MAX_TICKET_EVENTS_PER_TICKET} events`,
+      );
+    }
+    eventCounts.set(ticketId, eventCount);
     const eventId = assertOpaqueStorageId(row.eventId, "ticket event ID");
     const eventNumber = normalizeImportedTicketNumber(row.eventNumber);
     rejectDuplicate(
@@ -410,95 +452,7 @@ export function insertImportedOperationalData(
   guildId: string,
   imported: GuildDataExport,
 ): void {
-  const configuration = imported.ticketConfiguration;
-  if (configuration) {
-    db.prepare(
-      `INSERT INTO ticket_configurations (
-         guild_id, enabled, category_id, log_channel_id, support_role_id,
-         created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      guildId,
-      configuration.enabled ? 1 : 0,
-      configuration.categoryId,
-      configuration.logChannelId,
-      configuration.supportRoleId,
-      configuration.createdAt,
-      configuration.updatedAt,
-    );
-  }
-
-  const insertPanel = db.prepare(
-    `INSERT INTO posted_panels (
-       guild_id, panel_id, preset, channel_id, message_id, configuration_json,
-       created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-  for (const panel of imported.postedPanels) {
-    insertPanel.run(
-      guildId,
-      panel.panelId,
-      panel.preset,
-      panel.channelId,
-      panel.messageId,
-      serializeImportedJson(panel.configuration, 16_000, "panel configuration"),
-      panel.createdAt,
-      panel.updatedAt,
-    );
-  }
-
-  const insertTicket = db.prepare(
-    `INSERT INTO tickets (
-       guild_id, ticket_id, ticket_number, opener_id, channel_id,
-       control_message_id, subject, description, state, claimed_by,
-       claimed_at, closed_by, close_reason, close_log_message_id,
-       close_logged_at, failure_reason, created_at, updated_at, closing_at,
-       closed_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-  for (const ticket of imported.tickets) {
-    insertTicket.run(
-      guildId,
-      ticket.ticketId,
-      ticket.ticketNumber,
-      ticket.openerId,
-      ticket.channelId,
-      ticket.controlMessageId,
-      ticket.subject,
-      ticket.description,
-      ticket.state,
-      ticket.claimedBy,
-      ticket.claimedAt,
-      ticket.closedBy,
-      ticket.closeReason,
-      ticket.closeLogMessageId,
-      ticket.closeLoggedAt,
-      ticket.failureReason,
-      ticket.createdAt,
-      ticket.updatedAt,
-      ticket.closingAt,
-      ticket.closedAt,
-    );
-  }
-
-  const insertEvent = db.prepare(
-    `INSERT INTO ticket_events (
-       guild_id, ticket_id, event_id, event_number, event_type, actor_id, details_json,
-       created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  );
-  for (const event of imported.ticketEvents) {
-    insertEvent.run(
-      guildId,
-      event.ticketId,
-      event.eventId,
-      event.eventNumber,
-      event.type,
-      event.actorId,
-      serializeImportedJson(event.details, 4_000, "ticket event details"),
-      event.createdAt,
-    );
-  }
+  insertPhase2OperationalData(db, guildId, imported);
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
@@ -559,7 +513,7 @@ function assertOpaqueStorageId(value: unknown, label: string): string {
 }
 
 function assertPanelPreset(value: unknown): PanelPreset {
-  if (!(PANEL_PRESETS as readonly unknown[]).includes(value)) {
+  if (!(LEGACY_V3_PANEL_PRESETS as readonly unknown[]).includes(value)) {
     throw new TypeError("Imported posted panel has an unsupported preset");
   }
   return value as PanelPreset;

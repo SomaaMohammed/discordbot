@@ -1,6 +1,5 @@
 import {
   ChannelType,
-  PermissionFlagsBits,
   SlashCommandBuilder,
   type SlashCommandSubcommandsOnlyBuilder,
 } from "discord.js";
@@ -20,7 +19,6 @@ export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     .setName("panel")
     .setDescription("Post and inspect fixed Superior server panels")
     .setDMPermission(false)
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addSubcommand((subcommand) =>
       subcommand
         .setName("list")

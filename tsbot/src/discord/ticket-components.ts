@@ -1,17 +1,33 @@
 import {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   ModalBuilder,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
   TextInputBuilder,
   TextInputStyle,
   escapeMarkdown,
   type APIEmbedField,
 } from "discord.js";
-import type { TicketRecord } from "../types.js";
+import type {
+  TicketDepartmentField,
+  TicketFormResponse,
+  TicketRecord,
+} from "../types.js";
+import { safeUnicodeEmoji } from "../unicode-emoji.js";
+import {
+  createConfiguredModal,
+  renderFormResponses,
+  safeDisplayText,
+  type FormFieldInput,
+  type FormResponse,
+} from "./forms.js";
 import {
   DISCORD_CUSTOM_ID_LIMIT,
   SAFE_PANEL_ALLOWED_MENTIONS,
+  SUPERIOR_PANEL_FOOTER_TEXT,
   createSuperiorEmbed,
   isTicketPanelToken,
 } from "./panel-theme.js";
@@ -22,31 +38,81 @@ export const TICKET_INPUT_LIMITS = Object.freeze({
   closeReason: 400,
 });
 
+export const TICKET_RESPONSE_ATTACHMENT_LIMIT_BYTES = 96 * 1_024;
+
 export const TICKET_SUBJECT_INPUT_ID = "subject";
 export const TICKET_DESCRIPTION_INPUT_ID = "description";
 export const TICKET_CLOSE_REASON_INPUT_ID = "reason";
 
 const TICKET_ACTION_PREFIX = "superior:ticket:";
 const TICKET_OPEN_MODAL_PREFIX = `${TICKET_ACTION_PREFIX}open-modal:`;
+const TICKET_SELECT_PREFIX = `${TICKET_ACTION_PREFIX}select:`;
 const TICKET_CLOSE_MODAL_PREFIX = `${TICKET_ACTION_PREFIX}close-modal:`;
 
 export type TicketControlAction = "claim" | "release" | "close" | "info";
 
 export type ParsedTicketComponent =
-  | { kind: "open-modal"; panelId: string }
+  | {
+      kind: "open-modal";
+      panelId: string;
+      departmentId: string | null;
+      definitionVersion: number | null;
+    }
   | { kind: "close-modal"; ticketId: string }
   | { kind: TicketControlAction; ticketId: string };
 
 export interface TicketMessagePayload {
   embeds: ReturnType<typeof createSuperiorEmbed>[];
   components: ActionRowBuilder<ButtonBuilder>[];
+  files: AttachmentBuilder[];
   allowedMentions: typeof SAFE_PANEL_ALLOWED_MENTIONS;
 }
 
-export function createTicketOpenModal(panelId: string): ModalBuilder {
+export interface TicketDepartmentDisplay {
+  departmentId: string;
+  displayName: string;
+  description: string;
+  emoji?: string | null;
+}
+
+export interface TicketDisplayContext {
+  department?: Pick<TicketDepartmentDisplay, "displayName"> | null;
+  responses?: readonly FormResponse[];
+}
+
+export function createTicketOpenModal(
+  panelId: string,
+  options: {
+    departmentId?: string | null;
+    definitionVersion?: number | null;
+    departmentName?: string;
+    fields?: readonly FormFieldInput[];
+  } = {},
+): ModalBuilder {
   assertOpaqueId(panelId, "panel");
+  const departmentId = options.departmentId ?? null;
+  if (departmentId) assertOpaqueId(departmentId, "department");
+  const definitionVersion = options.definitionVersion ?? null;
+  if (definitionVersion !== null) {
+    if (!departmentId) {
+      throw new TypeError(
+        "A ticket department version requires a department ID.",
+      );
+    }
+    assertDefinitionVersion(definitionVersion);
+  }
+  const customId = checkedCustomId(
+    `${TICKET_OPEN_MODAL_PREFIX}${panelId}${departmentId ? `:${departmentId}` : ""}${definitionVersion === null ? "" : `:${definitionVersion}`}`,
+  );
+  if (options.fields && options.fields.length > 0) {
+    return createConfiguredModal({
+      customId,
+      title: safeDisplayText(options.departmentName ?? "Open a Ticket", 45),
+      fields: options.fields,
+    });
+  }
   return new ModalBuilder()
-    .setCustomId(checkedCustomId(`${TICKET_OPEN_MODAL_PREFIX}${panelId}`))
+    .setCustomId(customId)
     .setTitle("Open a Support Ticket")
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
@@ -68,6 +134,44 @@ export function createTicketOpenModal(panelId: string): ModalBuilder {
           .setMaxLength(TICKET_INPUT_LIMITS.description),
       ),
     );
+}
+
+export function buildTicketDepartmentSelect(
+  panelId: string,
+  departments: readonly TicketDepartmentDisplay[],
+): ActionRowBuilder<StringSelectMenuBuilder> {
+  assertOpaqueId(panelId, "panel");
+  if (departments.length < 2 || departments.length > 10) {
+    throw new RangeError(
+      "Ticket department selectors require 2-10 departments.",
+    );
+  }
+  const options = departments.map((department) => {
+    assertOpaqueId(department.departmentId, "department");
+    const option = new StringSelectMenuOptionBuilder()
+      .setValue(department.departmentId)
+      .setLabel(safeDisplayText(department.displayName, 100))
+      .setDescription(safeDisplayText(department.description, 100));
+    const emoji = safeUnicodeEmoji(department.emoji);
+    if (emoji) option.setEmoji(emoji);
+    return option;
+  });
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(checkedCustomId(`${TICKET_SELECT_PREFIX}${panelId}`))
+      .setPlaceholder("Choose a support department")
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(options),
+  );
+}
+
+export function parseTicketDepartmentSelectCustomId(
+  customId: string,
+): string | null {
+  if (!customId.startsWith(TICKET_SELECT_PREFIX)) return null;
+  const panelId = customId.slice(TICKET_SELECT_PREFIX.length);
+  return isOpaqueId(panelId) ? panelId : null;
 }
 
 export function createTicketCloseModal(ticketId: string): ModalBuilder {
@@ -92,8 +196,16 @@ export function parseTicketComponentId(
   customId: string,
 ): ParsedTicketComponent | null {
   if (customId.startsWith(TICKET_OPEN_MODAL_PREFIX)) {
-    const panelId = customId.slice(TICKET_OPEN_MODAL_PREFIX.length);
-    return isOpaqueId(panelId) ? { kind: "open-modal", panelId } : null;
+    const values = customId.slice(TICKET_OPEN_MODAL_PREFIX.length).split(":");
+    const panelId = values[0] ?? "";
+    const departmentId = values[1] ?? null;
+    const definitionVersion = parseDefinitionVersion(values[2]);
+    return isOpaqueId(panelId) &&
+      values.length <= 3 &&
+      (departmentId === null || isOpaqueId(departmentId)) &&
+      (values[2] === undefined || definitionVersion !== null)
+      ? { kind: "open-modal", panelId, departmentId, definitionVersion }
+      : null;
   }
   if (customId.startsWith(TICKET_CLOSE_MODAL_PREFIX)) {
     const ticketId = customId.slice(TICKET_CLOSE_MODAL_PREFIX.length);
@@ -108,27 +220,80 @@ export function parseTicketComponentId(
   return null;
 }
 
+export function toTicketFormFieldInput(
+  field: TicketDepartmentField,
+): FormFieldInput {
+  return {
+    fieldId: field.fieldId,
+    key: `field-${field.sortOrder + 1}`,
+    label: field.label,
+    description: field.description,
+    placeholder: field.placeholder,
+    type: field.fieldType,
+    required: field.required,
+    minLength: field.minLength,
+    maxLength: field.maxLength,
+    sortOrder: field.sortOrder,
+  };
+}
+
+export function toTicketFormResponse(
+  response: TicketFormResponse,
+): FormResponse {
+  return {
+    fieldId: response.fieldId,
+    key: response.fieldId,
+    label: response.fieldLabel,
+    value: response.responseText,
+    sortOrder: response.sortOrder,
+  };
+}
+
 export function buildTicketWelcomePayload(
   ticket: TicketRecord,
+  context: TicketDisplayContext = {},
 ): TicketMessagePayload {
+  const title = `Ticket #${ticket.ticketNumber}`;
+  const description =
+    "Thank you for contacting the support team. Keep relevant details in this channel and wait for a staff response.";
+  const hasResponses = Boolean(context.responses?.length);
+  const fixedFields: APIEmbedField[] = [
+    { name: "Opened by", value: `<@${ticket.openerId}>`, inline: true },
+    {
+      name: "Created",
+      value: `<t:${toUnixSeconds(ticket.createdAt)}:F>`,
+      inline: true,
+    },
+    ...(hasResponses
+      ? []
+      : [
+          { name: "Subject", value: safeField(ticket.subject) },
+          { name: "Details", value: safeField(ticket.description) },
+        ]),
+    ...(context.department
+      ? [
+          {
+            name: "Department",
+            value: safeField(context.department.displayName),
+            inline: true,
+          },
+        ]
+      : []),
+  ];
+  const responseFields = hasResponses
+    ? renderBudgetedFormResponses(
+        context.responses!,
+        availableResponseFieldCharacters(title, description, fixedFields),
+      )
+    : [];
   const embed = createSuperiorEmbed()
-    .setTitle(`Ticket #${ticket.ticketNumber}`)
-    .setDescription(
-      "Thank you for contacting the support team. Keep relevant details in this channel and wait for a staff response.",
-    )
-    .addFields(
-      { name: "Opened by", value: `<@${ticket.openerId}>`, inline: true },
-      {
-        name: "Created",
-        value: `<t:${toUnixSeconds(ticket.createdAt)}:F>`,
-        inline: true,
-      },
-      { name: "Subject", value: safeField(ticket.subject) },
-      { name: "Details", value: safeField(ticket.description) },
-    );
+    .setTitle(title)
+    .setDescription(description)
+    .addFields(...fixedFields, ...responseFields);
   return {
     embeds: [embed],
     components: [buildTicketControlRow(ticket)],
+    files: buildTicketResponseAttachments(ticket, context.responses),
     allowedMentions: SAFE_PANEL_ALLOWED_MENTIONS,
   };
 }
@@ -163,8 +328,12 @@ export function buildTicketControlRow(
 
 export function buildTicketInfoPayload(
   ticket: TicketRecord,
+  context: TicketDisplayContext = {},
 ): TicketMessagePayload {
-  const fields: APIEmbedField[] = [
+  const title = `Ticket #${ticket.ticketNumber}`;
+  const description = `Created <t:${toUnixSeconds(ticket.createdAt)}:R>`;
+  const hasResponses = Boolean(context.responses?.length);
+  const prefixFields: APIEmbedField[] = [
     { name: "Status", value: titleCase(ticket.state), inline: true },
     {
       name: "Claimed by",
@@ -172,49 +341,96 @@ export function buildTicketInfoPayload(
       inline: true,
     },
     { name: "Opened by", value: `<@${ticket.openerId}>`, inline: true },
-    { name: "Subject", value: safeField(ticket.subject) },
+    ...(hasResponses
+      ? []
+      : [{ name: "Subject", value: safeField(ticket.subject) }]),
   ];
+  if (context.department) {
+    prefixFields.splice(1, 0, {
+      name: "Department",
+      value: safeField(context.department.displayName),
+      inline: true,
+    });
+  }
+  const suffixFields: APIEmbedField[] = [];
   if (ticket.closeReason) {
-    fields.push({
+    suffixFields.push({
       name: "Closure reason",
       value: safeField(ticket.closeReason),
     });
   }
+  const responseFields = hasResponses
+    ? renderBudgetedFormResponses(
+        context.responses!,
+        availableResponseFieldCharacters(title, description, [
+          ...prefixFields,
+          ...suffixFields,
+        ]),
+      )
+    : [];
   const embed = createSuperiorEmbed()
-    .setTitle(`Ticket #${ticket.ticketNumber}`)
-    .setDescription(`Created <t:${toUnixSeconds(ticket.createdAt)}:R>`)
-    .addFields(fields);
+    .setTitle(title)
+    .setDescription(description)
+    .addFields(...prefixFields, ...responseFields, ...suffixFields);
   return {
     embeds: [embed],
     components: [],
+    files: buildTicketResponseAttachments(ticket, context.responses),
     allowedMentions: SAFE_PANEL_ALLOWED_MENTIONS,
   };
 }
 
-export function buildTicketClosureEmbed(ticket: TicketRecord) {
+export function buildTicketClosureEmbed(
+  ticket: TicketRecord,
+  context: TicketDisplayContext = {},
+) {
   const closedAt = ticket.closedAt ?? new Date().toISOString();
+  const title = `Ticket #${ticket.ticketNumber} Closed`;
+  const description =
+    "The closure record and transcript were delivered successfully.";
+  const hasResponses = Boolean(context.responses?.length);
+  const prefixFields: APIEmbedField[] = [
+    { name: "Opened by", value: `<@${ticket.openerId}>`, inline: true },
+    {
+      name: "Closed by",
+      value: ticket.closedBy ? `<@${ticket.closedBy}>` : "Support staff",
+      inline: true,
+    },
+    ...(hasResponses
+      ? []
+      : [{ name: "Subject", value: safeField(ticket.subject) }]),
+    ...(context.department
+      ? [
+          {
+            name: "Department",
+            value: safeField(context.department.displayName),
+          },
+        ]
+      : []),
+  ];
+  const suffixFields: APIEmbedField[] = [
+    {
+      name: "Reason",
+      value: safeField(ticket.closeReason ?? "No reason recorded."),
+    },
+    {
+      name: "Closure recorded",
+      value: `<t:${toUnixSeconds(closedAt)}:F>`,
+    },
+  ];
+  const responseFields = hasResponses
+    ? renderBudgetedFormResponses(
+        context.responses!,
+        availableResponseFieldCharacters(title, description, [
+          ...prefixFields,
+          ...suffixFields,
+        ]),
+      )
+    : [];
   return createSuperiorEmbed()
-    .setTitle(`Ticket #${ticket.ticketNumber} Closed`)
-    .setDescription(
-      "The closure record and transcript were delivered successfully.",
-    )
-    .addFields(
-      { name: "Opened by", value: `<@${ticket.openerId}>`, inline: true },
-      {
-        name: "Closed by",
-        value: ticket.closedBy ? `<@${ticket.closedBy}>` : "Support staff",
-        inline: true,
-      },
-      { name: "Subject", value: safeField(ticket.subject) },
-      {
-        name: "Reason",
-        value: safeField(ticket.closeReason ?? "No reason recorded."),
-      },
-      {
-        name: "Closure recorded",
-        value: `<t:${toUnixSeconds(closedAt)}:F>`,
-      },
-    );
+    .setTitle(title)
+    .setDescription(description)
+    .addFields(...prefixFields, ...responseFields, ...suffixFields);
 }
 
 export function normalizeTicketInput(
@@ -257,6 +473,20 @@ function isOpaqueId(value: string): boolean {
   return isTicketPanelToken(value);
 }
 
+function assertDefinitionVersion(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
+    throw new RangeError("Ticket department version is invalid.");
+  }
+}
+
+function parseDefinitionVersion(value: string | undefined): number | null {
+  if (value === undefined || !/^\d{1,10}$/u.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 2_147_483_647
+    ? parsed
+    : null;
+}
+
 function assertOpaqueId(value: string, label: string): void {
   if (!isOpaqueId(value)) throw new TypeError(`Invalid ${label} identifier.`);
 }
@@ -272,6 +502,116 @@ function checkedCustomId(value: string): string {
 
 function safeField(value: string): string {
   return escapeMarkdown(value).slice(0, 1_024) || "Not provided";
+}
+
+function buildTicketResponseAttachments(
+  ticket: Pick<TicketRecord, "ticketNumber">,
+  responses: readonly FormResponse[] | undefined,
+): AttachmentBuilder[] {
+  if (!responses?.length) return [];
+  const body = [
+    `Superior ticket #${ticket.ticketNumber} custom-form responses`,
+    "Complete stored response values:",
+    "",
+    ...[...responses]
+      .sort(
+        (left, right) =>
+          left.sortOrder - right.sortOrder ||
+          left.fieldId.localeCompare(right.fieldId),
+      )
+      .flatMap((response, index) => [
+        `${index + 1}. ${response.label}`,
+        response.value || "[No response provided.]",
+        "",
+      ]),
+  ].join("\n");
+  const bounded = boundUtf8Text(body, TICKET_RESPONSE_ATTACHMENT_LIMIT_BYTES);
+  return [
+    new AttachmentBuilder(Buffer.from(bounded, "utf8"), {
+      name: `superior-ticket-${ticket.ticketNumber}-responses.txt`,
+    }),
+  ];
+}
+
+function boundUtf8Text(value: string, maximumBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maximumBytes) return value;
+  const suffix =
+    "\n\n[Attachment truncated because stored data exceeded form limits.]";
+  let remaining = maximumBytes - Buffer.byteLength(suffix, "utf8");
+  let bounded = "";
+  for (const character of value) {
+    const bytes = Buffer.byteLength(character, "utf8");
+    if (bytes > remaining) break;
+    bounded += character;
+    remaining -= bytes;
+  }
+  return `${bounded}${suffix}`;
+}
+
+const DISCORD_EMBED_CHARACTER_LIMIT = 6_000;
+const EMBED_CHARACTER_HEADROOM = 64;
+
+function availableResponseFieldCharacters(
+  title: string,
+  description: string,
+  fixedFields: readonly APIEmbedField[],
+): number {
+  return Math.max(
+    0,
+    DISCORD_EMBED_CHARACTER_LIMIT -
+      EMBED_CHARACTER_HEADROOM -
+      SUPERIOR_PANEL_FOOTER_TEXT.length -
+      title.length -
+      description.length -
+      fixedFields.reduce(
+        (total, field) => total + field.name.length + field.value.length,
+        0,
+      ),
+  );
+}
+
+function renderBudgetedFormResponses(
+  responses: readonly FormResponse[],
+  characterBudget: number,
+): APIEmbedField[] {
+  const fields = renderFormResponses(responses);
+  if (fields.length === 0) return [];
+  const nameCharacters = fields.reduce(
+    (total, field) => total + field.name.length,
+    0,
+  );
+  let valueBudget = Math.max(fields.length, characterBudget - nameCharacters);
+  const limits = new Array<number>(fields.length).fill(1);
+  let pending = fields.map((_, index) => index);
+  while (pending.length > 0) {
+    const share = Math.max(1, Math.floor(valueBudget / pending.length));
+    const fitting = pending.filter(
+      (index) => fields[index]!.value.length <= share,
+    );
+    if (fitting.length === 0) {
+      const remainder = Math.max(0, valueBudget - share * pending.length);
+      pending.forEach((index, pendingIndex) => {
+        limits[index] = share + (pendingIndex < remainder ? 1 : 0);
+      });
+      break;
+    }
+    const fittingSet = new Set(fitting);
+    for (const index of fitting) {
+      limits[index] = fields[index]!.value.length;
+      valueBudget -= limits[index]!;
+    }
+    pending = pending.filter((index) => !fittingSet.has(index));
+  }
+  return fields.map((field, index) => ({
+    ...field,
+    value: truncateFieldValue(field.value, Math.min(1_024, limits[index]!)),
+  }));
+}
+
+function truncateFieldValue(value: string, maximum: number): string {
+  if (value.length <= maximum) return value;
+  if (maximum <= 1) return "…";
+  return `${value.slice(0, maximum - 1).trimEnd()}…`;
 }
 
 function toUnixSeconds(value: string): number {

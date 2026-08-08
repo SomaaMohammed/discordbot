@@ -9,11 +9,15 @@ import {
   serializeGuildSettings,
 } from "../guild-settings.js";
 import type {
+  CapabilityGrantResult,
+  CapabilityRevokeResult,
+  GuildCapability,
   GuildDataExport,
   GuildMetricExport,
   GuildPurgeResult,
   GuildRecord,
   GuildSettings,
+  RoleCapabilityGrant,
   PanelPreset,
   PostedPanel,
   PostedPanelInput,
@@ -50,15 +54,68 @@ import {
 } from "./metric-keys.js";
 import {
   detectDatabaseSchema,
-  initializeV4Schema,
-  validateV4Schema,
+  initializeV5Schema,
+  validateV5Schema,
 } from "./schema.js";
 import { GuildOperationalRepository } from "./operational-repository.js";
+import { GuildAccessRepository } from "./access-repository.js";
+import { TicketDepartmentRepository } from "./ticket-department-repository.js";
+import { SuggestionRepository } from "./suggestion-repository.js";
+import {
+  ApplicationRepository,
+  type ApplicationListFilter,
+} from "./application-repository.js";
+import type {
+  ApplicationDecisionInput,
+  ApplicationDeliveryInput,
+  ApplicationDeliveryResult,
+  ApplicationEvent,
+  ApplicationEventInput,
+  ApplicationForm,
+  ApplicationFormDeleteResult,
+  ApplicationFormField,
+  ApplicationFormFieldInput,
+  ApplicationFormInput,
+  ApplicationFormUpdate,
+  ApplicationRecord,
+  ApplicationReservationInput,
+  ApplicationReservationResult,
+  ApplicationResponse,
+  ApplicationTransitionResult,
+  SuggestionConfiguration,
+  SuggestionConfigurationInput,
+  SuggestionDeliveryInput,
+  SuggestionDeliveryResult,
+  SuggestionEvent,
+  SuggestionEventInput,
+  SuggestionRecord,
+  SuggestionReservationInput,
+  SuggestionReservationResult,
+  SuggestionReviewInput,
+  SuggestionState,
+  SuggestionTransitionResult,
+  SuggestionVote,
+  SuggestionVoteCounts,
+  SuggestionVoteResult,
+  SuggestionVoteValue,
+  TicketDepartment,
+  TicketDepartmentDeleteResult,
+  TicketDepartmentField,
+  TicketDepartmentFieldInput,
+  TicketDepartmentInput,
+  TicketDepartmentUpdate,
+  TicketFormResponse,
+} from "../types.js";
 import {
   GUILD_DATA_COLLECTION_LIMITS,
   insertImportedOperationalData,
   parseGuildDataExport,
 } from "./guild-data.js";
+import {
+  deactivatePhase2OperationalBindings,
+  PHASE2_GUILD_TABLES,
+  readPhase2OperationalData,
+} from "./guild-data-v4.js";
 export { createOpaqueStorageId } from "./operational-repository.js";
 
 interface GuildRow {
@@ -120,10 +177,10 @@ export class BotStorage {
     }
     const dbFile = this.config.dbFile;
     if (dbFile === ":memory:") {
-      const memory = new Database(":memory:");
+      const memory = new Database(":memory:", { timeout: 5_000 });
       try {
         memory.pragma("foreign_keys = ON");
-        initializeV4Schema(memory, utcNow());
+        initializeV5Schema(memory, utcNow());
         this.db = memory;
       } catch (error) {
         memory.close();
@@ -137,6 +194,7 @@ export class BotStorage {
       const readonly = new Database(dbFile, {
         readonly: true,
         fileMustExist: true,
+        timeout: 5_000,
       });
       try {
         readonly.pragma("foreign_keys = ON");
@@ -161,19 +219,24 @@ export class BotStorage {
         `Database schema v3 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
       );
     }
+    if (schema === "legacy-v4") {
+      throw new Error(
+        `Database schema v4 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
+      );
+    }
     if (schema === "unknown") {
       throw new Error(
         "Database schema is unknown or incomplete; startup refused without modifying it",
       );
     }
 
-    const writable = new Database(dbFile);
+    const writable = new Database(dbFile, { timeout: 5_000 });
     try {
       writable.pragma("foreign_keys = ON");
       if (schema === "empty") {
-        initializeV4Schema(writable, utcNow());
+        initializeV5Schema(writable, utcNow());
       } else {
-        const issues = validateV4Schema(writable);
+        const issues = validateV5Schema(writable);
         if (issues.length > 0) {
           throw new Error(
             `Database changed after read-only classification: ${issues.join("; ")}`,
@@ -451,15 +514,75 @@ export class BotStorage {
       const boundedCollections = [
         ["metrics", counts.metrics, GUILD_DATA_COLLECTION_LIMITS.metrics],
         [
+          "delegated capability grants",
+          counts.delegatedCapabilityGrants,
+          GUILD_DATA_COLLECTION_LIMITS.delegatedCapabilityGrants,
+        ],
+        [
+          "ticket departments",
+          counts.ticketDepartments,
+          GUILD_DATA_COLLECTION_LIMITS.ticketDepartments,
+        ],
+        [
+          "ticket department fields",
+          counts.ticketDepartmentFields,
+          GUILD_DATA_COLLECTION_LIMITS.ticketDepartmentFields,
+        ],
+        [
           "posted panels",
           counts.postedPanels,
           GUILD_DATA_COLLECTION_LIMITS.postedPanels,
         ],
         ["tickets", counts.tickets, GUILD_DATA_COLLECTION_LIMITS.tickets],
         [
+          "ticket form responses",
+          counts.ticketFormResponses,
+          GUILD_DATA_COLLECTION_LIMITS.ticketFormResponses,
+        ],
+        [
           "ticket events",
           counts.ticketEvents,
           GUILD_DATA_COLLECTION_LIMITS.ticketEvents,
+        ],
+        [
+          "suggestions",
+          counts.suggestions,
+          GUILD_DATA_COLLECTION_LIMITS.suggestions,
+        ],
+        [
+          "suggestion votes",
+          counts.suggestionVotes,
+          GUILD_DATA_COLLECTION_LIMITS.suggestionVotes,
+        ],
+        [
+          "suggestion events",
+          counts.suggestionEvents,
+          GUILD_DATA_COLLECTION_LIMITS.suggestionEvents,
+        ],
+        [
+          "application forms",
+          counts.applicationForms,
+          GUILD_DATA_COLLECTION_LIMITS.applicationForms,
+        ],
+        [
+          "application form fields",
+          counts.applicationFormFields,
+          GUILD_DATA_COLLECTION_LIMITS.applicationFormFields,
+        ],
+        [
+          "applications",
+          counts.applications,
+          GUILD_DATA_COLLECTION_LIMITS.applications,
+        ],
+        [
+          "application responses",
+          counts.applicationResponses,
+          GUILD_DATA_COLLECTION_LIMITS.applicationResponses,
+        ],
+        [
+          "application events",
+          counts.applicationEvents,
+          GUILD_DATA_COLLECTION_LIMITS.applicationEvents,
         ],
       ] as const;
       for (const [label, count, maximum] of boundedCollections) {
@@ -487,10 +610,8 @@ export class BotStorage {
            FROM metrics WHERE guild_id = ? ORDER BY metric_key`,
         )
         .all(normalized) as MetricRow[];
-      const guildStorage = this.forGuild(normalized);
-      const tickets = guildStorage.listTickets().reverse();
       return {
-        formatVersion: 3,
+        formatVersion: 4,
         guildId: normalized,
         exportedAt: utcNow(),
         metadata,
@@ -500,10 +621,7 @@ export class BotStorage {
           value: row.metric_value,
           updatedAt: row.updated_at,
         })),
-        ticketConfiguration: guildStorage.getTicketConfiguration(),
-        postedPanels: guildStorage.listPostedPanels(),
-        tickets,
-        ticketEvents: guildStorage.listAllTicketEvents(),
+        ...readPhase2OperationalData(db, normalized),
       };
     });
     return exportSnapshot.deferred();
@@ -535,17 +653,10 @@ export class BotStorage {
       ).run(now, normalized);
       this.upsertSettings(normalized, reviewed, now);
       db.prepare("DELETE FROM metrics WHERE guild_id = ?").run(normalized);
-      if (imported.sourceFormatVersion === 3) {
-        db.prepare("DELETE FROM ticket_events WHERE guild_id = ?").run(
-          normalized,
-        );
-        db.prepare("DELETE FROM tickets WHERE guild_id = ?").run(normalized);
-        db.prepare("DELETE FROM posted_panels WHERE guild_id = ?").run(
-          normalized,
-        );
-        db.prepare("DELETE FROM ticket_configurations WHERE guild_id = ?").run(
-          normalized,
-        );
+      if (imported.sourceFormatVersion >= 3) {
+        for (const table of [...PHASE2_GUILD_TABLES].reverse()) {
+          db.prepare(`DELETE FROM ${table} WHERE guild_id = ?`).run(normalized);
+        }
       }
       const insert = db.prepare(
         `INSERT INTO metrics (
@@ -555,14 +666,10 @@ export class BotStorage {
       for (const metric of imported.metrics) {
         insert.run(normalized, metric.key, metric.value, metric.updatedAt);
       }
-      if (imported.sourceFormatVersion === 3) {
-        insertImportedOperationalData(db, normalized, {
-          ...imported,
-          ticketConfiguration: imported.ticketConfiguration
-            ? { ...imported.ticketConfiguration, enabled: false }
-            : null,
-        });
+      if (imported.sourceFormatVersion >= 3) {
+        insertImportedOperationalData(db, normalized, imported);
       }
+      deactivatePhase2OperationalBindings(db, normalized);
       saved = reviewed;
     });
     apply.immediate();
@@ -588,10 +695,7 @@ export class BotStorage {
         "guilds",
         "guild_settings",
         "metrics",
-        "ticket_configurations",
-        "posted_panels",
-        "tickets",
-        "ticket_events",
+        ...PHASE2_GUILD_TABLES,
       ] as const) {
         if (this.countGuildRows(table, normalized) !== 0) {
           throw new Error(`Guild purge left rows in ${table}`);
@@ -677,82 +781,81 @@ export class BotStorage {
       guilds: this.countGuildRows("guilds", guildId),
       settings: this.countGuildRows("guild_settings", guildId),
       metrics: this.countGuildRows("metrics", guildId),
-      ticketConfigurations: this.countGuildRows(
-        "ticket_configurations",
+      delegatedCapabilityGrants: this.countGuildRows(
+        "delegated_capability_grants",
+        guildId,
+      ),
+      ticketDepartments: this.countGuildRows("ticket_departments", guildId),
+      ticketDepartmentFields: this.countGuildRows(
+        "ticket_department_fields",
         guildId,
       ),
       postedPanels: this.countGuildRows("posted_panels", guildId),
       tickets: this.countGuildRows("tickets", guildId),
+      ticketFormResponses: this.countGuildRows(
+        "ticket_form_responses",
+        guildId,
+      ),
       ticketEvents: this.countGuildRows("ticket_events", guildId),
+      suggestionConfigurations: this.countGuildRows(
+        "suggestion_configurations",
+        guildId,
+      ),
+      suggestions: this.countGuildRows("suggestions", guildId),
+      suggestionVotes: this.countGuildRows("suggestion_votes", guildId),
+      suggestionEvents: this.countGuildRows("suggestion_events", guildId),
+      applicationForms: this.countGuildRows("application_forms", guildId),
+      applicationFormFields: this.countGuildRows(
+        "application_form_fields",
+        guildId,
+      ),
+      applications: this.countGuildRows("applications", guildId),
+      applicationResponses: this.countGuildRows(
+        "application_responses",
+        guildId,
+      ),
+      applicationEvents: this.countGuildRows("application_events", guildId),
     };
   }
 
   private estimateGuildExportBytes(guildId: string): number {
-    const row = this.requireDatabase()
-      .prepare(
-        `SELECT
-           4096
-           + COALESCE((
-               SELECT length(CAST(COALESCE(name, '') AS BLOB))
-                    + length(CAST(COALESCE(joined_at, '') AS BLOB))
-                    + length(CAST(COALESCE(left_at, '') AS BLOB)) + 512
-               FROM guilds WHERE guild_id = @guildId
-             ), 0)
-           + COALESCE((
-               SELECT length(CAST(settings_json AS BLOB)) + 512
-               FROM guild_settings WHERE guild_id = @guildId
-             ), 0)
-           + COALESCE((
-               SELECT SUM(
-                 length(CAST(metric_key AS BLOB))
-                 + length(CAST(metric_value AS TEXT))
-                 + length(CAST(updated_at AS BLOB)) + 128
-               ) FROM metrics WHERE guild_id = @guildId
-             ), 0)
-           + COALESCE((
-               SELECT length(CAST(category_id AS BLOB))
-                    + length(CAST(log_channel_id AS BLOB))
-                    + length(CAST(support_role_id AS BLOB))
-                    + length(CAST(created_at AS BLOB))
-                    + length(CAST(updated_at AS BLOB)) + 256
-               FROM ticket_configurations WHERE guild_id = @guildId
-             ), 0)
-           + COALESCE((
-               SELECT SUM(
-                 length(CAST(panel_id AS BLOB))
-                 + length(CAST(preset AS BLOB))
-                 + length(CAST(channel_id AS BLOB))
-                 + length(CAST(message_id AS BLOB))
-                 + length(CAST(configuration_json AS BLOB))
-                 + length(CAST(created_at AS BLOB))
-                 + length(CAST(updated_at AS BLOB)) + 256
-               ) FROM posted_panels WHERE guild_id = @guildId
-             ), 0)
-           + COALESCE((
-               SELECT SUM(
-                 length(CAST(ticket_id AS BLOB))
-                 + length(CAST(opener_id AS BLOB))
-                 + length(CAST(COALESCE(channel_id, '') AS BLOB))
-                 + length(CAST(COALESCE(control_message_id, '') AS BLOB))
-                 + length(CAST(subject AS BLOB))
-                 + length(CAST(description AS BLOB))
-                 + length(CAST(COALESCE(close_reason, '') AS BLOB))
-                 + length(CAST(COALESCE(failure_reason, '') AS BLOB)) + 1024
-               ) FROM tickets WHERE guild_id = @guildId
-             ), 0)
-           + COALESCE((
-               SELECT SUM(
-                 length(CAST(ticket_id AS BLOB))
-                 + length(CAST(event_id AS BLOB))
-                 + length(CAST(event_type AS BLOB))
-                 + length(CAST(COALESCE(actor_id, '') AS BLOB))
-                 + length(CAST(details_json AS BLOB))
-                 + length(CAST(created_at AS BLOB)) + 256
-               ) FROM ticket_events WHERE guild_id = @guildId
-             ), 0) AS estimated_bytes`,
+    const tables = [
+      "guilds",
+      "guild_settings",
+      "metrics",
+      ...PHASE2_GUILD_TABLES,
+    ] as const;
+    return tables.reduce(
+      (total, table) => total + this.estimateGuildTableBytes(table, guildId),
+      4_096,
+    );
+  }
+
+  private estimateGuildTableBytes(
+    table:
+      | "guilds"
+      | "guild_settings"
+      | "metrics"
+      | (typeof PHASE2_GUILD_TABLES)[number],
+    guildId: string,
+  ): number {
+    const db = this.requireDatabase();
+    const columns = db.pragma(`table_info(${table})`) as Array<{
+      name: string;
+    }>;
+    const expression = columns
+      .map(
+        ({ name }) =>
+          `length(CAST(COALESCE("${name.replaceAll('"', '""')}", '') AS BLOB))`,
       )
-      .get({ guildId }) as { estimated_bytes: number };
-    return Number(row.estimated_bytes);
+      .join(" + ");
+    const row = db
+      .prepare(
+        `SELECT COALESCE(SUM(${expression} + ${columns.length * 64}), 0) AS bytes
+         FROM ${table} WHERE guild_id = ?`,
+      )
+      .get(guildId) as { bytes: number };
+    return Number(row.bytes);
   }
 
   private countGuildRows(
@@ -760,10 +863,7 @@ export class BotStorage {
       | "guilds"
       | "guild_settings"
       | "metrics"
-      | "ticket_configurations"
-      | "posted_panels"
-      | "tickets"
-      | "ticket_events",
+      | (typeof PHASE2_GUILD_TABLES)[number],
     guildId: string,
   ): number {
     const row = this.requireDatabase()
@@ -775,6 +875,10 @@ export class BotStorage {
 
 export class GuildStorage {
   private readonly operational: GuildOperationalRepository;
+  private readonly access: GuildAccessRepository;
+  private readonly departments: TicketDepartmentRepository;
+  private readonly suggestions: SuggestionRepository;
+  private readonly applications: ApplicationRepository;
 
   public constructor(
     private readonly db: Database.Database,
@@ -782,6 +886,442 @@ export class GuildStorage {
     public readonly guildId: string,
   ) {
     this.operational = new GuildOperationalRepository(db, guildId);
+    this.access = new GuildAccessRepository(db, guildId);
+    this.departments = new TicketDepartmentRepository(db, guildId);
+    this.suggestions = new SuggestionRepository(db, guildId);
+    this.applications = new ApplicationRepository(db, guildId);
+  }
+
+  public grantRoleCapability(
+    roleId: string,
+    capability: GuildCapability,
+    grantedBy: string,
+  ): CapabilityGrantResult {
+    return this.access.grantRoleCapability(roleId, capability, grantedBy);
+  }
+
+  public revokeRoleCapability(
+    roleId: string,
+    capability: GuildCapability,
+  ): CapabilityRevokeResult {
+    return this.access.revokeRoleCapability(roleId, capability);
+  }
+
+  public listCapabilityGrants(
+    limit?: number,
+    offset?: number,
+  ): RoleCapabilityGrant[] {
+    return this.access.listCapabilityGrants(limit, offset);
+  }
+
+  public listCapabilityGrantsForCapability(
+    capability: GuildCapability,
+    limit?: number,
+    offset?: number,
+  ): RoleCapabilityGrant[] {
+    return this.access.listCapabilityGrantsForCapability(
+      capability,
+      limit,
+      offset,
+    );
+  }
+
+  public listCapabilitiesForRoles(
+    roleIds: readonly string[],
+  ): RoleCapabilityGrant[] {
+    return this.access.listCapabilitiesForRoles(roleIds);
+  }
+
+  public createTicketDepartment(
+    input: TicketDepartmentInput,
+  ): TicketDepartment {
+    return this.departments.createDepartment(input);
+  }
+
+  public updateTicketDepartment(
+    departmentId: string,
+    input: TicketDepartmentUpdate,
+  ): TicketDepartment | null {
+    return this.departments.updateDepartment(departmentId, input);
+  }
+
+  public setTicketDepartmentEnabled(
+    departmentId: string,
+    enabled: boolean,
+  ): TicketDepartment | null {
+    return this.departments.setDepartmentEnabled(departmentId, enabled);
+  }
+
+  public disableAllTicketDepartments(): number {
+    return this.departments.disableAllDepartments();
+  }
+
+  public deleteTicketDepartment(
+    departmentId: string,
+  ): TicketDepartmentDeleteResult {
+    return this.departments.deleteDepartment(departmentId);
+  }
+
+  public getTicketDepartment(departmentId: string): TicketDepartment | null {
+    return this.departments.getDepartment(departmentId);
+  }
+
+  public getTicketDepartmentBySlug(slug: string): TicketDepartment | null {
+    return this.departments.getDepartmentBySlug(slug);
+  }
+
+  public listTicketDepartments(
+    options: {
+      enabled?: boolean;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ): TicketDepartment[] {
+    return this.departments.listDepartments(options);
+  }
+
+  public countTicketDepartments(): number {
+    return this.departments.countDepartments();
+  }
+
+  public upsertTicketDepartmentField(
+    departmentId: string,
+    input: TicketDepartmentFieldInput,
+  ): TicketDepartmentField {
+    return this.departments.upsertDepartmentField(departmentId, input);
+  }
+
+  public removeTicketDepartmentField(
+    departmentId: string,
+    fieldId: string,
+  ): boolean {
+    return this.departments.removeDepartmentField(departmentId, fieldId);
+  }
+
+  public reorderTicketDepartmentFields(
+    departmentId: string,
+    fieldIds: readonly string[],
+  ): TicketDepartmentField[] {
+    return this.departments.reorderDepartmentFields(departmentId, fieldIds);
+  }
+
+  public getTicketDepartmentField(
+    departmentId: string,
+    fieldId: string,
+  ): TicketDepartmentField | null {
+    return this.departments.getDepartmentField(departmentId, fieldId);
+  }
+
+  public listTicketDepartmentFields(
+    departmentId: string,
+  ): TicketDepartmentField[] {
+    return this.departments.listDepartmentFields(departmentId);
+  }
+
+  public getSuggestionConfiguration(): SuggestionConfiguration | null {
+    return this.suggestions.getConfiguration();
+  }
+
+  public upsertSuggestionConfiguration(
+    input: SuggestionConfigurationInput,
+  ): SuggestionConfiguration {
+    return this.suggestions.upsertConfiguration(input);
+  }
+
+  public disableSuggestionConfiguration(): SuggestionConfiguration | null {
+    return this.suggestions.disableConfiguration();
+  }
+
+  public reserveSuggestion(
+    input: SuggestionReservationInput,
+  ): SuggestionReservationResult {
+    return this.suggestions.reserveSuggestion(input);
+  }
+
+  public bindSuggestionDelivery(
+    suggestionId: string,
+    input: SuggestionDeliveryInput,
+  ): SuggestionDeliveryResult {
+    return this.suggestions.bindSuggestionDelivery(suggestionId, input);
+  }
+
+  public failSuggestionDelivery(
+    suggestionId: string,
+    reason: string,
+  ): SuggestionDeliveryResult {
+    return this.suggestions.failSuggestionDelivery(suggestionId, reason);
+  }
+
+  public markSuggestionDeliveryMissing(
+    suggestionId: string,
+    actorId?: string | null,
+  ): SuggestionDeliveryResult {
+    return this.suggestions.markSuggestionDeliveryMissing(
+      suggestionId,
+      actorId,
+    );
+  }
+
+  public toggleSuggestionVote(
+    suggestionId: string,
+    voterId: string,
+    vote: SuggestionVoteValue,
+  ): SuggestionVoteResult {
+    return this.suggestions.toggleVote(suggestionId, voterId, vote);
+  }
+
+  public reviewSuggestion(
+    suggestionId: string,
+    input: SuggestionReviewInput,
+  ): SuggestionTransitionResult {
+    return this.suggestions.reviewSuggestion(suggestionId, input);
+  }
+
+  public withdrawSuggestion(
+    suggestionId: string,
+    authorId: string,
+  ): SuggestionTransitionResult {
+    return this.suggestions.withdrawSuggestion(suggestionId, authorId);
+  }
+
+  public getSuggestionById(suggestionId: string): SuggestionRecord | null {
+    return this.suggestions.getSuggestionById(suggestionId);
+  }
+
+  public getSuggestionByNumber(
+    suggestionNumber: number,
+  ): SuggestionRecord | null {
+    return this.suggestions.getSuggestionByNumber(suggestionNumber);
+  }
+
+  public getSuggestionByMessage(
+    channelId: string,
+    messageId: string,
+  ): SuggestionRecord | null {
+    return this.suggestions.getSuggestionByMessage(channelId, messageId);
+  }
+
+  public listSuggestions(
+    options: {
+      state?: SuggestionState;
+      authorId?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ): SuggestionRecord[] {
+    return this.suggestions.listSuggestions(options);
+  }
+
+  public getSuggestionVote(
+    suggestionId: string,
+    voterId: string,
+  ): SuggestionVote | null {
+    return this.suggestions.getVote(suggestionId, voterId);
+  }
+
+  public getSuggestionVoteCounts(suggestionId: string): SuggestionVoteCounts {
+    return this.suggestions.getVoteCounts(suggestionId);
+  }
+
+  public appendSuggestionEvent(
+    suggestionId: string,
+    input: SuggestionEventInput,
+  ): SuggestionEvent | null {
+    return this.suggestions.appendEvent(suggestionId, input);
+  }
+
+  public listSuggestionEvents(
+    suggestionId: string,
+    limit?: number,
+    offset?: number,
+  ): SuggestionEvent[] {
+    return this.suggestions.listEvents(suggestionId, limit, offset);
+  }
+
+  public createApplicationForm(input: ApplicationFormInput): ApplicationForm {
+    return this.applications.createForm(input);
+  }
+
+  public updateApplicationForm(
+    formId: string,
+    input: ApplicationFormUpdate,
+  ): ApplicationForm | null {
+    return this.applications.updateForm(formId, input);
+  }
+
+  public setApplicationFormEnabled(
+    formId: string,
+    enabled: boolean,
+  ): ApplicationForm | null {
+    return this.applications.setFormEnabled(formId, enabled);
+  }
+
+  public deleteApplicationForm(formId: string): ApplicationFormDeleteResult {
+    return this.applications.deleteForm(formId);
+  }
+
+  public getApplicationForm(formId: string): ApplicationForm | null {
+    return this.applications.getForm(formId);
+  }
+
+  public getApplicationFormBySlug(slug: string): ApplicationForm | null {
+    return this.applications.getFormBySlug(slug);
+  }
+
+  public listApplicationForms(
+    options: { enabledOnly?: boolean; limit?: number; offset?: number } = {},
+  ): ApplicationForm[] {
+    return this.applications.listForms(options);
+  }
+
+  public upsertApplicationFormField(
+    formId: string,
+    input: ApplicationFormFieldInput,
+  ): ApplicationFormField {
+    return this.applications.upsertFormField(formId, input);
+  }
+
+  public removeApplicationFormField(formId: string, fieldId: string): boolean {
+    return this.applications.removeFormField(formId, fieldId);
+  }
+
+  public reorderApplicationFormFields(
+    formId: string,
+    fieldIds: readonly string[],
+  ): ApplicationFormField[] {
+    return this.applications.reorderFormFields(formId, fieldIds);
+  }
+
+  public getApplicationFormField(
+    formId: string,
+    fieldId: string,
+  ): ApplicationFormField | null {
+    return this.applications.getFormField(formId, fieldId);
+  }
+
+  public listApplicationFormFields(formId: string): ApplicationFormField[] {
+    return this.applications.listFormFields(formId);
+  }
+
+  public reserveApplication(
+    input: ApplicationReservationInput,
+  ): ApplicationReservationResult {
+    return this.applications.reserveApplication(input);
+  }
+
+  public bindApplicationDelivery(
+    applicationId: string,
+    input: ApplicationDeliveryInput,
+  ): ApplicationDeliveryResult {
+    return this.applications.bindDelivery(applicationId, input);
+  }
+
+  public failApplicationDelivery(
+    applicationId: string,
+    reason: string,
+  ): ApplicationDeliveryResult {
+    return this.applications.failDelivery(applicationId, reason);
+  }
+
+  public markApplicationDeliveryMissing(
+    applicationId: string,
+    expectedUpdatedAt?: string,
+  ): ApplicationDeliveryResult {
+    return this.applications.markDeliveryMissing(
+      applicationId,
+      expectedUpdatedAt,
+    );
+  }
+
+  public claimApplication(
+    applicationId: string,
+    reviewerId: string,
+    expectedUpdatedAt?: string,
+  ): ApplicationTransitionResult {
+    return this.applications.claimApplication(
+      applicationId,
+      reviewerId,
+      expectedUpdatedAt,
+    );
+  }
+
+  public decideApplication(
+    applicationId: string,
+    input: ApplicationDecisionInput,
+  ): ApplicationTransitionResult {
+    return this.applications.decideApplication(applicationId, input);
+  }
+
+  public withdrawApplication(
+    applicationId: string,
+    applicantId: string,
+    expectedUpdatedAt?: string,
+  ): ApplicationTransitionResult {
+    return this.applications.withdrawApplication(
+      applicationId,
+      applicantId,
+      expectedUpdatedAt,
+    );
+  }
+
+  public getApplicationById(applicationId: string): ApplicationRecord | null {
+    return this.applications.getApplicationById(applicationId);
+  }
+
+  public hasApplicationsForForm(formId: string): boolean {
+    return this.applications.hasApplicationsForForm(formId);
+  }
+
+  public getApplicationByNumber(
+    applicationNumber: number,
+  ): ApplicationRecord | null {
+    return this.applications.getApplicationByNumber(applicationNumber);
+  }
+
+  public getApplicationByReviewMessage(
+    reviewChannelId: string,
+    reviewMessageId: string,
+  ): ApplicationRecord | null {
+    return this.applications.getApplicationByReviewMessage(
+      reviewChannelId,
+      reviewMessageId,
+    );
+  }
+
+  public listApplications(
+    filter: ApplicationListFilter = {},
+    limit?: number,
+    offset?: number,
+  ): ApplicationRecord[] {
+    return this.applications.listApplications(filter, limit, offset);
+  }
+
+  public listApplicationResponses(
+    applicationId: string,
+  ): ApplicationResponse[] {
+    return this.applications.listResponses(applicationId);
+  }
+
+  public appendApplicationEvent(
+    applicationId: string,
+    input: ApplicationEventInput,
+  ): ApplicationEvent | null {
+    return this.applications.appendEvent(applicationId, input);
+  }
+
+  public listApplicationEvents(
+    applicationId: string,
+    limit?: number,
+    offset?: number,
+  ): ApplicationEvent[] {
+    return this.applications.listEvents(applicationId, limit, offset);
+  }
+
+  public listAllApplicationEvents(
+    limit?: number,
+    offset?: number,
+  ): ApplicationEvent[] {
+    return this.applications.listAllEvents(limit, offset);
   }
 
   public getSettings(): GuildSettings {
@@ -814,8 +1354,16 @@ export class GuildStorage {
     return this.operational.upsertPostedPanel(input);
   }
 
-  public listPostedPanels(preset?: PanelPreset): PostedPanel[] {
-    return this.operational.listPostedPanels(preset);
+  public listPostedPanels(
+    preset?: PanelPreset,
+    limit?: number,
+    offset?: number,
+  ): PostedPanel[] {
+    return this.operational.listPostedPanels(preset, limit, offset);
+  }
+
+  public countPostedPanels(preset?: PanelPreset): number {
+    return this.operational.countPostedPanels(preset);
   }
 
   public findPostedPanelByToken(panelId: string): PostedPanel | null {
@@ -876,8 +1424,34 @@ export class GuildStorage {
     return this.getTicketByOpener(openerId);
   }
 
-  public listTickets(states?: readonly TicketState[]): TicketRecord[] {
-    return this.operational.listTickets(states);
+  public getTicketByOpenerAndDepartment(
+    openerId: string,
+    departmentId: string,
+  ): TicketRecord | null {
+    return this.operational.getTicketByOpenerAndDepartment(
+      openerId,
+      departmentId,
+    );
+  }
+
+  public listTicketResponses(ticketId: string): TicketFormResponse[] {
+    return this.operational.listTicketResponses(ticketId);
+  }
+
+  public hasActiveTicketsForDepartment(departmentId: string): boolean {
+    return this.operational.hasActiveTicketsForDepartment(departmentId);
+  }
+
+  public countTickets(states?: readonly TicketState[]): number {
+    return this.operational.countTickets(states);
+  }
+
+  public listTickets(
+    states?: readonly TicketState[],
+    limit?: number,
+    offset?: number,
+  ): TicketRecord[] {
+    return this.operational.listTickets(states, limit, offset);
   }
 
   public claimTicket(ticketId: string, staffUserId: string): TicketClaimResult {
@@ -937,12 +1511,16 @@ export class GuildStorage {
     return this.operational.appendTicketEvent(ticketId, input);
   }
 
-  public listTicketEvents(ticketId: string): TicketEvent[] {
-    return this.operational.listTicketEvents(ticketId);
+  public listTicketEvents(
+    ticketId: string,
+    limit?: number,
+    offset?: number,
+  ): TicketEvent[] {
+    return this.operational.listTicketEvents(ticketId, limit, offset);
   }
 
-  public listAllTicketEvents(): TicketEvent[] {
-    return this.operational.listAllTicketEvents();
+  public listAllTicketEvents(limit?: number, offset?: number): TicketEvent[] {
+    return this.operational.listAllTicketEvents(limit, offset);
   }
 
   public recordCommandMetric(commandName: string, success = true): void {

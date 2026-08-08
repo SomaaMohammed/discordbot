@@ -151,10 +151,35 @@ describe("active guild storage", () => {
       subject: "Portable ticket",
       description: "Include operational rows in the tenant export.",
     });
+    const phase2A = seedPhase2Data(storage, GUILD_A, {
+      managerRoleId: "101010101010101010",
+      actorId: "121212121212121212",
+      suggestionChannelId: "131313131313131313",
+      reviewerRoleId: "141414141414141414",
+      suggestionAuthorId: "151515151515151515",
+      suggestionVoterId: "161616161616161616",
+      suggestionMessageId: "171717171717171717",
+      applicationChannelId: "181818181818181818",
+      applicantId: "191919191919191919",
+      applicationMessageId: "202020202020202020",
+    });
+    seedPhase2Data(storage, GUILD_B, {
+      managerRoleId: "212121212121212121",
+      actorId: "232323232323232323",
+      suggestionChannelId: "242424242424242424",
+      reviewerRoleId: "252525252525252525",
+      suggestionAuthorId: "262626262626262626",
+      suggestionVoterId: "272727272727272727",
+      suggestionMessageId: "282828282828282828",
+      applicationChannelId: "292929292929292929",
+      applicantId: "303030303030303030",
+      applicationMessageId: "313131313131313131",
+    });
+    const guildBCountsBefore = storage.previewGuildPurge(GUILD_B);
     const payload = storage.exportGuildData(GUILD_A);
 
     expect(payload).toMatchObject({
-      formatVersion: 3,
+      formatVersion: 4,
       guildId: GUILD_A,
       metrics: [
         {
@@ -162,10 +187,7 @@ describe("active guild storage", () => {
           value: 5,
         },
       ],
-      ticketConfiguration: {
-        guildId: GUILD_A,
-        enabled: true,
-      },
+      ticketDepartments: [{ guildId: GUILD_A, enabled: true }],
       postedPanels: [
         {
           guildId: GUILD_A,
@@ -175,6 +197,43 @@ describe("active guild storage", () => {
       ],
       tickets: [{ ticketId: reservation.ticket.ticketId, state: "creating" }],
       ticketEvents: [{ type: "creation_reserved" }],
+      delegatedCapabilityGrants: [
+        {
+          capability: "suggestions.review",
+          principalId: "101010101010101010",
+          active: true,
+        },
+      ],
+      suggestionConfiguration: {
+        enabled: true,
+        suggestionChannelId: "131313131313131313",
+      },
+      suggestions: [
+        {
+          suggestionId: phase2A.suggestionId,
+          title: "Tenant suggestion",
+        },
+      ],
+      suggestionVotes: [
+        {
+          suggestionId: phase2A.suggestionId,
+          voterId: "161616161616161616",
+          vote: 1,
+        },
+      ],
+      applicationForms: [{ formId: phase2A.formId, slug: "tenant-staff" }],
+      applications: [
+        {
+          applicationId: phase2A.applicationId,
+          formId: phase2A.formId,
+        },
+      ],
+      applicationResponses: [
+        {
+          applicationId: phase2A.applicationId,
+          responseText: "A private tenant application answer.",
+        },
+      ],
     });
     expect(JSON.stringify(payload)).not.toContain('userId":null');
     const invalidGreetingPayload = structuredClone(payload);
@@ -204,15 +263,15 @@ describe("active guild storage", () => {
     expect(guild.getTicketById(reservation.ticket.ticketId)).toMatchObject({
       subject: "Portable ticket",
     });
-    const missingTicketConfiguration = structuredClone(payload);
-    missingTicketConfiguration.ticketConfiguration = null;
+    const missingTicketDepartment = structuredClone(payload);
+    missingTicketDepartment.ticketDepartments = [];
     expect(() =>
       storage.importGuildData(
         GUILD_A,
-        missingTicketConfiguration,
+        missingTicketDepartment,
         storage.getGuildSettings(GUILD_A)!,
       ),
-    ).toThrow(/active tickets requires ticket configuration/);
+    ).toThrow(/unknown department/);
     expect(guild.getTicketConfiguration()).toMatchObject({ enabled: true });
     expect(() =>
       storage.importGuildData(
@@ -240,6 +299,31 @@ describe("active guild storage", () => {
     });
     expect(guild.listTicketEvents(reservation.ticket.ticketId)).toHaveLength(1);
 
+    const importedPhase2 = storage.exportGuildData(GUILD_A);
+    expect(importedPhase2.delegatedCapabilityGrants).toEqual([
+      expect.objectContaining({
+        principalId: "101010101010101010",
+        active: false,
+      }),
+    ]);
+    expect(importedPhase2.suggestionConfiguration).toMatchObject({
+      enabled: false,
+      bindingsVerifiedAt: null,
+    });
+    expect(importedPhase2.suggestions).toHaveLength(1);
+    expect(importedPhase2.suggestionVotes).toHaveLength(1);
+    expect(importedPhase2.suggestionEvents.length).toBeGreaterThan(0);
+    expect(importedPhase2.applicationForms).toEqual([
+      expect.objectContaining({
+        formId: phase2A.formId,
+        enabled: false,
+        bindingsVerifiedAt: null,
+      }),
+    ]);
+    expect(importedPhase2.applications).toHaveLength(1);
+    expect(importedPhase2.applicationResponses).toHaveLength(1);
+    expect(importedPhase2.applicationEvents.length).toBeGreaterThan(0);
+
     const legacyV2Payload = {
       formatVersion: 2,
       guildId: payload.guildId,
@@ -261,30 +345,130 @@ describe("active guild storage", () => {
     });
     expect(guild.listTicketEvents(reservation.ticket.ticketId)).toHaveLength(1);
 
-    expect(storage.previewGuildPurge(GUILD_A)).toEqual({
+    const expectedPurge = {
       guildId: GUILD_A,
       guilds: 1,
       settings: 1,
       metrics: 1,
-      ticketConfigurations: 1,
+      delegatedCapabilityGrants:
+        importedPhase2.delegatedCapabilityGrants.length,
+      ticketDepartments: 1,
+      ticketDepartmentFields: 0,
       postedPanels: 1,
       tickets: 1,
+      ticketFormResponses: 2,
       ticketEvents: 1,
-    });
-    expect(storage.purgeGuildData(GUILD_A)).toEqual({
-      guildId: GUILD_A,
-      guilds: 1,
-      settings: 1,
-      metrics: 1,
-      ticketConfigurations: 1,
-      postedPanels: 1,
-      tickets: 1,
-      ticketEvents: 1,
-    });
+      suggestionConfigurations: importedPhase2.suggestionConfiguration ? 1 : 0,
+      suggestions: importedPhase2.suggestions.length,
+      suggestionVotes: importedPhase2.suggestionVotes.length,
+      suggestionEvents: importedPhase2.suggestionEvents.length,
+      applicationForms: importedPhase2.applicationForms.length,
+      applicationFormFields: importedPhase2.applicationFormFields.length,
+      applications: importedPhase2.applications.length,
+      applicationResponses: importedPhase2.applicationResponses.length,
+      applicationEvents: importedPhase2.applicationEvents.length,
+    };
+    expect(storage.previewGuildPurge(GUILD_A)).toEqual(expectedPurge);
+    expect(storage.purgeGuildData(GUILD_A)).toEqual(expectedPurge);
     expect(storage.getGuild(GUILD_A)).toBeNull();
     expect(storage.getGuild(GUILD_B)).not.toBeNull();
+    expect(storage.previewGuildPurge(GUILD_B)).toEqual(guildBCountsBefore);
   });
 });
+
+function seedPhase2Data(
+  storage: BotStorage,
+  guildId: string,
+  ids: {
+    managerRoleId: string;
+    actorId: string;
+    suggestionChannelId: string;
+    reviewerRoleId: string;
+    suggestionAuthorId: string;
+    suggestionVoterId: string;
+    suggestionMessageId: string;
+    applicationChannelId: string;
+    applicantId: string;
+    applicationMessageId: string;
+  },
+) {
+  const guild = storage.forGuild(guildId);
+  const grant = guild.grantRoleCapability(
+    ids.managerRoleId,
+    "suggestions.review",
+    ids.actorId,
+  );
+  if (grant.status !== "granted") throw new Error("Expected capability grant");
+
+  guild.upsertSuggestionConfiguration({
+    enabled: true,
+    suggestionChannelId: ids.suggestionChannelId,
+    reviewerRoleId: ids.reviewerRoleId,
+  });
+  const suggestion = guild.reserveSuggestion({
+    authorId: ids.suggestionAuthorId,
+    title: "Tenant suggestion",
+    details: "Preserve this guild-scoped suggestion and its vote.",
+  });
+  if (suggestion.status !== "created") throw new Error("Expected suggestion");
+  guild.bindSuggestionDelivery(suggestion.suggestion.suggestionId, {
+    channelId: ids.suggestionChannelId,
+    messageId: ids.suggestionMessageId,
+  });
+  guild.toggleSuggestionVote(
+    suggestion.suggestion.suggestionId,
+    ids.suggestionVoterId,
+    1,
+  );
+  guild.appendSuggestionEvent(suggestion.suggestion.suggestionId, {
+    type: "recovery_noted",
+    details: { source: "multitenancy-test" },
+  });
+
+  const form = guild.createApplicationForm({
+    slug: "tenant-staff",
+    displayName: "Tenant Staff",
+    description: "Preserve this guild-scoped private application form.",
+    reviewerRoleId: ids.reviewerRoleId,
+    reviewChannelId: ids.applicationChannelId,
+  });
+  const field = guild.upsertApplicationFormField(form.formId, {
+    label: "Why do you want to help?",
+    fieldType: "paragraph",
+    required: true,
+    minLength: 1,
+    maxLength: 500,
+  });
+  guild.setApplicationFormEnabled(form.formId, true);
+  const application = guild.reserveApplication({
+    formId: form.formId,
+    applicantId: ids.applicantId,
+    responses: [
+      {
+        fieldId: field.fieldId,
+        fieldLabel: field.label,
+        fieldType: field.fieldType,
+        responseText: "A private tenant application answer.",
+        sortOrder: field.sortOrder,
+      },
+    ],
+  });
+  if (application.status !== "created") throw new Error("Expected application");
+  guild.bindApplicationDelivery(application.application.applicationId, {
+    reviewChannelId: ids.applicationChannelId,
+    reviewMessageId: ids.applicationMessageId,
+  });
+  guild.appendApplicationEvent(application.application.applicationId, {
+    type: "recovery_noted",
+    details: { source: "multitenancy-test" },
+  });
+
+  return {
+    suggestionId: suggestion.suggestion.suggestionId,
+    formId: form.formId,
+    applicationId: application.application.applicationId,
+  };
+}
 
 function makeStorage(): BotStorage {
   const storage = new BotStorage({ dbFile: ":memory:" });

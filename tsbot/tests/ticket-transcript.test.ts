@@ -143,6 +143,34 @@ describe("ticket transcript collection", () => {
     expect(transcript.text).toContain("Message ID: 10001");
   });
 
+  it("renders bounded department and form metadata in the header", async () => {
+    const { channel } = createChannel([createMessage(1)]);
+
+    const transcript = await collectTicketTranscript(channel, {
+      generatedAt: GENERATED_AT,
+      headerFields: [
+        { label: "Department", value: "Billing Support" },
+        {
+          label: "Form - Request details",
+          value: "Please correct the duplicate charge.",
+        },
+      ],
+    });
+
+    expect(transcript.text).toContain("Department: Billing Support");
+    expect(transcript.text).toContain(
+      "Form - Request details: Please correct the duplicate charge.",
+    );
+    await expect(
+      collectTicketTranscript(channel, {
+        headerFields: Array.from({ length: 11 }, (_, index) => ({
+          label: `Field ${index}`,
+          value: "value",
+        })),
+      }),
+    ).rejects.toThrow(/at most 10/);
+  });
+
   it("uses a one-message lookahead and reports message-limit truncation", async () => {
     const { channel, fetch } = createChannel([
       createMessage(1),

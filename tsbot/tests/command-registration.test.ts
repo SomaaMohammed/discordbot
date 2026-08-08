@@ -7,6 +7,25 @@ import {
   buildCommandRegistrationPlan,
   synchronizeCommands,
 } from "../src/discord/registration.js";
+import { buildSuperiorCommandGuide } from "../src/discord/commands.js";
+
+describe("command guide", () => {
+  it("covers the complete Phase 2 command surface", () => {
+    const guide = buildSuperiorCommandGuide();
+
+    for (const command of [
+      "/access",
+      "/ticket",
+      "/suggestion",
+      "/application",
+    ]) {
+      expect(guide).toContain(`\`${command}\``);
+    }
+    expect(guide).toContain("delegated");
+    expect(guide).toContain("format-4");
+    expect(guide.length).toBeLessThanOrEqual(2_000);
+  });
+});
 
 describe("command registration", () => {
   it("selects global registration for production", () => {

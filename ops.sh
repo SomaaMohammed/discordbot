@@ -82,7 +82,7 @@ refuse_stranded_legacy_database() {
   # It is never opened, renamed, or altered here.
   local old_default="$APP_DIR/court.db"
   if [[ -e "$old_default" ]]; then
-    die "Refusing an implicit superior.db while a legacy-named database exists. Set DB_FILE explicitly, back it up, and run the documented upgrade to schema v4."
+    die "Refusing an implicit superior.db while a legacy-named database exists. Set DB_FILE explicitly, back it up, and run the documented upgrade to schema v5."
   fi
 }
 
@@ -187,12 +187,12 @@ ensure_production_build() {
 
 validate_database() {
   local database="$1"
-  local expected="${2:-4}"
+  local expected="${2:-5}"
   node "$TSBOT_DIR/dist/src/storage/check-cli.js" --db "$database" --expect "$expected"
 }
 
 create_database_backup() {
-  local expected="${1:-4}"
+  local expected="${1:-5}"
   [[ -f "$DB_FILE" ]] || die "Database does not exist: $DB_FILE"
   mkdir -p -- "$BACKUP_DIR"
   local destination
@@ -204,8 +204,8 @@ create_database_backup() {
   note "Validated backup created: $destination"
 }
 
-migrate_database_to_v4() {
-  local source_schema="${1:-3}"
+migrate_database_to_v5() {
+  local source_schema="${1:-4}"
   prepare_operation_paths
   resolve_runtime_db_file
   require_supported_node
@@ -221,16 +221,16 @@ migrate_database_to_v4() {
     die "Migration failed and rolled back; the validated schema-v${source_schema} backup was retained and the service remains stopped"
     return 1
   fi
-  validate_database "$DB_FILE" 4
+  validate_database "$DB_FILE" 5
   restrict_live_database_permissions "$DB_FILE"
   (( was_active == 0 )) || start_service
-  note "Database migration completed and validated at schema 4"
+  note "Database migration completed and validated at schema 5"
 }
 
 restore_database() {
   local source="${1:-}"
   [[ -n "$source" ]] || {
-    die "Usage: ops.sh restore <validated-schema4-backup>"
+    die "Usage: ops.sh restore <validated-schema5-backup>"
     return 1
   }
   prepare_operation_paths
@@ -259,11 +259,11 @@ restore_database() {
     return 1
   fi
   node "$TSBOT_DIR/dist/src/storage/backup-cli.js" \
-    --db "$source" --out "$candidate" --expect 4
+    --db "$source" --out "$candidate" --expect 5
   chmod 600 -- "$candidate"
-  validate_database "$candidate" 4 || {
+  validate_database "$candidate" 5 || {
     rm -f -- "$candidate"
-    die "Restore source copy failed schema-v4 validation"
+    die "Restore source copy failed schema-v5 validation"
     return 1
   }
 
@@ -298,7 +298,7 @@ restore_database() {
       install_failed=1
     fi
   fi
-  if (( install_failed == 0 )) && ! validate_database "$DB_FILE" 4; then
+  if (( install_failed == 0 )) && ! validate_database "$DB_FILE" 5; then
     install_failed=1
   fi
   if (( install_failed == 1 )); then
@@ -313,7 +313,7 @@ restore_database() {
         recovery_failed=1
       fi
     done
-    if (( had_live_main == 1 )) && ! validate_database "$DB_FILE" 4; then
+    if (( had_live_main == 1 )) && ! validate_database "$DB_FILE" 5; then
       recovery_failed=1
     fi
     if (( recovery_failed == 1 )); then
@@ -346,9 +346,9 @@ rollout() {
   npm run build
   cd -- "$APP_DIR"
   if [[ -f "$DB_FILE" ]]; then
-    validate_database "$DB_FILE" 4 || die "Rollout refuses non-v4 data; use the explicit migration workflow first"
+    validate_database "$DB_FILE" 5 || die "Rollout refuses non-v5 data; use the explicit migration workflow first"
     restrict_live_database_permissions "$DB_FILE"
-    create_database_backup 4
+    create_database_backup 5
   fi
   restart_service
   note "Rollout completed"
@@ -359,9 +359,9 @@ show_status() {
   resolve_runtime_db_file
   command -v systemctl >/dev/null 2>&1 && systemctl --no-pager status "$SERVICE_NAME" || true
   if [[ -f "$DB_FILE" && -f "$TSBOT_DIR/dist/src/storage/check-cli.js" ]]; then
-    validate_database "$DB_FILE" 4
+    validate_database "$DB_FILE" 5
   else
-    note "No schema-v4 database is currently available to validate."
+    note "No schema-v5 database is currently available to validate."
   fi
 }
 
@@ -374,13 +374,14 @@ usage() {
   cat <<'USAGE'
 Usage: ./ops.sh <command>
 
-  status                 Show service status and validate schema 4
+  status                 Show service status and validate schema 5
   start|stop|restart     Control the configured systemd service
   logs                   Show recent service logs
-  backup                 Create and validate a private schema-v4 backup
-  restore <file>         Atomically restore a validated schema-v4 backup
-  migrate-v4             Back up and transactionally migrate schema v3 to v4
-  migrate-v2             Back up and transactionally migrate schema v2 to v4
+  backup                 Create and validate a private schema-v5 backup
+  restore <file>         Atomically restore a validated schema-v5 backup
+  migrate-v5             Back up and transactionally migrate schema v4 to v5
+  migrate-v3             Back up and transactionally migrate schema v3 to v5
+  migrate-v2             Back up and transactionally migrate schema v2 to v5
   rollout                Fast-forward, validate, build, back up, and restart
 
 Environment selectors: APP_DIR, TSBOT_DIR, ENV_FILE, DB_FILE, BACKUP_DIR,
@@ -402,11 +403,12 @@ main() {
       require_supported_node
       acquire_operation_lock
       ensure_production_build
-      create_database_backup 4
+      create_database_backup 5
       ;;
     restore) shift; restore_database "${1:-}" ;;
-    migrate-v4) migrate_database_to_v4 3 ;;
-    migrate-v2) migrate_database_to_v4 2 ;;
+    migrate-v5) migrate_database_to_v5 4 ;;
+    migrate-v3) migrate_database_to_v5 3 ;;
+    migrate-v2) migrate_database_to_v5 2 ;;
     rollout) rollout ;;
     help|-h|--help|"") usage ;;
     *) usage >&2; die "Unknown operation: $command" ;;

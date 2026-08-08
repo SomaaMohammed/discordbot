@@ -52,9 +52,17 @@ describe("tenant-scoped panel and ticket persistence", () => {
       logChannelId: LOG_CHANNEL,
       supportRoleId: SUPPORT_ROLE,
     });
+    const verifiedAt = a.getTicketDepartment(
+      a.getTicketConfiguration()!.departmentId!,
+    )!.bindingsVerifiedAt;
+    expect(verifiedAt).not.toBeNull();
     expect(b.getTicketConfiguration()).toBeNull();
     expect(a.disableTicketConfiguration()).toMatchObject({ enabled: false });
     expect(a.disableTicketConfiguration()).toMatchObject({ enabled: false });
+    expect(
+      a.getTicketDepartment(a.getTicketConfiguration()!.departmentId!)
+        ?.bindingsVerifiedAt,
+    ).toBe(verifiedAt);
 
     const panelId = createOpaqueStorageId();
     expect(panelId).toMatch(/^[A-Za-z0-9_-]{8,24}$/);
@@ -97,6 +105,32 @@ describe("tenant-scoped panel and ticket persistence", () => {
     ).toEqual(replacement);
     expect(a.deletePostedPanel(replacementId)).toBe(true);
     expect(a.deletePostedPanel(replacementId)).toBe(false);
+  });
+
+  it("paginates panel and ticket listings while exposing exact counts", () => {
+    const storage = makeMemoryStorage();
+    storage.ensureGuild(GUILD_A);
+    const guild = storage.forGuild(GUILD_A);
+    for (let index = 0; index < 3; index += 1) {
+      guild.createPostedPanel({
+        preset: "help",
+        channelId: `${PANEL_CHANNEL.slice(0, -1)}${index}`,
+        messageId: `${PANEL_MESSAGE.slice(0, -1)}${index}`,
+      });
+      guild.reserveTicketCreation({
+        openerId: `${OPENER.slice(0, -1)}${index}`,
+        subject: `Ticket ${index}`,
+        description: "Bounded list coverage",
+      });
+    }
+
+    expect(guild.countPostedPanels()).toBe(3);
+    expect(guild.listPostedPanels(undefined, 2, 0)).toHaveLength(2);
+    expect(guild.listPostedPanels(undefined, 2, 2)).toHaveLength(1);
+    expect(guild.countTickets(["creating"])).toBe(3);
+    expect(guild.listTickets(["creating"], 2, 0)).toHaveLength(2);
+    expect(guild.listTickets(["creating"], 2, 2)).toHaveLength(1);
+    expect(() => guild.listTickets(undefined, 1_001)).toThrow(/list limit/i);
   });
 
   it("makes reservation and claim conflicts durable across storage connections", () => {
@@ -182,7 +216,7 @@ describe("tenant-scoped panel and ticket persistence", () => {
       b.failTicketCreation(reservation.ticket.ticketId, "concurrent failure");
     });
 
-    expect(exported.ticketConfiguration).toMatchObject({ enabled: true });
+    expect(exported.ticketDepartments).toMatchObject([{ enabled: true }]);
     expect(exported.tickets).toMatchObject([
       { ticketId: reservation.ticket.ticketId, state: "creating" },
     ]);
@@ -376,6 +410,40 @@ describe("tenant-scoped panel and ticket persistence", () => {
       "close_logged",
       "closed",
     ]);
+  });
+
+  it("retains only the newest 100 ticket audit events and paginates reads", () => {
+    const storage = makeMemoryStorage();
+    storage.ensureGuild(GUILD_A);
+    const guild = storage.forGuild(GUILD_A);
+    const reservation = guild.reserveTicketCreation({
+      openerId: OPENER,
+      subject: "Audit retention",
+      description: "Exercise rolling ticket event retention.",
+    });
+    if (reservation.status !== "created") throw new Error("expected ticket");
+
+    for (let index = 0; index < 105; index += 1) {
+      guild.appendTicketEvent(reservation.ticket.ticketId, {
+        type: "recovery_noted",
+        details: { index },
+      });
+    }
+
+    const events = guild.listTicketEvents(reservation.ticket.ticketId);
+    expect(events).toHaveLength(100);
+    expect(events[0]?.eventNumber).toBe(7);
+    expect(events.at(-1)?.eventNumber).toBe(106);
+    expect(
+      guild.listTicketEvents(reservation.ticket.ticketId, 10, 0),
+    ).toHaveLength(10);
+    expect(
+      guild.listTicketEvents(reservation.ticket.ticketId, 10, 95),
+    ).toHaveLength(5);
+    expect(guild.listAllTicketEvents(7, 0)).toHaveLength(7);
+    expect(() =>
+      guild.listTicketEvents(reservation.ticket.ticketId, 101),
+    ).toThrow(/list limit/i);
   });
 
   it("rejects unsafe or unbounded JSON without mutating panel records", () => {

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import {
@@ -13,15 +14,20 @@ import {
 import {
   createV4Objects,
   createV4OperationalObjects,
+  createV5OperationalObjects,
   CURRENT_SCHEMA_VERSION,
   databaseIntegrityCheck,
   detectDatabaseSchema,
   type DatabaseSchemaKind,
+  LEGACY_V4_SCHEMA_VERSION,
   recordCurrentSchemaVersion,
+  recordV4SchemaVersion,
   V2_TABLE_NAMES,
+  V4_EXPLICIT_INDEX_NAMES,
   validateV2Schema,
   validateV3Schema,
   validateV4Schema,
+  validateV5Schema,
 } from "./schema.js";
 
 export type MigrationFailurePoint =
@@ -45,8 +51,8 @@ export interface MigrationOptions {
 
 export interface MigrationResult {
   status: "migrated" | "dry-run" | "already-current";
-  fromSchema: "legacy-v2" | "legacy-v3" | "current-v4";
-  toSchema: "current-v4";
+  fromSchema: "legacy-v2" | "legacy-v3" | "legacy-v4" | "current-v5";
+  toSchema: "current-v5";
   guilds: number;
   settingsRequiringReview: number;
   metricsPreserved: number;
@@ -65,6 +71,53 @@ interface V3Snapshot {
   guilds: unknown[];
   settings: unknown[];
   metrics: unknown[];
+}
+
+interface V4Snapshot {
+  configurations: V4TicketConfigurationRow[];
+  panels: unknown[];
+  tickets: V4TicketRow[];
+  events: unknown[];
+}
+
+interface V4TicketConfigurationRow {
+  guild_id: string;
+  enabled: number;
+  category_id: string;
+  log_channel_id: string;
+  support_role_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface V4TicketRow {
+  guild_id: string;
+  ticket_id: string;
+  ticket_number: number;
+  opener_id: string;
+  channel_id: string | null;
+  control_message_id: string | null;
+  subject: string;
+  description: string;
+  state: string;
+  claimed_by: string | null;
+  claimed_at: string | null;
+  closed_by: string | null;
+  close_reason: string | null;
+  close_log_message_id: string | null;
+  close_logged_at: string | null;
+  failure_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  closing_at: string | null;
+  closed_at: string | null;
+}
+
+interface MigratedDepartment {
+  guildId: string;
+  departmentId: string;
+  subjectFieldId: string;
+  detailsFieldId: string;
 }
 
 interface LegacyGuildRow {
@@ -136,21 +189,55 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       options.onLockAcquired?.();
       assertIntegrity(db);
       const schema = detectDatabaseSchema(db);
-      if (schema === "current-v4") {
-        const issues = validateV4Schema(db);
+      if (schema === "current-v5") {
+        const issues = validateV5Schema(db);
         if (issues.length > 0) {
-          throw new Error(`Schema v4 validation failed: ${issues.join("; ")}`);
+          throw new Error(`Schema v5 validation failed: ${issues.join("; ")}`);
         }
         return {
           status: "already-current",
-          fromSchema: "current-v4",
-          toSchema: "current-v4",
+          fromSchema: "current-v5",
+          toSchema: "current-v5",
           guilds: countRows(db, "guilds"),
           settingsRequiringReview: countReviewRequiredSettings(db),
           metricsPreserved: countRows(db, "metrics"),
           metricsDropped: 0,
           warnings: 0,
         };
+      }
+      if (schema === "legacy-v4") {
+        const v4Issues = validateV4Schema(db);
+        if (v4Issues.length > 0) {
+          throw new Error(
+            `Schema v4 validation failed: ${v4Issues.join("; ")}`,
+          );
+        }
+        const now = (options.now ?? utcNow)();
+        const result: MigrationResult = {
+          status: options.dryRun ? "dry-run" : "migrated",
+          fromSchema: "legacy-v4",
+          toSchema: "current-v5",
+          guilds: countRows(db, "guilds"),
+          settingsRequiringReview: countReviewRequiredSettings(db),
+          metricsPreserved: countRows(db, "metrics"),
+          metricsDropped: 0,
+          warnings: 0,
+        };
+        upgradeV4ToV5(db, options, true);
+        recordCurrentSchemaVersion(db, now);
+        injectFailure(options, "after-version");
+        const finalIssues = validateV5Schema(db);
+        if (finalIssues.length > 0) {
+          throw new Error(
+            `Migrated schema validation failed: ${finalIssues.join("; ")}`,
+          );
+        }
+        injectFailure(options, "before-commit");
+        if (options.dryRun) {
+          dryRunResult = result;
+          throw new DryRunRollback("validated dry run");
+        }
+        return result;
       }
       if (schema === "legacy-v3") {
         const v3Issues = validateV3Schema(db);
@@ -164,7 +251,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         const result: MigrationResult = {
           status: options.dryRun ? "dry-run" : "migrated",
           fromSchema: "legacy-v3",
-          toSchema: "current-v4",
+          toSchema: "current-v5",
           guilds: snapshot.guilds.length,
           settingsRequiringReview: countReviewRequiredSettings(db),
           metricsPreserved: snapshot.metrics.length,
@@ -179,9 +266,17 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         verifyV3Snapshot(db, snapshot);
         injectFailure(options, "after-verify");
         injectFailure(options, "after-drop");
+        recordV4SchemaVersion(db, now);
+        const v4FinalIssues = validateV4Schema(db);
+        if (v4FinalIssues.length > 0) {
+          throw new Error(
+            `Intermediate schema-v4 validation failed: ${v4FinalIssues.join("; ")}`,
+          );
+        }
+        upgradeV4ToV5(db, options, false);
         recordCurrentSchemaVersion(db, now);
         injectFailure(options, "after-version");
-        const finalIssues = validateV4Schema(db);
+        const finalIssues = validateV5Schema(db);
         if (finalIssues.length > 0) {
           throw new Error(
             `Migrated schema validation failed: ${finalIssues.join("; ")}`,
@@ -237,12 +332,21 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       }
       injectFailure(options, "after-drop");
 
+      recordV4SchemaVersion(db, now);
+      const v4FinalIssues = validateV4Schema(db);
+      if (v4FinalIssues.length > 0) {
+        throw new Error(
+          `Intermediate schema-v4 validation failed: ${v4FinalIssues.join("; ")}`,
+        );
+      }
+
+      upgradeV4ToV5(db, options, false);
       // The marker is deliberately the last data write. A database claiming
-      // version 4 has already passed source and copy verification.
+      // version 5 has already passed source, transformation, and copy checks.
       recordCurrentSchemaVersion(db, now);
       injectFailure(options, "after-version");
 
-      const finalIssues = validateV4Schema(db);
+      const finalIssues = validateV5Schema(db);
       if (finalIssues.length > 0) {
         throw new Error(
           `Migrated schema validation failed: ${finalIssues.join("; ")}`,
@@ -276,7 +380,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
 
 export function validateDatabaseFile(
   dbFile: string,
-  options: { expect: 2 | 3 | 4 },
+  options: { expect: 2 | 3 | 4 | 5 },
 ): DatabaseValidationResult {
   const db = new Database(dbFile, {
     readonly: true,
@@ -301,7 +405,8 @@ export function validateDatabaseFile(
     if (
       (expected === 2 && schema !== "legacy-v2") ||
       (expected === 3 && schema !== "legacy-v3") ||
-      (expected === 4 && schema !== "current-v4")
+      (expected === 4 && schema !== "legacy-v4") ||
+      (expected === 5 && schema !== "current-v5")
     ) {
       throw new Error(
         `Database schema is ${schema}; expected exact schema v${expected}`,
@@ -310,6 +415,297 @@ export function validateDatabaseFile(
     return { schema, schemaVersion, integrity, foreignKeyViolations };
   } finally {
     db.close();
+  }
+}
+
+function upgradeV4ToV5(
+  db: Database.Database,
+  options: MigrationOptions,
+  injectStages: boolean,
+): void {
+  const snapshot = readV4Snapshot(db);
+  if (injectStages) injectFailure(options, "after-source-read");
+
+  for (const index of V4_EXPLICIT_INDEX_NAMES) {
+    if (index !== "idx_guilds_enabled_left_at") {
+      db.exec(`DROP INDEX ${quoteIdentifier(index)}`);
+    }
+  }
+  for (const table of [
+    "ticket_events",
+    "tickets",
+    "posted_panels",
+    "ticket_configurations",
+  ] as const) {
+    db.exec(
+      `ALTER TABLE ${quoteIdentifier(table)} RENAME TO ${quoteIdentifier(v4LegacyTableName(table))}`,
+    );
+  }
+  if (injectStages) injectFailure(options, "after-rename");
+
+  createV5OperationalObjects(db);
+  if (injectStages) injectFailure(options, "after-create");
+
+  const departments = copyV4OperationalRows(db, snapshot);
+  if (injectStages) injectFailure(options, "after-copy");
+  verifyV4OperationalUpgrade(db, snapshot, departments);
+  if (injectStages) injectFailure(options, "after-verify");
+
+  for (const table of [
+    "ticket_events",
+    "tickets",
+    "posted_panels",
+    "ticket_configurations",
+  ] as const) {
+    db.exec(`DROP TABLE ${quoteIdentifier(v4LegacyTableName(table))}`);
+  }
+  if (injectStages) injectFailure(options, "after-drop");
+}
+
+function readV4Snapshot(db: Database.Database): V4Snapshot {
+  return {
+    configurations: db
+      .prepare("SELECT * FROM ticket_configurations ORDER BY guild_id")
+      .all() as V4TicketConfigurationRow[],
+    panels: db
+      .prepare("SELECT * FROM posted_panels ORDER BY guild_id, panel_id")
+      .all(),
+    tickets: db
+      .prepare("SELECT * FROM tickets ORDER BY guild_id, ticket_number")
+      .all() as V4TicketRow[],
+    events: db
+      .prepare(
+        "SELECT * FROM ticket_events ORDER BY guild_id, ticket_id, event_number",
+      )
+      .all(),
+  };
+}
+
+function copyV4OperationalRows(
+  db: Database.Database,
+  snapshot: V4Snapshot,
+): MigratedDepartment[] {
+  db.exec(
+    `INSERT INTO posted_panels
+     SELECT * FROM ${quoteIdentifier(v4LegacyTableName("posted_panels"))}`,
+  );
+
+  const configurationByGuild = new Map(
+    snapshot.configurations.map((row) => [row.guild_id, row]),
+  );
+  const ticketsByGuild = new Map<string, V4TicketRow[]>();
+  for (const ticket of snapshot.tickets) {
+    const rows = ticketsByGuild.get(ticket.guild_id) ?? [];
+    rows.push(ticket);
+    ticketsByGuild.set(ticket.guild_id, rows);
+  }
+  const guildIds = new Set([
+    ...configurationByGuild.keys(),
+    ...ticketsByGuild.keys(),
+  ]);
+  const allocatedIds = new Set<string>();
+  const departments: MigratedDepartment[] = [];
+  const insertDepartment = db.prepare(
+    `INSERT INTO ticket_departments (
+       guild_id, department_id, slug, display_name, description, emoji,
+       category_id, log_channel_id, support_role_id, enabled, sort_order,
+       definition_version, bindings_verified_at, created_at, updated_at
+     ) VALUES (?, ?, 'general-support', 'General Support', ?, NULL, ?, ?, ?, ?, 0, 1,
+       ?, ?, ?)`,
+  );
+  const insertField = db.prepare(
+    `INSERT INTO ticket_department_fields (
+       guild_id, department_id, field_id, label, description, placeholder,
+       field_type, required, min_length, max_length, sort_order, created_at,
+       updated_at
+     ) VALUES (?, ?, ?, ?, NULL, ?, ?, 1, 1, ?, ?, ?, ?)`,
+  );
+
+  for (const guildId of [...guildIds].sort()) {
+    const configuration = configurationByGuild.get(guildId);
+    const guildTickets = ticketsByGuild.get(guildId) ?? [];
+    const firstTicket = guildTickets[0];
+    const createdAt =
+      configuration?.created_at ??
+      firstTicket?.created_at ??
+      "1970-01-01T00:00:00.000Z";
+    const updatedAt =
+      configuration?.updated_at ?? firstTicket?.updated_at ?? createdAt;
+    const departmentId = allocateOpaqueId(allocatedIds);
+    const subjectFieldId = allocateOpaqueId(allocatedIds);
+    const detailsFieldId = allocateOpaqueId(allocatedIds);
+    insertDepartment.run(
+      guildId,
+      departmentId,
+      "Contact the support team for assistance.",
+      configuration?.category_id ?? null,
+      configuration?.log_channel_id ?? null,
+      configuration?.support_role_id ?? null,
+      configuration?.enabled ?? 0,
+      configuration?.updated_at ?? null,
+      createdAt,
+      updatedAt,
+    );
+    insertField.run(
+      guildId,
+      departmentId,
+      subjectFieldId,
+      "Subject",
+      "A short summary of what you need",
+      "short",
+      100,
+      0,
+      createdAt,
+      updatedAt,
+    );
+    insertField.run(
+      guildId,
+      departmentId,
+      detailsFieldId,
+      "Details",
+      "Share the context staff need to assist you",
+      "paragraph",
+      2_000,
+      1,
+      createdAt,
+      updatedAt,
+    );
+    departments.push({
+      guildId,
+      departmentId,
+      subjectFieldId,
+      detailsFieldId,
+    });
+  }
+
+  const departmentByGuild = new Map(
+    departments.map((department) => [department.guildId, department]),
+  );
+  const insertTicket = db.prepare(
+    `INSERT INTO tickets (
+       guild_id, ticket_id, ticket_number, department_id, opener_id,
+       channel_id, control_message_id, subject, description, state,
+       claimed_by, claimed_at, closed_by, close_reason, close_log_message_id,
+       close_logged_at, failure_reason, created_at, updated_at, closing_at,
+       closed_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const insertResponse = db.prepare(
+    `INSERT INTO ticket_form_responses (
+       guild_id, ticket_id, response_id, field_id, field_label, field_type,
+       response_text, sort_order, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const ticket of snapshot.tickets) {
+    const department = departmentByGuild.get(ticket.guild_id);
+    if (!department) {
+      throw new Error(
+        `Schema-v4 ticket ${ticket.ticket_id} has no migration department`,
+      );
+    }
+    insertTicket.run(
+      ticket.guild_id,
+      ticket.ticket_id,
+      ticket.ticket_number,
+      department.departmentId,
+      ticket.opener_id,
+      ticket.channel_id,
+      ticket.control_message_id,
+      ticket.subject,
+      ticket.description,
+      ticket.state,
+      ticket.claimed_by,
+      ticket.claimed_at,
+      ticket.closed_by,
+      ticket.close_reason,
+      ticket.close_log_message_id,
+      ticket.close_logged_at,
+      ticket.failure_reason,
+      ticket.created_at,
+      ticket.updated_at,
+      ticket.closing_at,
+      ticket.closed_at,
+    );
+    insertResponse.run(
+      ticket.guild_id,
+      ticket.ticket_id,
+      allocateOpaqueId(allocatedIds),
+      department.subjectFieldId,
+      "Subject",
+      "short",
+      ticket.subject,
+      0,
+      ticket.created_at,
+    );
+    insertResponse.run(
+      ticket.guild_id,
+      ticket.ticket_id,
+      allocateOpaqueId(allocatedIds),
+      department.detailsFieldId,
+      "Details",
+      "paragraph",
+      ticket.description,
+      1,
+      ticket.created_at,
+    );
+  }
+
+  db.exec(
+    `INSERT INTO ticket_events
+     SELECT * FROM ${quoteIdentifier(v4LegacyTableName("ticket_events"))}`,
+  );
+  return departments;
+}
+
+function verifyV4OperationalUpgrade(
+  db: Database.Database,
+  snapshot: V4Snapshot,
+  departments: MigratedDepartment[],
+): void {
+  const panels = db
+    .prepare("SELECT * FROM posted_panels ORDER BY guild_id, panel_id")
+    .all();
+  if (!isDeepStrictEqual(panels, snapshot.panels)) {
+    throw new Error("Schema-v4 posted panels changed during v5 migration");
+  }
+
+  const tickets = db
+    .prepare(
+      `SELECT guild_id, ticket_id, ticket_number, opener_id, channel_id,
+              control_message_id, subject, description, state, claimed_by,
+              claimed_at, closed_by, close_reason, close_log_message_id,
+              close_logged_at, failure_reason, created_at, updated_at,
+              closing_at, closed_at
+       FROM tickets ORDER BY guild_id, ticket_number`,
+    )
+    .all();
+  if (!isDeepStrictEqual(tickets, snapshot.tickets)) {
+    throw new Error("Schema-v4 tickets changed during v5 migration");
+  }
+
+  const events = db
+    .prepare(
+      "SELECT * FROM ticket_events ORDER BY guild_id, ticket_id, event_number",
+    )
+    .all();
+  if (!isDeepStrictEqual(events, snapshot.events)) {
+    throw new Error("Schema-v4 ticket events changed during v5 migration");
+  }
+  if (countRows(db, "ticket_departments") !== departments.length) {
+    throw new Error("Schema-v5 department migration count is inconsistent");
+  }
+  if (countRows(db, "ticket_department_fields") !== departments.length * 2) {
+    throw new Error("Schema-v5 ticket field migration count is inconsistent");
+  }
+  if (countRows(db, "ticket_form_responses") !== snapshot.tickets.length * 2) {
+    throw new Error(
+      "Schema-v5 ticket response migration count is inconsistent",
+    );
+  }
+
+  const foreignKeyViolations = db.pragma("foreign_key_check") as unknown[];
+  if (foreignKeyViolations.length > 0) {
+    throw new Error("Schema-v5 migrated candidate has foreign-key violations");
   }
 }
 
@@ -425,7 +821,7 @@ function prepareMigration(
     ),
     result: {
       fromSchema: "legacy-v2",
-      toSchema: "current-v4",
+      toSchema: "current-v5",
       guilds: guilds.length,
       settingsRequiringReview,
       metricsPreserved: preparedMetrics.size,
@@ -656,7 +1052,8 @@ function readSchemaVersion(
   if (
     schema !== "legacy-v2" &&
     schema !== "legacy-v3" &&
-    schema !== "current-v4"
+    schema !== "legacy-v4" &&
+    schema !== "current-v5"
   ) {
     return null;
   }
@@ -668,6 +1065,21 @@ function readSchemaVersion(
 
 function legacyTableName(table: string): string {
   return `${table}_v2_legacy`;
+}
+
+function v4LegacyTableName(table: string): string {
+  return `${table}_v4_legacy`;
+}
+
+function allocateOpaqueId(allocated: Set<string>): string {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const value = randomBytes(9).toString("base64url");
+    if (!allocated.has(value)) {
+      allocated.add(value);
+      return value;
+    }
+  }
+  throw new Error("Unable to allocate a unique schema-v5 migration ID");
 }
 
 function quoteIdentifier(identifier: string): string {

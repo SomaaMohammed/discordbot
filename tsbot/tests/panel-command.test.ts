@@ -1,8 +1,4 @@
-import {
-  ApplicationCommandOptionType,
-  ChannelType,
-  PermissionFlagsBits,
-} from "discord.js";
+import { ApplicationCommandOptionType, ChannelType } from "discord.js";
 import { describe, expect, it } from "vitest";
 import { buildPanelCommandDefinition } from "../src/discord/panel-command.js";
 import {
@@ -41,15 +37,13 @@ function findOption(
 }
 
 describe("/panel command definition", () => {
-  it("is guild-only, administrator-discoverable, and has clear subcommands", () => {
+  it("is guild-only, delegate-discoverable, and has clear subcommands", () => {
     const command = buildPanelCommandDefinition().toJSON();
 
     expect(command.name).toBe("panel");
     expect(command.description).toMatch(/Superior server panels/i);
     expect(command.dm_permission).toBe(false);
-    expect(command.default_member_permissions).toBe(
-      PermissionFlagsBits.Administrator.toString(),
-    );
+    expect(command.default_member_permissions).toBeUndefined();
     expect(command.options?.map(({ name }) => name)).toEqual([
       "list",
       "post",
@@ -67,7 +61,7 @@ describe("/panel command definition", () => {
     expect(preset.type).toBe(ApplicationCommandOptionType.String);
     expect(preset.required).toBe(true);
     expect(preset.choices?.map(({ value }) => value)).toEqual(PANEL_PRESETS);
-    expect(preset.choices).toHaveLength(4);
+    expect(preset.choices).toHaveLength(PANEL_PRESETS.length);
     expect(channel.type).toBe(ApplicationCommandOptionType.Channel);
     expect(channel.required).toBe(true);
     expect(channel.channel_types).toEqual([

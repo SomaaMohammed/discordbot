@@ -16,8 +16,9 @@ import {
 import {
   detectDatabaseSchema,
   initializeV3Schema,
-  V4_EXPLICIT_INDEX_NAMES,
-  V4_TABLE_NAMES,
+  initializeV4Schema,
+  V5_EXPLICIT_INDEX_NAMES,
+  V5_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import {
   createV2FixtureDatabase,
@@ -36,7 +37,7 @@ afterEach(() => {
   }
 });
 
-describe("explicit schema migration to v4", () => {
+describe("explicit schema migration to v5", () => {
   it("preserves active tenant data and discards retired state", () => {
     const dbFile = fixturePath("active.db");
     const db = createV2FixtureDatabase(dbFile);
@@ -114,15 +115,15 @@ describe("explicit schema migration to v4", () => {
     expect(result).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v2",
-      toSchema: "current-v4",
+      toSchema: "current-v5",
       guilds: 2,
       settingsRequiringReview: 1,
       metricsPreserved: 3,
       metricsDropped: 3,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 4 })).toMatchObject({
-      schema: "current-v4",
-      schemaVersion: 4,
+    expect(validateDatabaseFile(dbFile, { expect: 5 })).toMatchObject({
+      schema: "current-v5",
+      schemaVersion: 5,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -130,10 +131,10 @@ describe("explicit schema migration to v4", () => {
     const migrated = new Database(dbFile, { readonly: true });
     try {
       expect(schemaObjects(migrated, "table")).toEqual(
-        [...V4_TABLE_NAMES].sort(),
+        [...V5_TABLE_NAMES].sort(),
       );
       expect(schemaObjects(migrated, "index")).toEqual(
-        [...V4_EXPLICIT_INDEX_NAMES].sort(),
+        [...V5_EXPLICIT_INDEX_NAMES].sort(),
       );
       expect(
         migrated
@@ -343,14 +344,14 @@ describe("explicit schema migration to v4", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v3",
-      toSchema: "current-v4",
+      toSchema: "current-v5",
       guilds: 1,
       metricsPreserved: 1,
       metricsDropped: 0,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 4 })).toMatchObject({
-      schema: "current-v4",
-      schemaVersion: 4,
+    expect(validateDatabaseFile(dbFile, { expect: 5 })).toMatchObject({
+      schema: "current-v5",
+      schemaVersion: 5,
     });
 
     const db = new Database(dbFile, { readonly: true });
@@ -381,9 +382,9 @@ describe("explicit schema migration to v4", () => {
         db
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([{ version: 3 }, { version: 4 }]);
+      ).toEqual([{ version: 3 }, { version: 4 }, { version: 5 }]);
       for (const table of [
-        "ticket_configurations",
+        "ticket_departments",
         "posted_panels",
         "tickets",
         "ticket_events",
@@ -396,6 +397,184 @@ describe("explicit schema migration to v4", () => {
       db.close();
     }
   });
+
+  it("migrates schema v4 ticket lifecycle rows exactly into General Support", () => {
+    const dbFile = fixturePath("v4-tickets.db");
+    const ticketId = createV4TicketFixture(dbFile);
+    const source = new Database(dbFile, { readonly: true });
+    const preservedTickets = readPreservedV4Tickets(source);
+    source.close();
+    expect(preservedTickets).toHaveLength(3);
+    expect(
+      preservedTickets.find((ticket) => ticket.ticket_id === "ticket_v4"),
+    ).toMatchObject({
+      state: "open",
+      channel_id: "900000000000000001",
+      control_message_id: "900000000000000002",
+      claimed_by: "900000000000000003",
+      claimed_at: "2026-01-01T00:01:00.000Z",
+    });
+    expect(
+      preservedTickets.find(
+        (ticket) => ticket.ticket_id === "ticket_closing_v4",
+      ),
+    ).toMatchObject({
+      state: "closing",
+      closing_at: "2026-01-01T00:04:00.000Z",
+      close_log_message_id: "900000000000000015",
+      close_logged_at: "2026-01-01T00:05:00.000Z",
+      closed_at: null,
+    });
+    expect(
+      preservedTickets.find(
+        (ticket) => ticket.ticket_id === "ticket_closed_v4",
+      ),
+    ).toMatchObject({
+      state: "closed",
+      closing_at: "2026-01-01T00:08:00.000Z",
+      close_log_message_id: "900000000000000026",
+      close_logged_at: "2026-01-01T00:09:00.000Z",
+      closed_at: "2026-01-01T00:10:00.000Z",
+    });
+
+    expect(
+      migrateDatabase({
+        dbFile,
+        now: () => "2026-02-01T00:00:00.000Z",
+      }),
+    ).toMatchObject({
+      status: "migrated",
+      fromSchema: "legacy-v4",
+      toSchema: "current-v5",
+      guilds: 1,
+    });
+    expect(validateDatabaseFile(dbFile, { expect: 5 }).schema).toBe(
+      "current-v5",
+    );
+
+    const db = new Database(dbFile);
+    try {
+      const department = db
+        .prepare("SELECT * FROM ticket_departments WHERE guild_id = ?")
+        .get(GUILD_A) as Record<string, unknown>;
+      expect(department).toMatchObject({
+        slug: "general-support",
+        display_name: "General Support",
+        enabled: 1,
+        category_id: "333333333333333333",
+        log_channel_id: "555555555555555555",
+        support_role_id: "666666666666666666",
+        bindings_verified_at: "2026-01-01T00:00:00.000Z",
+      });
+      expect(
+        db
+          .prepare(
+            `SELECT label, field_type, max_length, sort_order
+             FROM ticket_department_fields
+             WHERE guild_id = ? ORDER BY sort_order`,
+          )
+          .all(GUILD_A),
+      ).toEqual([
+        {
+          label: "Subject",
+          field_type: "short",
+          max_length: 100,
+          sort_order: 0,
+        },
+        {
+          label: "Details",
+          field_type: "paragraph",
+          max_length: 2_000,
+          sort_order: 1,
+        },
+      ]);
+      expect(
+        db
+          .prepare(
+            "SELECT department_id, subject, description FROM tickets WHERE ticket_id = ?",
+          )
+          .get(ticketId),
+      ).toEqual({
+        department_id: department.department_id,
+        subject: "Migration subject",
+        description: "Migration details",
+      });
+      expect(
+        db
+          .prepare(
+            `SELECT field_label, field_type, response_text, sort_order
+             FROM ticket_form_responses WHERE ticket_id = ? ORDER BY sort_order`,
+          )
+          .all(ticketId),
+      ).toEqual([
+        {
+          field_label: "Subject",
+          field_type: "short",
+          response_text: "Migration subject",
+          sort_order: 0,
+        },
+        {
+          field_label: "Details",
+          field_type: "paragraph",
+          response_text: "Migration details",
+          sort_order: 1,
+        },
+      ]);
+      expect(db.prepare("SELECT event_type FROM ticket_events").all()).toEqual([
+        { event_type: "creation_reserved" },
+      ]);
+      expect(readPreservedV4Tickets(db)).toEqual(preservedTickets);
+      expect(
+        db
+          .prepare("SELECT version FROM schema_migrations ORDER BY version")
+          .all(),
+      ).toEqual([{ version: 4 }, { version: 5 }]);
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO delegated_capability_grants (
+               guild_id, principal_type, principal_id, capability, active,
+               granted_by, created_at, updated_at
+             ) VALUES (?, 'user', ?, 'panels.manage', 1, ?, ?, ?)`,
+          )
+          .run(
+            GUILD_A,
+            GUILD_B,
+            USER_A,
+            "2026-02-01T00:00:00.000Z",
+            "2026-02-01T00:00:00.000Z",
+          ),
+      ).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each<MigrationFailurePoint>([
+    "after-source-read",
+    "after-rename",
+    "after-create",
+    "after-copy",
+    "after-verify",
+    "after-drop",
+    "after-version",
+    "before-commit",
+  ])(
+    "rolls v4 back completely after an injected %s failure",
+    (failurePoint) => {
+      const dbFile = fixturePath(`v4-${failurePoint}.db`);
+      createV4TicketFixture(dbFile);
+      const before = fs.readFileSync(dbFile);
+
+      expect(() => migrateDatabase({ dbFile, failurePoint })).toThrow(
+        `Injected migration failure at ${failurePoint}`,
+      );
+      expect(fs.readFileSync(dbFile)).toEqual(before);
+      expect(validateDatabaseFile(dbFile, { expect: 4 }).schema).toBe(
+        "legacy-v4",
+      );
+    },
+  );
 
   it.each<MigrationFailurePoint>([
     "after-source-read",
@@ -431,12 +610,12 @@ describe("explicit schema migration to v4", () => {
     storage.close();
     expect(migrateDatabase({ dbFile })).toMatchObject({
       status: "already-current",
-      fromSchema: "current-v4",
-      toSchema: "current-v4",
+      fromSchema: "current-v5",
+      toSchema: "current-v5",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 4 }).schema).toBe(
-      "current-v4",
+    expect(validateDatabaseFile(dbFile, { expect: 5 }).schema).toBe(
+      "current-v5",
     );
   });
 
@@ -466,6 +645,24 @@ describe("explicit schema migration to v4", () => {
     }
   });
 });
+
+const PRESERVED_V4_TICKET_COLUMNS = `
+  guild_id, ticket_id, ticket_number, opener_id, channel_id,
+  control_message_id, subject, description, state, claimed_by, claimed_at,
+  closed_by, close_reason, close_log_message_id, close_logged_at,
+  failure_reason, created_at, updated_at, closing_at, closed_at
+`;
+
+function readPreservedV4Tickets(
+  db: Database.Database,
+): Array<Record<string, unknown>> {
+  return db
+    .prepare(
+      `SELECT ${PRESERVED_V4_TICKET_COLUMNS}
+       FROM tickets ORDER BY guild_id, ticket_number`,
+    )
+    .all() as Array<Record<string, unknown>>;
+}
 
 function readSettings(
   db: Database.Database,
@@ -547,6 +744,131 @@ function createV3Fixture(dbFile: string): void {
      ) VALUES (?, ?, ?, ?)`,
   ).run(GUILD_A, "command_usage.utility.ping", 7, "2026-01-01T00:00:00.000Z");
   db.close();
+}
+
+function createV4TicketFixture(dbFile: string): string {
+  const db = new Database(dbFile);
+  db.pragma("foreign_keys = ON");
+  const now = "2026-01-01T00:00:00.000Z";
+  initializeV4Schema(db, now);
+  const settings = createDefaultGuildSettings();
+  db.prepare(
+    `INSERT INTO guilds (
+       guild_id, enabled, name, joined_at, left_at, created_at, updated_at
+     ) VALUES (?, 0, 'Preserved v4', ?, NULL, ?, ?)`,
+  ).run(GUILD_A, now, now, now);
+  db.prepare(
+    `INSERT INTO guild_settings (
+       guild_id, settings_version, settings_json, updated_at
+     ) VALUES (?, 2, ?, ?)`,
+  ).run(GUILD_A, serializeGuildSettings(settings), now);
+  db.prepare(
+    `INSERT INTO ticket_configurations (
+       guild_id, enabled, category_id, log_channel_id, support_role_id,
+       created_at, updated_at
+     ) VALUES (?, 1, ?, ?, ?, ?, ?)`,
+  ).run(
+    GUILD_A,
+    "333333333333333333",
+    "555555555555555555",
+    "666666666666666666",
+    now,
+    now,
+  );
+  db.prepare(
+    `INSERT INTO posted_panels (
+       guild_id, panel_id, preset, channel_id, message_id, configuration_json,
+       created_at, updated_at
+     ) VALUES (?, 'panel_v4', 'tickets', ?, ?, '{}', ?, ?)`,
+  ).run(GUILD_A, "777777777777777777", "888888888888888888", now, now);
+  const ticketId = "ticket_v4";
+  const insertTicket = db.prepare(
+    `INSERT INTO tickets (
+       guild_id, ticket_id, ticket_number, opener_id, channel_id,
+       control_message_id, subject, description, state, claimed_by, claimed_at,
+       closed_by, close_reason, close_log_message_id, close_logged_at,
+       failure_reason, created_at, updated_at, closing_at, closed_at
+     ) VALUES (
+       @guildId, @ticketId, @ticketNumber, @openerId, @channelId,
+       @controlMessageId, @subject, @description, @state, @claimedBy, @claimedAt,
+       @closedBy, @closeReason, @closeLogMessageId, @closeLoggedAt,
+       @failureReason, @createdAt, @updatedAt, @closingAt, @closedAt
+     )`,
+  );
+  insertTicket.run({
+    guildId: GUILD_A,
+    ticketId,
+    ticketNumber: 1,
+    openerId: USER_A,
+    channelId: "900000000000000001",
+    controlMessageId: "900000000000000002",
+    subject: "Migration subject",
+    description: "Migration details",
+    state: "open",
+    claimedBy: "900000000000000003",
+    claimedAt: "2026-01-01T00:01:00.000Z",
+    closedBy: null,
+    closeReason: null,
+    closeLogMessageId: null,
+    closeLoggedAt: null,
+    failureReason: null,
+    createdAt: now,
+    updatedAt: "2026-01-01T00:02:00.000Z",
+    closingAt: null,
+    closedAt: null,
+  });
+  insertTicket.run({
+    guildId: GUILD_A,
+    ticketId: "ticket_closing_v4",
+    ticketNumber: 2,
+    openerId: "900000000000000011",
+    channelId: "900000000000000012",
+    controlMessageId: "900000000000000013",
+    subject: "Closing migration",
+    description: "Preserve the closing and log-delivery checkpoints.",
+    state: "closing",
+    claimedBy: null,
+    claimedAt: null,
+    closedBy: "900000000000000014",
+    closeReason: "The request is complete.",
+    closeLogMessageId: "900000000000000015",
+    closeLoggedAt: "2026-01-01T00:05:00.000Z",
+    failureReason: null,
+    createdAt: "2026-01-01T00:03:00.000Z",
+    updatedAt: "2026-01-01T00:06:00.000Z",
+    closingAt: "2026-01-01T00:04:00.000Z",
+    closedAt: null,
+  });
+  insertTicket.run({
+    guildId: GUILD_A,
+    ticketId: "ticket_closed_v4",
+    ticketNumber: 3,
+    openerId: "900000000000000021",
+    channelId: "900000000000000022",
+    controlMessageId: "900000000000000023",
+    subject: "Closed migration",
+    description: "Preserve the completed closure lifecycle exactly.",
+    state: "closed",
+    claimedBy: "900000000000000024",
+    claimedAt: "2026-01-01T00:07:00.000Z",
+    closedBy: "900000000000000025",
+    closeReason: "The request was resolved.",
+    closeLogMessageId: "900000000000000026",
+    closeLoggedAt: "2026-01-01T00:09:00.000Z",
+    failureReason: null,
+    createdAt: "2026-01-01T00:06:00.000Z",
+    updatedAt: "2026-01-01T00:10:00.000Z",
+    closingAt: "2026-01-01T00:08:00.000Z",
+    closedAt: "2026-01-01T00:10:00.000Z",
+  });
+  db.prepare(
+    `INSERT INTO ticket_events (
+       guild_id, ticket_id, event_id, event_number, event_type, actor_id,
+       details_json, created_at
+     ) VALUES (?, ?, 'event_v4', 1, 'creation_reserved', ?, '{}', ?)`,
+  ).run(GUILD_A, ticketId, USER_A, now);
+  db.close();
+  return ticketId;
 }
 
 function fixturePath(name: string): string {

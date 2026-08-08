@@ -8,10 +8,11 @@ import { validateDatabaseFile } from "../src/storage/migration.js";
 import {
   detectDatabaseSchema,
   initializeV3Schema,
+  initializeV4Schema,
   validateV2Schema,
-  validateV4Schema,
-  V4_EXPLICIT_INDEX_NAMES,
-  V4_TABLE_NAMES,
+  validateV5Schema,
+  V5_EXPLICIT_INDEX_NAMES,
+  V5_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import { createV2FixtureDatabase } from "./helpers/v2-fixture.js";
 
@@ -23,13 +24,13 @@ afterEach(() => {
   }
 });
 
-describe("schema v4", () => {
+describe("schema v5", () => {
   it("creates only the exact active tables and required index", () => {
     const dbFile = freshDatabase();
-    const validation = validateDatabaseFile(dbFile, { expect: 4 });
+    const validation = validateDatabaseFile(dbFile, { expect: 5 });
     expect(validation).toEqual({
-      schema: "current-v4",
-      schemaVersion: 4,
+      schema: "current-v5",
+      schemaVersion: 5,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -44,13 +45,44 @@ describe("schema v4", () => {
         .all() as Array<{ type: string; name: string }>;
       expect(
         objects.filter((row) => row.type === "table").map(rowName),
-      ).toEqual([...V4_TABLE_NAMES].sort());
+      ).toEqual([...V5_TABLE_NAMES].sort());
       expect(
         objects.filter((row) => row.type === "index").map(rowName),
-      ).toEqual([...V4_EXPLICIT_INDEX_NAMES].sort());
+      ).toEqual([...V5_EXPLICIT_INDEX_NAMES].sort());
       expect(objects.some((row) => row.type === "view")).toBe(false);
       expect(objects.some((row) => row.type === "trigger")).toBe(false);
-      expect(validateV4Schema(db)).toEqual([]);
+      expect(validateV5Schema(db)).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects user-principal capability grants in a fresh v5 schema", () => {
+    const dbFile = freshDatabase();
+    const storage = new BotStorage({ dbFile });
+    storage.initStorage();
+    storage.ensureGuild("111111111111111111");
+    storage.close();
+
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    try {
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO delegated_capability_grants (
+               guild_id, principal_type, principal_id, capability, active,
+               granted_by, created_at, updated_at
+             ) VALUES (?, 'user', ?, 'panels.manage', 1, ?, ?, ?)`,
+          )
+          .run(
+            "111111111111111111",
+            "222222222222222222",
+            "333333333333333333",
+            "2026-01-01T00:00:00.000Z",
+            "2026-01-01T00:00:00.000Z",
+          ),
+      ).toThrow(/CHECK constraint failed/);
     } finally {
       db.close();
     }
@@ -88,7 +120,7 @@ describe("schema v4", () => {
         "UPDATE guild_settings SET settings_json = '{malformed' WHERE guild_id = ?",
       ).run("111111111111111111");
       expect(detectDatabaseSchema(db)).toBe("unknown");
-      expect(validateV4Schema(db).join(" ")).toMatch(/settings are invalid/);
+      expect(validateV5Schema(db).join(" ")).toMatch(/settings are invalid/);
     } finally {
       db.close();
     }
@@ -113,7 +145,7 @@ describe("schema v4", () => {
       db.exec("DROP TABLE ticket_events");
       db.exec(table.sql.replace("'creation_reserved'", "'CREATION_RESERVED'"));
       db.exec(index.sql);
-      expect(validateV4Schema(db).join(" ")).toMatch(
+      expect(validateV5Schema(db).join(" ")).toMatch(
         /ticket_events SQL does not match/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -146,8 +178,8 @@ describe("schema v4", () => {
         "2026-01-01T00:00:00.000Z",
       );
       db.pragma("ignore_check_constraints = OFF");
-      expect(validateV4Schema(db).join(" ")).toMatch(
-        /invalid configuration JSON/,
+      expect(validateV5Schema(db).join(" ")).toMatch(
+        /invalid or oversized JSON/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
     } finally {
@@ -187,7 +219,7 @@ describe("schema v4", () => {
         );
         db.pragma("ignore_check_constraints = OFF");
 
-        expect(validateV4Schema(db).join(" ")).toMatch(/invalid text/);
+        expect(validateV5Schema(db).join(" ")).toMatch(/non-text data/);
         expect(detectDatabaseSchema(db)).toBe("unknown");
       } finally {
         db.close();
@@ -195,52 +227,38 @@ describe("schema v4", () => {
     },
   );
 
-  it.each(["creating", "open", "closing"])(
-    "rejects a %s ticket when its guild has no ticket configuration",
-    (state) => {
-      const dbFile = freshDatabase();
-      const storage = new BotStorage({ dbFile });
-      storage.initStorage();
-      storage.ensureGuild("111111111111111111");
-      storage.close();
+  it("rejects an enabled application form without a configured field", () => {
+    const dbFile = freshDatabase();
+    const storage = new BotStorage({ dbFile });
+    storage.initStorage();
+    storage.ensureGuild("111111111111111111");
+    storage.close();
 
-      const db = new Database(dbFile);
-      try {
-        const channelId = state === "creating" ? null : "222222222222222222";
-        const closedBy = state === "closing" ? "333333333333333333" : null;
-        const closeReason = state === "closing" ? "Checker test" : null;
-        const closingAt =
-          state === "closing" ? "2026-01-01T00:00:00.000Z" : null;
-        db.prepare(
-          `INSERT INTO tickets (
-             guild_id, ticket_id, ticket_number, opener_id, channel_id,
-             subject, description, state, closed_by, close_reason,
-             created_at, updated_at, closing_at
-           ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          "111111111111111111",
-          `ticket_${state}`,
-          "444444444444444444",
-          channelId,
-          "Missing configuration",
-          "The checker must reject this active ticket.",
-          state,
-          closedBy,
-          closeReason,
-          "2026-01-01T00:00:00.000Z",
-          "2026-01-01T00:00:00.000Z",
-          closingAt,
-        );
+    const db = new Database(dbFile);
+    try {
+      db.prepare(
+        `INSERT INTO application_forms (
+           guild_id, form_id, slug, display_name, description,
+           reviewer_role_id, review_channel_id, enabled, sort_order,
+           definition_version, bindings_verified_at, created_at, updated_at
+         ) VALUES (?, 'staffform', 'staff', 'Staff', 'Apply for staff.',
+           ?, ?, 1, 0, 1, NULL, ?, ?)`,
+      ).run(
+        "111111111111111111",
+        "222222222222222222",
+        "333333333333333333",
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:00.000Z",
+      );
 
-        expect(validateV4Schema(db).join(" ")).toMatch(
-          /active ticket .* has no ticket configuration/,
-        );
-        expect(detectDatabaseSchema(db)).toBe("unknown");
-      } finally {
-        db.close();
-      }
-    },
-  );
+      expect(validateV5Schema(db).join(" ")).toMatch(
+        /enabled application form does not have 1-5 fields/,
+      );
+      expect(detectDatabaseSchema(db)).toBe("unknown");
+    } finally {
+      db.close();
+    }
+  });
 
   it("enforces active-opener, channel, lifecycle, and composite tenant constraints", () => {
     const dbFile = freshDatabase();
@@ -265,11 +283,11 @@ describe("schema v4", () => {
       const activeIndex = db
         .prepare(
           `SELECT sql FROM sqlite_master
-           WHERE type = 'index' AND name = 'idx_tickets_guild_opener_active'`,
+           WHERE type = 'index' AND name = 'idx_tickets_guild_opener_department_active'`,
         )
         .get() as { sql: string };
       expect(activeIndex.sql).toMatch(
-        /UNIQUE INDEX[\s\S]*guild_id, opener_id[\s\S]*WHERE state IN \('creating', 'open', 'closing'\)/i,
+        /UNIQUE INDEX[\s\S]*guild_id, department_id, opener_id[\s\S]*WHERE state IN \('creating', 'open', 'closing'\)/i,
       );
       const eventForeignKeys = db
         .prepare("PRAGMA foreign_key_list(ticket_events)")
@@ -285,14 +303,15 @@ describe("schema v4", () => {
         db
           .prepare(
             `INSERT INTO tickets (
-               guild_id, ticket_id, ticket_number, opener_id, subject,
-               description, state, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, 'creating', ?, ?)`,
+               guild_id, ticket_id, ticket_number, department_id, opener_id,
+               subject, description, state, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?)`,
           )
           .run(
             "111111111111111111",
             "duplicate1",
             2,
+            reserved.ticket.departmentId,
             "333333333333333333",
             "Duplicate",
             "Must fail",
@@ -304,14 +323,15 @@ describe("schema v4", () => {
         db
           .prepare(
             `INSERT INTO tickets (
-               guild_id, ticket_id, ticket_number, opener_id, channel_id,
-               subject, description, state, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+               guild_id, ticket_id, ticket_number, department_id, opener_id,
+               channel_id, subject, description, state, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
           )
           .run(
             "111111111111111111",
             "duplicate2",
             2,
+            reserved.ticket.departmentId,
             "555555555555555555",
             "444444444444444444",
             "Duplicate channel",
@@ -399,6 +419,26 @@ describe("schema v4", () => {
     expect(fs.readFileSync(dbFile)).toEqual(before);
     expect(validateDatabaseFile(dbFile, { expect: 3 }).schema).toBe(
       "legacy-v3",
+    );
+  });
+
+  it("normal startup read-only classifies and refuses schema v4 unchanged", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "v4.db");
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV4Schema(db, "2026-01-01T00:00:00.000Z");
+    db.close();
+    const before = fs.readFileSync(dbFile);
+
+    const storage = new BotStorage({ dbFile });
+    expect(() => storage.initStorage()).toThrow(
+      /schema v4 requires an explicit migration/i,
+    );
+    storage.close();
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 4 }).schema).toBe(
+      "legacy-v4",
     );
   });
 

@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   PANEL_PRESETS,
+  MAX_TICKET_EVENTS_PER_TICKET,
   TICKET_EVENT_TYPES,
   TICKET_STATES,
   type PanelPreset,
@@ -22,6 +23,8 @@ import {
   type TicketEvent,
   type TicketEventInput,
   type TicketEventType,
+  type TicketFormResponse,
+  type TicketFormResponseInput,
   type TicketRebindInput,
   type TicketRebindResult,
   type TicketRecord,
@@ -29,16 +32,13 @@ import {
   type TicketReservationResult,
   type TicketState,
 } from "../types.js";
+import {
+  GENERAL_SUPPORT_DEPARTMENT_SLUG,
+  TicketDepartmentRepository,
+} from "./ticket-department-repository.js";
 
-interface TicketConfigurationRow {
-  guild_id: string;
-  enabled: number;
-  category_id: string;
-  log_channel_id: string;
-  support_role_id: string;
-  created_at: string;
-  updated_at: string;
-}
+const DEFAULT_OPERATIONAL_LIST_LIMIT = 100;
+const MAX_OPERATIONAL_LIST_LIMIT = 1_000;
 
 interface PostedPanelRow {
   guild_id: string;
@@ -55,6 +55,7 @@ interface TicketRow {
   guild_id: string;
   ticket_id: string;
   ticket_number: number;
+  department_id: string;
   opener_id: string;
   channel_id: string | null;
   control_message_id: string | null;
@@ -72,6 +73,18 @@ interface TicketRow {
   updated_at: string;
   closing_at: string | null;
   closed_at: string | null;
+}
+
+interface TicketFormResponseRow {
+  guild_id: string;
+  ticket_id: string;
+  response_id: string;
+  field_id: string;
+  field_label: string;
+  field_type: string;
+  response_text: string;
+  sort_order: number;
+  created_at: string;
 }
 
 interface TicketEventRow {
@@ -96,10 +109,25 @@ export class GuildOperationalRepository {
   ) {}
 
   public getTicketConfiguration(): TicketConfiguration | null {
-    const row = this.db
-      .prepare("SELECT * FROM ticket_configurations WHERE guild_id = ?")
-      .get(this.guildId) as TicketConfigurationRow | undefined;
-    return row ? parseTicketConfigurationRow(row) : null;
+    const department = this.ticketDepartments().getGeneralSupportDepartment();
+    if (
+      !department ||
+      !department.categoryId ||
+      !department.logChannelId ||
+      !department.supportRoleId
+    ) {
+      return null;
+    }
+    return {
+      guildId: this.guildId,
+      departmentId: department.departmentId,
+      enabled: department.enabled,
+      categoryId: department.categoryId,
+      logChannelId: department.logChannelId,
+      supportRoleId: department.supportRoleId,
+      createdAt: department.createdAt,
+      updatedAt: department.updatedAt,
+    };
   }
 
   public upsertTicketConfiguration(
@@ -118,29 +146,30 @@ export class GuildOperationalRepository {
     if (typeof enabled !== "boolean") {
       throw new TypeError("Ticket configuration enabled must be a boolean");
     }
-    const now = utcNow();
-    this.db
-      .prepare(
-        `INSERT INTO ticket_configurations (
-           guild_id, enabled, category_id, log_channel_id, support_role_id,
-           created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(guild_id) DO UPDATE SET
-           enabled = excluded.enabled,
-           category_id = excluded.category_id,
-           log_channel_id = excluded.log_channel_id,
-           support_role_id = excluded.support_role_id,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        this.guildId,
-        enabled ? 1 : 0,
+    const departments = this.ticketDepartments();
+    const current = departments.getGeneralSupportDepartment();
+    const bindingsVerifiedAt = utcNow();
+    if (current) {
+      departments.updateDepartment(current.departmentId, {
         categoryId,
         logChannelId,
         supportRoleId,
-        now,
-        now,
-      );
+        enabled,
+        bindingsVerifiedAt,
+      });
+    } else {
+      departments.createDepartment({
+        slug: GENERAL_SUPPORT_DEPARTMENT_SLUG,
+        displayName: "General Support",
+        description: "General support requests",
+        categoryId,
+        logChannelId,
+        supportRoleId,
+        enabled,
+        sortOrder: 0,
+        bindingsVerifiedAt,
+      });
+    }
     return this.requireTicketConfiguration();
   }
 
@@ -149,13 +178,13 @@ export class GuildOperationalRepository {
     if (!current || !current.enabled) {
       return current;
     }
-    this.db
-      .prepare(
-        `UPDATE ticket_configurations
-         SET enabled = 0, updated_at = ?
-         WHERE guild_id = ? AND enabled = 1`,
-      )
-      .run(utcNow(), this.guildId);
+    const departmentId = current.departmentId;
+    if (!departmentId) {
+      throw new Error(
+        "Legacy ticket configuration is missing its department ID",
+      );
+    }
+    this.ticketDepartments().setDepartmentEnabled(departmentId, false);
     return this.requireTicketConfiguration();
   }
 
@@ -208,15 +237,22 @@ export class GuildOperationalRepository {
     return requireTransitionResult<PostedPanel>(result);
   }
 
-  public listPostedPanels(preset?: PanelPreset): PostedPanel[] {
+  public listPostedPanels(
+    preset?: PanelPreset,
+    limit = DEFAULT_OPERATIONAL_LIST_LIMIT,
+    offset = 0,
+  ): PostedPanel[] {
+    const boundedLimit = normalizeListLimit(limit);
+    const boundedOffset = normalizeListOffset(offset);
     if (preset === undefined) {
       return (
         this.db
           .prepare(
             `SELECT * FROM posted_panels
-             WHERE guild_id = ? ORDER BY preset, channel_id, panel_id`,
+             WHERE guild_id = ? ORDER BY preset, channel_id, panel_id
+             LIMIT ? OFFSET ?`,
           )
-          .all(this.guildId) as PostedPanelRow[]
+          .all(this.guildId, boundedLimit, boundedOffset) as PostedPanelRow[]
       ).map(parsePostedPanelRow);
     }
     const normalized = normalizePanelPreset(preset);
@@ -224,10 +260,35 @@ export class GuildOperationalRepository {
       this.db
         .prepare(
           `SELECT * FROM posted_panels
-           WHERE guild_id = ? AND preset = ? ORDER BY channel_id, panel_id`,
+           WHERE guild_id = ? AND preset = ? ORDER BY channel_id, panel_id
+           LIMIT ? OFFSET ?`,
         )
-        .all(this.guildId, normalized) as PostedPanelRow[]
+        .all(
+          this.guildId,
+          normalized,
+          boundedLimit,
+          boundedOffset,
+        ) as PostedPanelRow[]
     ).map(parsePostedPanelRow);
+  }
+
+  public countPostedPanels(preset?: PanelPreset): number {
+    const row =
+      preset === undefined
+        ? (this.db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM posted_panels WHERE guild_id = ?",
+            )
+            .get(this.guildId) as { count: number })
+        : (this.db
+            .prepare(
+              `SELECT COUNT(*) AS count FROM posted_panels
+               WHERE guild_id = ? AND preset = ?`,
+            )
+            .get(this.guildId, normalizePanelPreset(preset)) as {
+            count: number;
+          });
+    return Number(row.count);
   }
 
   public findPostedPanelByToken(panelId: string): PostedPanel | null {
@@ -284,11 +345,58 @@ export class GuildOperationalRepository {
     );
     let result: TicketReservationResult | null = null;
     const reserve = this.db.transaction(() => {
-      const existing = this.getTicketByOpener(openerId);
+      const departments = this.ticketDepartments();
+      let department = input.departmentId
+        ? departments.getDepartment(input.departmentId)
+        : departments.getGeneralSupportDepartment();
+      if (!input.departmentId && !department) {
+        department = departments.createDepartment({
+          slug: GENERAL_SUPPORT_DEPARTMENT_SLUG,
+          displayName: "General Support",
+          description: "General support requests",
+          enabled: false,
+          sortOrder: 0,
+        });
+      }
+      if (!department || (Boolean(input.departmentId) && !department.enabled)) {
+        throw new Error(
+          input.departmentId
+            ? "Ticket department is unavailable"
+            : "The General Support ticket department is unavailable",
+        );
+      }
+      const existing = this.getTicketByOpenerAndDepartment(
+        openerId,
+        department.departmentId,
+      );
       if (existing) {
         result = { status: "existing", ticket: existing };
         return;
       }
+      const activeTickets = (
+        this.db
+          .prepare(
+            `SELECT * FROM tickets
+             WHERE guild_id = ? AND opener_id = ?
+               AND state IN ('creating', 'open', 'closing')
+             ORDER BY ticket_number DESC`,
+          )
+          .all(this.guildId, openerId) as TicketRow[]
+      ).map(parseTicketRow);
+      if (activeTickets.length >= 3) {
+        result = {
+          status: "limit",
+          ticket: activeTickets[0]!,
+          activeCount: activeTickets.length,
+        };
+        return;
+      }
+      const responses = this.buildTicketResponseSnapshots(
+        department.departmentId,
+        input.responses,
+        subject,
+        description,
+      );
       const numberRow = this.db
         .prepare(
           `SELECT COALESCE(MAX(ticket_number), 0) + 1 AS ticket_number
@@ -308,28 +416,52 @@ export class GuildOperationalRepository {
       this.db
         .prepare(
           `INSERT INTO tickets (
-             guild_id, ticket_id, ticket_number, opener_id, channel_id,
+             guild_id, ticket_id, ticket_number, department_id, opener_id, channel_id,
              control_message_id, subject, description, state, claimed_by,
              claimed_at, closed_by, close_reason, close_log_message_id,
              close_logged_at, failure_reason, created_at, updated_at,
              closing_at, closed_at
-           ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, 'creating', NULL, NULL,
+           ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, 'creating', NULL, NULL,
              NULL, NULL, NULL, NULL, NULL, ?, ?, NULL, NULL)`,
         )
         .run(
           this.guildId,
           ticketId,
           ticketNumber,
+          department.departmentId,
           openerId,
           subject,
           description,
           now,
           now,
         );
+      const insertResponse = this.db.prepare(
+        `INSERT INTO ticket_form_responses (
+           guild_id, ticket_id, response_id, field_id, field_label, field_type,
+           response_text, sort_order, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const response of responses) {
+        insertResponse.run(
+          this.guildId,
+          ticketId,
+          opaqueId(),
+          response.fieldId,
+          response.fieldLabel,
+          response.fieldType,
+          response.responseText,
+          response.sortOrder,
+          now,
+        );
+      }
       this.appendTicketEventWithin(ticketId, {
         type: "creation_reserved",
         actorId: openerId,
-        details: { ticketNumber },
+        details: {
+          ticketNumber,
+          departmentId: department.departmentId,
+          definitionVersion: department.definitionVersion,
+        },
       });
       result = { status: "created", ticket: this.requireTicket(ticketId) };
     });
@@ -487,21 +619,96 @@ export class GuildOperationalRepository {
       .prepare(
         `SELECT * FROM tickets
          WHERE guild_id = ? AND opener_id = ?
-           AND state IN ('creating', 'open', 'closing')`,
+           AND state IN ('creating', 'open', 'closing')
+         ORDER BY ticket_number DESC LIMIT 1`,
       )
       .get(this.guildId, normalized) as TicketRow | undefined;
     return row ? parseTicketRow(row) : null;
   }
 
-  public listTickets(states?: readonly TicketState[]): TicketRecord[] {
+  public getTicketByOpenerAndDepartment(
+    openerId: string,
+    departmentId: string,
+  ): TicketRecord | null {
+    const normalizedOpener = assertDiscordSnowflake(openerId, "opener ID");
+    const normalizedDepartment = normalizeOpaqueId(departmentId);
+    if (!normalizedDepartment) return null;
+    const row = this.db
+      .prepare(
+        `SELECT * FROM tickets
+         WHERE guild_id = ? AND opener_id = ? AND department_id = ?
+           AND state IN ('creating', 'open', 'closing')
+         ORDER BY ticket_number DESC LIMIT 1`,
+      )
+      .get(this.guildId, normalizedOpener, normalizedDepartment) as
+      TicketRow | undefined;
+    return row ? parseTicketRow(row) : null;
+  }
+
+  public hasActiveTicketsForDepartment(departmentId: string): boolean {
+    const normalizedDepartment = normalizeOpaqueId(departmentId);
+    if (!normalizedDepartment) return false;
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT 1 FROM tickets
+           WHERE guild_id = ? AND department_id = ?
+             AND state IN ('creating', 'open', 'closing')
+           LIMIT 1`,
+        )
+        .get(this.guildId, normalizedDepartment),
+    );
+  }
+
+  public listTicketResponses(ticketId: string): TicketFormResponse[] {
+    const normalizedTicketId = normalizeOpaqueId(ticketId);
+    if (!normalizedTicketId) return [];
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM ticket_form_responses
+           WHERE guild_id = ? AND ticket_id = ?
+           ORDER BY sort_order, response_id`,
+        )
+        .all(this.guildId, normalizedTicketId) as TicketFormResponseRow[]
+    ).map(parseTicketFormResponseRow);
+  }
+
+  public countTickets(states?: readonly TicketState[]): number {
+    if (states === undefined) {
+      const row = this.db
+        .prepare("SELECT COUNT(*) AS count FROM tickets WHERE guild_id = ?")
+        .get(this.guildId) as { count: number };
+      return Number(row.count);
+    }
+    const normalizedStates = normalizeTicketStates(states);
+    if (normalizedStates.length === 0) return 0;
+    const placeholders = normalizedStates.map(() => "?").join(", ");
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM tickets
+         WHERE guild_id = ? AND state IN (${placeholders})`,
+      )
+      .get(this.guildId, ...normalizedStates) as { count: number };
+    return Number(row.count);
+  }
+
+  public listTickets(
+    states?: readonly TicketState[],
+    limit = DEFAULT_OPERATIONAL_LIST_LIMIT,
+    offset = 0,
+  ): TicketRecord[] {
+    const boundedLimit = normalizeListLimit(limit);
+    const boundedOffset = normalizeListOffset(offset);
     if (states === undefined) {
       return (
         this.db
           .prepare(
             `SELECT * FROM tickets
-             WHERE guild_id = ? ORDER BY ticket_number DESC`,
+             WHERE guild_id = ? ORDER BY ticket_number DESC
+             LIMIT ? OFFSET ?`,
           )
-          .all(this.guildId) as TicketRow[]
+          .all(this.guildId, boundedLimit, boundedOffset) as TicketRow[]
       ).map(parseTicketRow);
     }
     const normalizedStates = normalizeTicketStates(states);
@@ -514,9 +721,14 @@ export class GuildOperationalRepository {
         .prepare(
           `SELECT * FROM tickets
            WHERE guild_id = ? AND state IN (${placeholders})
-           ORDER BY ticket_number DESC`,
+           ORDER BY ticket_number DESC LIMIT ? OFFSET ?`,
         )
-        .all(this.guildId, ...normalizedStates) as TicketRow[]
+        .all(
+          this.guildId,
+          ...normalizedStates,
+          boundedLimit,
+          boundedOffset,
+        ) as TicketRow[]
     ).map(parseTicketRow);
   }
 
@@ -980,7 +1192,11 @@ export class GuildOperationalRepository {
     return event;
   }
 
-  public listTicketEvents(ticketId: string): TicketEvent[] {
+  public listTicketEvents(
+    ticketId: string,
+    limit = MAX_TICKET_EVENTS_PER_TICKET,
+    offset = 0,
+  ): TicketEvent[] {
     const normalizedTicketId = normalizeOpaqueId(ticketId);
     if (!normalizedTicketId) {
       return [];
@@ -990,20 +1206,33 @@ export class GuildOperationalRepository {
         .prepare(
           `SELECT * FROM ticket_events
            WHERE guild_id = ? AND ticket_id = ?
-           ORDER BY event_number`,
+           ORDER BY event_number LIMIT ? OFFSET ?`,
         )
-        .all(this.guildId, normalizedTicketId) as TicketEventRow[]
+        .all(
+          this.guildId,
+          normalizedTicketId,
+          normalizeListLimit(limit, MAX_TICKET_EVENTS_PER_TICKET),
+          normalizeListOffset(offset),
+        ) as TicketEventRow[]
     ).map(parseTicketEventRow);
   }
 
-  public listAllTicketEvents(): TicketEvent[] {
+  public listAllTicketEvents(
+    limit = DEFAULT_OPERATIONAL_LIST_LIMIT,
+    offset = 0,
+  ): TicketEvent[] {
     return (
       this.db
         .prepare(
           `SELECT * FROM ticket_events
-           WHERE guild_id = ? ORDER BY ticket_id, event_number`,
+           WHERE guild_id = ? ORDER BY ticket_id, event_number
+           LIMIT ? OFFSET ?`,
         )
-        .all(this.guildId) as TicketEventRow[]
+        .all(
+          this.guildId,
+          normalizeListLimit(limit),
+          normalizeListOffset(offset),
+        ) as TicketEventRow[]
     ).map(parseTicketEventRow);
   }
 
@@ -1064,6 +1293,7 @@ export class GuildOperationalRepository {
           detailsJson,
           createdAt,
         );
+      this.trimTicketEvents(ticketId);
       return {
         guildId: this.guildId,
         ticketId,
@@ -1076,6 +1306,25 @@ export class GuildOperationalRepository {
       };
     }
     throw new Error("Unable to allocate a unique ticket-event ID");
+  }
+
+  private trimTicketEvents(ticketId: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM ticket_events
+         WHERE guild_id = ? AND ticket_id = ? AND event_id IN (
+           SELECT event_id FROM ticket_events
+           WHERE guild_id = ? AND ticket_id = ?
+           ORDER BY event_number DESC LIMIT -1 OFFSET ?
+         )`,
+      )
+      .run(
+        this.guildId,
+        ticketId,
+        this.guildId,
+        ticketId,
+        MAX_TICKET_EVENTS_PER_TICKET,
+      );
   }
 
   private allocateTicketId(): string {
@@ -1110,6 +1359,101 @@ export class GuildOperationalRepository {
         now,
         now,
       );
+  }
+
+  private ticketDepartments(): TicketDepartmentRepository {
+    return new TicketDepartmentRepository(this.db, this.guildId);
+  }
+
+  private buildTicketResponseSnapshots(
+    departmentId: string,
+    supplied: readonly TicketFormResponseInput[] | undefined,
+    subject: string,
+    description: string,
+  ): TicketFormResponseInput[] {
+    const departments = this.ticketDepartments();
+    const fields = departments.listDepartmentFields(departmentId);
+    if (!supplied || supplied.length === 0) {
+      const general = departments.getGeneralSupportDepartment();
+      if (fields.length > 0) {
+        if (general?.departmentId !== departmentId || fields.length !== 2) {
+          throw new RangeError(
+            "Ticket responses must include every configured department field",
+          );
+        }
+        return fields.map((field, index) => ({
+          fieldId: field.fieldId,
+          fieldLabel: field.label,
+          fieldType: field.fieldType,
+          responseText: index === 0 ? subject : description,
+          sortOrder: field.sortOrder,
+        }));
+      }
+      return [
+        {
+          fieldId: "default_subject",
+          fieldLabel: "Subject",
+          fieldType: "short",
+          responseText: subject,
+          sortOrder: 0,
+        },
+        {
+          fieldId: "default_details",
+          fieldLabel: "Details",
+          fieldType: "paragraph",
+          responseText: description,
+          sortOrder: 1,
+        },
+      ];
+    }
+    if (supplied.length > 5) {
+      throw new RangeError("A ticket form can contain at most 5 responses");
+    }
+    const normalized = supplied.map(normalizeTicketResponseInput);
+    if (
+      new Set(normalized.map((response) => response.fieldId)).size !==
+        normalized.length ||
+      new Set(normalized.map((response) => response.sortOrder)).size !==
+        normalized.length
+    ) {
+      throw new RangeError(
+        "Ticket responses must have unique fields and positions",
+      );
+    }
+    if (fields.length === 0) return normalized;
+    if (
+      normalized.length !== fields.length ||
+      fields.some(
+        (field) =>
+          !normalized.some((response) => response.fieldId === field.fieldId),
+      )
+    ) {
+      throw new RangeError(
+        "Ticket responses must include every configured department field",
+      );
+    }
+    const responseByField = new Map(
+      normalized.map((response) => [response.fieldId, response]),
+    );
+    return fields.map((field) => {
+      const response = responseByField.get(field.fieldId)!;
+      if (
+        response.responseText.length < field.minLength ||
+        response.responseText.length > field.maxLength ||
+        (field.required && response.responseText.length === 0)
+      ) {
+        throw new RangeError(
+          `Response for ${field.label} must be between ${field.minLength} and ${field.maxLength} characters`,
+        );
+      }
+      return {
+        fieldId: field.fieldId,
+        fieldLabel: field.label,
+        fieldType: field.fieldType,
+        responseText: response.responseText,
+        sortOrder: field.sortOrder,
+      };
+    });
   }
 
   private requireTicketConfiguration(): TicketConfiguration {
@@ -1188,6 +1532,23 @@ function normalizeTicketStates(states: readonly TicketState[]): TicketState[] {
   return normalized;
 }
 
+function normalizeListLimit(
+  value: number,
+  maximum = MAX_OPERATIONAL_LIST_LIMIT,
+): number {
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    throw new RangeError(`List limit must be between 1 and ${maximum}`);
+  }
+  return value;
+}
+
+function normalizeListOffset(value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > 2_147_483_647) {
+    throw new RangeError("List offset must be between 0 and 2147483647");
+  }
+  return value;
+}
+
 function normalizeTicketNumber(value: number): number {
   if (!Number.isInteger(value) || value < 1 || value > 2_147_483_647) {
     throw new RangeError("Ticket number must be a positive 32-bit integer");
@@ -1200,6 +1561,43 @@ function normalizeTicketState(value: unknown): TicketState {
     throw new TypeError("Expected ticket state is invalid");
   }
   return value as TicketState;
+}
+
+function normalizeTicketResponseInput(
+  input: TicketFormResponseInput,
+): TicketFormResponseInput {
+  if (!input || typeof input !== "object") {
+    throw new TypeError("Ticket response input is required");
+  }
+  const fieldId = normalizeOpaqueId(input.fieldId);
+  if (!fieldId) throw new TypeError("Ticket response field ID is invalid");
+  if (input.fieldType !== "short" && input.fieldType !== "paragraph") {
+    throw new TypeError("Ticket response field type is invalid");
+  }
+  if (
+    !Number.isInteger(input.sortOrder) ||
+    input.sortOrder < 0 ||
+    input.sortOrder > 4
+  ) {
+    throw new RangeError("Ticket response position must be between 0 and 4");
+  }
+  if (typeof input.responseText !== "string") {
+    throw new TypeError("Ticket response text must be text");
+  }
+  const responseText = input.responseText.normalize("NFKC").trim();
+  if (responseText.length > 4_000) {
+    throw new RangeError("Ticket response text cannot exceed 4000 characters");
+  }
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(responseText)) {
+    throw new TypeError("Ticket response text contains control characters");
+  }
+  return {
+    fieldId,
+    fieldLabel: normalizeText(input.fieldLabel, 1, 45, "Ticket field label"),
+    fieldType: input.fieldType,
+    responseText,
+    sortOrder: input.sortOrder,
+  };
 }
 
 function normalizeExpectedTimestamp(value: unknown): string {
@@ -1257,20 +1655,6 @@ function serializeBoundedJson(
   return serialized;
 }
 
-function parseTicketConfigurationRow(
-  row: TicketConfigurationRow,
-): TicketConfiguration {
-  return {
-    guildId: row.guild_id,
-    enabled: Boolean(row.enabled),
-    categoryId: row.category_id,
-    logChannelId: row.log_channel_id,
-    supportRoleId: row.support_role_id,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
 function parsePostedPanelRow(row: PostedPanelRow): PostedPanel {
   return {
     guildId: row.guild_id,
@@ -1289,6 +1673,7 @@ function parseTicketRow(row: TicketRow): TicketRecord {
     guildId: row.guild_id,
     ticketId: row.ticket_id,
     ticketNumber: row.ticket_number,
+    departmentId: row.department_id,
     openerId: row.opener_id,
     channelId: row.channel_id,
     controlMessageId: row.control_message_id,
@@ -1306,6 +1691,25 @@ function parseTicketRow(row: TicketRow): TicketRecord {
     updatedAt: row.updated_at,
     closingAt: row.closing_at,
     closedAt: row.closed_at,
+  };
+}
+
+function parseTicketFormResponseRow(
+  row: TicketFormResponseRow,
+): TicketFormResponse {
+  if (row.field_type !== "short" && row.field_type !== "paragraph") {
+    throw new Error("Stored ticket response field type is invalid");
+  }
+  return {
+    guildId: row.guild_id,
+    ticketId: row.ticket_id,
+    responseId: row.response_id,
+    fieldId: row.field_id,
+    fieldLabel: row.field_label,
+    fieldType: row.field_type,
+    responseText: row.response_text,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
   };
 }
 

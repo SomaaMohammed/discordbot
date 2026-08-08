@@ -2,12 +2,19 @@ import {
   ChannelType,
   escapeMarkdown,
   type ChatInputCommandInteraction,
+  type Guild,
   type GuildMember,
   type GuildTextBasedChannel,
   type Message,
 } from "discord.js";
 import type { GuildRuntime } from "../runtime.js";
 import { createOpaqueStorageId } from "../storage/operational-repository.js";
+import type {
+  ApplicationForm,
+  SuggestionConfiguration,
+  TicketConfiguration,
+  TicketDepartment,
+} from "../types.js";
 import type {
   NormalizedResourcePanel,
   PanelFeatureState,
@@ -27,6 +34,11 @@ import {
   inspectTicketConfigurationResources,
 } from "./ticket-permissions.js";
 import { KeyedSerialQueue } from "./keyed-serial-queue.js";
+import {
+  inspectApplicationResources,
+  inspectSuggestionResources,
+  isConfiguredDepartment,
+} from "./phase2-permissions.js";
 
 const panelPostQueue = new KeyedSerialQueue();
 
@@ -71,6 +83,15 @@ export async function postTicketLauncher(
   runtime: GuildRuntime,
   actor: GuildMember,
 ): Promise<void> {
+  await postFeatureLauncher(interaction, runtime, actor, "tickets");
+}
+
+export async function postFeatureLauncher(
+  interaction: ChatInputCommandInteraction,
+  runtime: GuildRuntime,
+  actor: GuildMember,
+  preset: "tickets" | "suggestions" | "applications",
+): Promise<void> {
   const channel = getSelectedPanelChannel(interaction, runtime, "channel");
   if (!channel) {
     await replyPrivate(
@@ -80,7 +101,7 @@ export async function postTicketLauncher(
     return;
   }
   await postSuperiorPanel(interaction, runtime, actor, {
-    preset: "tickets",
+    preset,
     channel,
     replaceExisting:
       interaction.options.getBoolean("replace_existing", false) ?? true,
@@ -168,23 +189,72 @@ async function postSuperiorPanelSerial(
     );
     return;
   }
+  const enabledDepartments = listTicketDepartmentsSafely(runtime, {
+    enabled: true,
+    limit: 10,
+  });
   const ticketConfiguration = runtime.storage.getTicketConfiguration();
   if (options.preset === "tickets") {
-    if (!ticketConfiguration?.enabled) {
+    if (enabledDepartments.length === 0 && !ticketConfiguration?.enabled) {
       await replyPrivate(
         interaction,
-        "Configure and enable tickets with `/ticket setup` before posting this panel.",
+        "Configure and enable a ticket department with `/ticket setup` or `/ticket department create` before posting this panel.",
       );
       return;
     }
-    const resources = await inspectTicketConfigurationResources(
-      guild,
-      ticketConfiguration,
-    );
+    const issue =
+      enabledDepartments.length > 0
+        ? await firstTicketDepartmentIssue(guild, enabledDepartments, runtime)
+        : (
+            await inspectTicketConfigurationResources(
+              guild,
+              ticketConfiguration!,
+              runtime.storage,
+            )
+          ).issues.join(" ") || null;
+    if (issue) {
+      await replyPrivate(
+        interaction,
+        `Ticket configuration needs attention: ${issue}`,
+      );
+      return;
+    }
+  }
+  if (options.preset === "suggestions") {
+    const configuration = runtime.storage.getSuggestionConfiguration();
+    if (!configuration?.enabled) {
+      await replyPrivate(
+        interaction,
+        "Configure and enable suggestions before posting this panel.",
+      );
+      return;
+    }
+    const resources = await inspectSuggestionResources(guild, configuration);
     if (resources.issues.length > 0) {
       await replyPrivate(
         interaction,
-        `Ticket configuration needs attention: ${resources.issues.join(" ")}`,
+        `Suggestion configuration needs attention: ${resources.issues.join(" ")}`,
+      );
+      return;
+    }
+  }
+  if (options.preset === "applications") {
+    const forms = runtime.storage.listApplicationForms({
+      enabledOnly: true,
+      limit: 25,
+    });
+    if (forms.length === 0) {
+      await replyPrivate(
+        interaction,
+        "Enable at least one application form before posting this panel.",
+      );
+      return;
+    }
+    const issue = await firstApplicationFormIssue(guild, forms);
+    if (issue) {
+      await replyPrivate(
+        interaction,
+        `Application configuration needs attention: ${issue}`,
       );
       return;
     }
@@ -206,7 +276,7 @@ async function postSuperiorPanelSerial(
     options,
     panelId,
     runtime,
-    Boolean(ticketConfiguration?.enabled),
+    enabledDepartments.length > 0 || Boolean(ticketConfiguration?.enabled),
   );
   let messageId: string | null = null;
   let replaced = false;
@@ -343,6 +413,16 @@ function buildPanelPayload(
       });
     case "tickets":
       return renderSuperiorPanel({ preset: "tickets", panelToken: panelId });
+    case "suggestions":
+      return renderSuperiorPanel({
+        preset: "suggestions",
+        panelToken: panelId,
+      });
+    case "applications":
+      return renderSuperiorPanel({
+        preset: "applications",
+        panelToken: panelId,
+      });
   }
 }
 
@@ -356,23 +436,134 @@ function buildFeatureState(
     greetings: runtime.settings.features.greetings,
     activityMetrics: runtime.settings.features.activityMetrics,
     tickets,
+    suggestions: Boolean(getSuggestionConfigurationSafely(runtime)?.enabled),
+    applications:
+      listApplicationFormsSafely(runtime, {
+        enabledOnly: true,
+        limit: 1,
+      }).length > 0,
   };
+}
+
+async function firstTicketDepartmentIssue(
+  guild: Guild,
+  departments: readonly TicketDepartment[],
+  runtime: GuildRuntime,
+): Promise<string | null> {
+  for (const department of departments) {
+    if (!isConfiguredDepartment(department)) {
+      return `Department \`${department.slug}\` is missing a category, log channel, or support role.`;
+    }
+    if (department.bindingsVerifiedAt === null) {
+      return `Department \`${department.slug}\` must be enabled again so its Discord bindings can be verified.`;
+    }
+    const resources = await inspectTicketConfigurationResources(
+      guild,
+      departmentConfiguration(department),
+      runtime.storage,
+    );
+    if (resources.issues.length > 0) {
+      return `Department \`${department.slug}\`: ${resources.issues.join(" ")}`;
+    }
+  }
+  return null;
+}
+
+async function firstApplicationFormIssue(
+  guild: Guild,
+  forms: readonly ApplicationForm[],
+): Promise<string | null> {
+  for (const form of forms) {
+    const resources = await inspectApplicationResources(guild, form);
+    if (resources.issues.length > 0) {
+      return `Form \`${form.slug}\`: ${resources.issues.join(" ")}`;
+    }
+  }
+  return null;
+}
+
+function departmentConfiguration(
+  department: TicketDepartment & {
+    categoryId: string;
+    logChannelId: string;
+    supportRoleId: string;
+  },
+): TicketConfiguration {
+  return {
+    guildId: department.guildId,
+    departmentId: department.departmentId,
+    enabled: department.enabled,
+    categoryId: department.categoryId,
+    logChannelId: department.logChannelId,
+    supportRoleId: department.supportRoleId,
+    createdAt: department.createdAt,
+    updatedAt: department.updatedAt,
+  };
+}
+
+function listTicketDepartmentsSafely(
+  runtime: GuildRuntime,
+  options: { enabled?: boolean; limit?: number },
+): TicketDepartment[] {
+  const storage = runtime.storage as unknown as {
+    listTicketDepartments?: (input: {
+      enabled?: boolean;
+      limit?: number;
+    }) => TicketDepartment[];
+  };
+  return typeof storage.listTicketDepartments === "function"
+    ? storage.listTicketDepartments(options)
+    : [];
+}
+
+function getSuggestionConfigurationSafely(
+  runtime: GuildRuntime,
+): SuggestionConfiguration | null {
+  const storage = runtime.storage as unknown as {
+    getSuggestionConfiguration?: () => SuggestionConfiguration | null;
+  };
+  return typeof storage.getSuggestionConfiguration === "function"
+    ? storage.getSuggestionConfiguration()
+    : null;
+}
+
+function listApplicationFormsSafely(
+  runtime: GuildRuntime,
+  options: { enabledOnly?: boolean; limit?: number },
+): ApplicationForm[] {
+  const storage = runtime.storage as unknown as {
+    listApplicationForms?: (input: {
+      enabledOnly?: boolean;
+      limit?: number;
+    }) => ApplicationForm[];
+  };
+  return typeof storage.listApplicationForms === "function"
+    ? storage.listApplicationForms(options)
+    : [];
 }
 
 async function showPanelStatus(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
 ): Promise<void> {
-  const configuration = runtime.storage.getTicketConfiguration();
-  const allPanels = runtime.storage.listPostedPanels();
-  const panels = allPanels.slice(0, 20);
+  const departments = listTicketDepartmentsSafely(runtime, { limit: 10 });
+  const enabledDepartments = departments.filter(
+    (department) => department.enabled,
+  );
+  const suggestionConfiguration = getSuggestionConfigurationSafely(runtime);
+  const applicationForms = listApplicationFormsSafely(runtime, { limit: 25 });
+  const enabledApplicationForms = applicationForms.filter(
+    (form) => form.enabled,
+  );
+  const panelCount = runtime.storage.countPostedPanels();
+  const panels = runtime.storage.listPostedPanels(undefined, 20, 0);
   const lines = [
     "**Superior panel status**",
-    configuration
-      ? `Tickets: **${configuration.enabled ? "enabled" : "disabled"}** · category <#${configuration.categoryId}> · log <#${configuration.logChannelId}> · support <@&${configuration.supportRoleId}>`
-      : "Tickets: **not configured**",
+    `Ticket departments: **${enabledDepartments.length} enabled** · ${departments.length} configured`,
+    `Suggestions: **${suggestionConfiguration?.enabled ? "enabled" : "disabled"}**`,
+    `Application forms: **${enabledApplicationForms.length} enabled** · ${applicationForms.length} configured`,
     panels.length > 0
-      ? `Tracked panels (${panels.length}${allPanels.length > panels.length ? "+" : ""}):`
+      ? `Tracked panels (${panels.length}${panelCount > panels.length ? "+" : ""} of ${panelCount}):`
       : "Tracked panels: none",
     ...panels.map(
       (panel) =>

@@ -5,6 +5,7 @@ import {
   type ChatInputCommandInteraction,
   type GuildMember,
   type ModalSubmitInteraction,
+  type StringSelectMenuInteraction,
   type SlashCommandSubcommandBuilder,
   type SlashCommandSubcommandsOnlyBuilder,
 } from "discord.js";
@@ -40,12 +41,36 @@ import {
   buildUtilityCommandDefinition,
   handleUtilityCommand,
 } from "./utilities.js";
+import { buildAccessCommandDefinition } from "./access-command.js";
+import { handleAccessCommand } from "./access-commands-handler.js";
+import { buildSuggestionCommandDefinition } from "./suggestion-command.js";
+import { handleSuggestionCommand } from "./suggestion-commands-handler.js";
+import {
+  handleSuggestionButton,
+  handleSuggestionModal,
+} from "./suggestion-interactions.js";
+import { buildApplicationCommandDefinition } from "./application-command.js";
+import {
+  handleApplicationAutocomplete,
+  handleApplicationCommand,
+} from "./application-commands-handler.js";
+import {
+  handleApplicationButton,
+  handleApplicationModal,
+  handleApplicationSelect,
+} from "./application-interactions.js";
+import { authorizeCapability } from "./authorization.js";
+import type { GuildCapability } from "./capabilities.js";
 import { evaluateGuildManagement } from "./ticket-authorization.js";
 import { buildTicketCommandDefinition } from "./ticket-command.js";
-import { handleTicketCommand } from "./ticket-commands-handler.js";
+import {
+  handleTicketCommand,
+  handleTicketRecoveryCommand,
+} from "./ticket-commands-handler.js";
 import {
   handleTicketButton,
   handleTicketModal,
+  handleTicketSelect,
 } from "./ticket-interactions.js";
 
 const SUPERIOR_SUBCOMMANDS = [
@@ -185,6 +210,9 @@ export function buildCommandDefinitions(): Array<
     superior,
     buildPanelCommandDefinition(),
     buildTicketCommandDefinition(),
+    buildSuggestionCommandDefinition(),
+    buildApplicationCommandDefinition(),
+    buildAccessCommandDefinition(),
     buildUtilityCommandDefinition(),
     fun,
     greetings,
@@ -537,6 +565,18 @@ export async function handleChatInputCommand(
     );
     return;
   }
+  if (command === "access") {
+    await handleAccessCommand(interaction, guildRuntime);
+    return;
+  }
+  if (command === "suggestion") {
+    await handleSuggestionCommand(interaction, guildRuntime);
+    return;
+  }
+  if (command === "application") {
+    await handleApplicationCommand(interaction, guildRuntime);
+    return;
+  }
   if (command === "utility") {
     await handleUtilityCommand(interaction, guildRuntime);
     return;
@@ -553,9 +593,20 @@ export async function handleChatInputCommand(
     await handleFunCommand(interaction, guildRuntime);
     return;
   }
+  if (command === "ticket" && subcommand === "recover") {
+    await deferPrivate(interaction);
+    await handleTicketRecoveryCommand(interaction, guildRuntime);
+    return;
+  }
   if (command === "panel" || command === "ticket") {
     await deferPrivate(interaction);
-    const actor = await requireAdministrator(interaction, guildRuntime);
+    const capability: GuildCapability =
+      command === "panel" ? "panels.manage" : "tickets.configure";
+    const actor = await requireCapability(
+      interaction,
+      guildRuntime,
+      capability,
+    );
     if (!actor) return;
     if (command === "panel") {
       await handlePresetPanelCommand(interaction, guildRuntime, actor);
@@ -598,10 +649,37 @@ export async function handleChatInputCommand(
   await replyPrivate(interaction, "Unknown Superior subcommand.");
 }
 
+async function requireCapability(
+  interaction: ChatInputCommandInteraction,
+  runtime: GuildRuntime,
+  capability: GuildCapability,
+): Promise<GuildMember | null> {
+  const guild = interaction.guild;
+  if (!guild || guild.id !== runtime.guildId) return null;
+  const decision = await authorizeCapability({
+    guild,
+    userId: interaction.user.id,
+    capability,
+    grants: runtime.storage,
+  });
+  if (!decision.allowed) {
+    await replyPrivate(
+      interaction,
+      decision.reason === "member-unavailable" ||
+        decision.reason === "guild-mismatch"
+        ? "Could not verify your current server membership."
+        : `You need the \`${capability}\` capability to use that operation.`,
+    );
+    return null;
+  }
+  return decision.member;
+}
+
 export async function handleAutocompleteInteraction(
   interaction: AutocompleteInteraction,
   runtime: BotRuntime,
 ): Promise<void> {
+  if (await handleApplicationAutocomplete(interaction, runtime)) return;
   await handleGreetingAutocomplete(interaction, runtime);
 }
 
@@ -611,6 +689,8 @@ export async function handleButtonInteraction(
 ): Promise<void> {
   const guildRuntime = await getCurrentComponentRuntime(interaction, runtime);
   if (!guildRuntime) return;
+  if (await handleApplicationButton(interaction, guildRuntime)) return;
+  if (await handleSuggestionButton(interaction, guildRuntime)) return;
   if (await handleTicketButton(interaction, guildRuntime)) return;
   if (await handlePanelButton(interaction, guildRuntime)) return;
   await replyPrivate(
@@ -625,6 +705,8 @@ export async function handleModalSubmitInteraction(
 ): Promise<void> {
   const guildRuntime = await getCurrentComponentRuntime(interaction, runtime);
   if (!guildRuntime) return;
+  if (await handleApplicationModal(interaction, guildRuntime)) return;
+  if (await handleSuggestionModal(interaction, guildRuntime)) return;
   if (await handleTicketModal(interaction, guildRuntime)) return;
   if (await handlePanelModal(interaction, guildRuntime)) return;
   await replyPrivate(
@@ -633,8 +715,23 @@ export async function handleModalSubmitInteraction(
   );
 }
 
+export async function handleStringSelectMenuInteraction(
+  interaction: StringSelectMenuInteraction,
+  runtime: BotRuntime,
+): Promise<void> {
+  const guildRuntime = await getCurrentComponentRuntime(interaction, runtime);
+  if (!guildRuntime) return;
+  if (await handleApplicationSelect(interaction, guildRuntime)) return;
+  if (await handleTicketSelect(interaction, guildRuntime)) return;
+  await replyPrivate(
+    interaction,
+    "This selection is outdated or unsupported. Ask an administrator to refresh its panel.",
+  );
+}
+
 async function getCurrentComponentRuntime(
-  interaction: ButtonInteraction | ModalSubmitInteraction,
+  interaction:
+    ButtonInteraction | ModalSubmitInteraction | StringSelectMenuInteraction,
   runtime: BotRuntime,
 ): Promise<GuildRuntime | null> {
   if (
@@ -695,25 +792,32 @@ async function requireAdministrator(
 async function handleHelp(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
-  await replyPrivate(
-    interaction,
-    [
-      "**Superior command guide**",
-      "`/setup` — administrator configuration, validation, export, import, and purge",
-      "`/panel` — fixed Superior help, server, resource, and ticket panels",
-      "`/ticket` — administrator ticket setup, status, launcher, and recovery",
-      "`/superior` — announcements, legacy safe panels, moderation, backfill, and this help",
-      "`/utility` — private member/server/role/channel/ID/time information",
-      "`/fun` — battles and aggregate activity statistics",
-      "`/greetings send` — greet the person invoking the command",
-      "Natural chat responds only to a leading/trailing configured invocation, a bot mention, or a direct reply to Superior.",
-    ].join("\n"),
-  );
+  await replyPrivate(interaction, buildSuperiorCommandGuide());
+}
+
+export function buildSuperiorCommandGuide(): string {
+  return [
+    "**Superior command guide**",
+    "`/setup` — Administrator configuration, validation, format-4 export/import, and purge",
+    "`/access` — owner/Administrator grants and status for delegated role capabilities",
+    "`/panel` — fixed help, server, resource, ticket, suggestion, and application panels",
+    "`/ticket` — delegated department, form, routing, launcher, health, and recovery tools",
+    "`/suggestion` — member submissions, status, and withdrawal plus delegated setup, review, panels, and recovery",
+    "`/application` — private submissions, status, and withdrawal plus delegated forms, review, panels, and recovery",
+    "`/superior` — announcements, legacy safe panels, moderation, backfill, and this help",
+    "`/utility` — private member/server/role/channel/ID/time information",
+    "`/fun` — battles and aggregate activity statistics",
+    "`/greetings send` — greet the person invoking the command",
+    "Natural chat responds only to a leading/trailing configured invocation, a bot mention, or a direct reply to Superior.",
+  ].join("\n");
 }
 
 async function replyPrivate(
   interaction:
-    ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction,
+    | ChatInputCommandInteraction
+    | ButtonInteraction
+    | ModalSubmitInteraction
+    | StringSelectMenuInteraction,
   content: string,
 ): Promise<void> {
   if (interaction.deferred && !interaction.replied) {

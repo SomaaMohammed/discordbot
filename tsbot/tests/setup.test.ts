@@ -57,6 +57,7 @@ describe("setup command definition", () => {
     expect(findSubcommand("import")).toMatchObject({
       description: expect.stringContaining("Owner-only replacement"),
     });
+    expect(findSubcommand("import")?.description).toContain("v4");
   });
 
   it("makes greetings universal by exposing no target-user option", () => {
@@ -807,7 +808,7 @@ describe("active-only setup behavior", () => {
   it("refuses an oversized complete export instead of sending partial data", async () => {
     const settings = createDefaultGuildSettings();
     const exportGuildData = vi.fn(() => ({
-      formatVersion: 3,
+      formatVersion: 4,
       guildId: GUILD_ID,
       oversized: "x".repeat(2 * 1024 * 1024),
     }));
@@ -845,6 +846,56 @@ describe("active-only setup behavior", () => {
     expect(interaction.editReply.mock.calls[0]?.[0]).not.toHaveProperty(
       "files",
     );
+  });
+
+  it("describes every Phase 2 collection in a successful export", async () => {
+    const settings = createDefaultGuildSettings();
+    const interaction: Record<string, any> = {
+      guild: { id: GUILD_ID },
+      guildId: GUILD_ID,
+      options: { getSubcommand: vi.fn(() => "export") },
+      deferred: false,
+      replied: false,
+      editReply: vi.fn(async () => undefined),
+      reply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+    interaction.deferReply = vi.fn(async () => {
+      interaction.deferred = true;
+    });
+    const runtime = {
+      storage: {
+        exportGuildData: vi.fn(() => ({
+          formatVersion: 4,
+          guildId: GUILD_ID,
+        })),
+      },
+    } as unknown as BotRuntime;
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+    } as GuildRuntime;
+
+    await handleSetupCommand(interaction as never, runtime, guildRuntime, {
+      id: USER_ID,
+      guild: { id: GUILD_ID },
+    } as never);
+
+    const response = interaction.editReply.mock.calls[0]?.[0];
+    expect(response).toMatchObject({
+      content: expect.stringContaining("Format-4"),
+      files: [expect.anything()],
+      allowedMentions: { parse: [] },
+    });
+    for (const collection of [
+      "delegated grants",
+      "ticket departments/fields/tickets/responses/events",
+      "suggestion configuration/suggestions/votes/events",
+      "application forms/fields/applications/responses/events",
+      "delivery identifiers",
+    ]) {
+      expect(response.content).toContain(collection);
+    }
   });
 
   it("responds privately when export preflight refuses materialization", async () => {

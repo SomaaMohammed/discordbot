@@ -10,13 +10,33 @@ import {
   type Role,
   type TextChannel,
 } from "discord.js";
-import type { TicketConfiguration, TicketRecord } from "../types.js";
+import type {
+  RoleCapabilityGrant,
+  TicketConfiguration,
+  TicketRecord,
+} from "../types.js";
+import { fetchAndValidateRole } from "./authorization.js";
 import { validateSupportRole } from "./ticket-authorization.js";
+
+export const MAX_TICKET_MANAGER_ROLES = 25;
+const TICKET_MANAGER_GRANT_PAGE_SIZE = 100;
+const TICKET_MANAGER_GRANT_SCAN_LIMIT = 1_000;
+const TICKET_MANAGER_ROLE_FETCH_BATCH_SIZE = 25;
+const MAX_CHANNEL_PERMISSION_OVERWRITES = 100;
+
+export interface TicketManagementGrantReader {
+  listCapabilityGrantsForCapability(
+    capability: "tickets.manage",
+    limit?: number,
+    offset?: number,
+  ): readonly RoleCapabilityGrant[];
+}
 
 export interface TicketConfigurationResources {
   category: CategoryChannel | null;
   logChannel: GuildTextBasedChannel | null;
   supportRole: Role | null;
+  managerRoles: Role[];
   botMember: GuildMember | null;
   issues: string[];
 }
@@ -24,13 +44,21 @@ export interface TicketConfigurationResources {
 export async function inspectTicketConfigurationResources(
   guild: Guild,
   configuration: TicketConfiguration,
+  grants?: TicketManagementGrantReader,
 ): Promise<TicketConfigurationResources> {
-  const [rawCategory, rawLogChannel, supportRole, botMember] =
+  const [rawCategory, rawLogChannel, supportRole, botMember, managers] =
     await Promise.all([
-      guild.channels.fetch(configuration.categoryId).catch(() => null),
-      guild.channels.fetch(configuration.logChannelId).catch(() => null),
-      guild.roles.fetch(configuration.supportRoleId).catch(() => null),
-      guild.members.me ?? guild.members.fetchMe().catch(() => null),
+      guild.channels
+        .fetch(configuration.categoryId, { cache: true, force: true })
+        .catch(() => null),
+      guild.channels
+        .fetch(configuration.logChannelId, { cache: true, force: true })
+        .catch(() => null),
+      guild.roles
+        .fetch(configuration.supportRoleId, { cache: true, force: true })
+        .catch(() => null),
+      guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+      inspectTicketManagerRoles(guild, grants),
     ]);
   const category =
     rawCategory?.guild.id === guild.id &&
@@ -59,10 +87,12 @@ export async function inspectTicketConfigurationResources(
         category,
         logChannel,
         supportRole,
+        managers.roles,
         botMember,
       ),
     );
   }
+  issues.push(...managers.issues);
   return {
     category,
     logChannel,
@@ -70,6 +100,7 @@ export async function inspectTicketConfigurationResources(
       supportValidation.valid && supportRole?.guild.id === guild.id
         ? supportRole
         : null,
+    managerRoles: managers.roles,
     botMember,
     issues: [...new Set(issues)],
   };
@@ -82,6 +113,7 @@ export function validateTicketSetupResources(
   supportRole: Role,
   actor: GuildMember,
   botMember: GuildMember,
+  managerRoles: readonly Role[] = [],
 ): string[] {
   const issues: string[] = [];
   if (
@@ -117,11 +149,126 @@ export function validateTicketSetupResources(
         category,
         logChannel,
         supportValidation.valid ? supportRole : null,
+        managerRoles,
         botMember,
       ),
     );
   }
   return [...new Set(issues)];
+}
+
+export async function inspectTicketManagerRoles(
+  guild: Guild,
+  grants?: TicketManagementGrantReader,
+): Promise<{ roles: Role[]; issues: string[] }> {
+  if (!grants) return { roles: [], issues: [] };
+  let scanned: TicketManagerGrantScan;
+  try {
+    scanned = scanTicketManagerGrantRoleIds(guild.id, grants);
+  } catch {
+    return {
+      roles: [],
+      issues: ["Superior could not read delegated ticket-management access."],
+    };
+  }
+  if (scanned.status === "unavailable") {
+    return {
+      roles: [],
+      issues: ["Superior could not read delegated ticket-management access."],
+    };
+  }
+  if (scanned.status === "scan-limit") {
+    return {
+      roles: [],
+      issues: [
+        `Superior found more than ${TICKET_MANAGER_GRANT_SCAN_LIMIT} active tickets.manage grant records and cannot safely build private-channel access. Revoke stale grants before opening or recovering tickets.`,
+      ],
+    };
+  }
+  const roles: Role[] = [];
+  for (
+    let offset = 0;
+    offset < scanned.roleIds.length;
+    offset += TICKET_MANAGER_ROLE_FETCH_BATCH_SIZE
+  ) {
+    const batch = scanned.roleIds.slice(
+      offset,
+      offset + TICKET_MANAGER_ROLE_FETCH_BATCH_SIZE,
+    );
+    const verified = await Promise.all(
+      batch.map((roleId) => fetchAndValidateRole(guild, roleId)),
+    );
+    for (const result of verified) {
+      if (result.valid) roles.push(result.role);
+    }
+    if (roles.length > MAX_TICKET_MANAGER_ROLES) {
+      return tooManyTicketManagerRoles();
+    }
+  }
+  return { roles, issues: [] };
+}
+
+type TicketManagerGrantScan =
+  | { status: "complete"; roleIds: string[] }
+  | { status: "scan-limit" }
+  | { status: "unavailable" };
+
+function scanTicketManagerGrantRoleIds(
+  guildId: string,
+  grants: TicketManagementGrantReader,
+): TicketManagerGrantScan {
+  const roleIds = new Set<string>();
+  let offset = 0;
+  while (offset < TICKET_MANAGER_GRANT_SCAN_LIMIT) {
+    const limit = Math.min(
+      TICKET_MANAGER_GRANT_PAGE_SIZE,
+      TICKET_MANAGER_GRANT_SCAN_LIMIT - offset,
+    );
+    const page = grants.listCapabilityGrantsForCapability(
+      "tickets.manage",
+      limit,
+      offset,
+    );
+    if (!Array.isArray(page) || page.length > limit) {
+      return { status: "unavailable" };
+    }
+    for (const grant of page) {
+      if (
+        grant?.active === true &&
+        grant.guildId === guildId &&
+        grant.principalType === "role" &&
+        grant.principalId === grant.roleId &&
+        grant.capability === "tickets.manage"
+      ) {
+        roleIds.add(grant.roleId);
+      }
+    }
+    offset += page.length;
+    if (page.length < limit) {
+      return { status: "complete", roleIds: [...roleIds] };
+    }
+  }
+
+  const probe = grants.listCapabilityGrantsForCapability(
+    "tickets.manage",
+    1,
+    TICKET_MANAGER_GRANT_SCAN_LIMIT,
+  );
+  if (!Array.isArray(probe) || probe.length > 1) {
+    return { status: "unavailable" };
+  }
+  return probe.length === 0
+    ? { status: "complete", roleIds: [...roleIds] }
+    : { status: "scan-limit" };
+}
+
+function tooManyTicketManagerRoles(): { roles: Role[]; issues: string[] } {
+  return {
+    roles: [],
+    issues: [
+      `Private ticket channels support at most ${MAX_TICKET_MANAGER_ROLES} delegated tickets.manage roles. Revoke unused grants before opening or recovering tickets.`,
+    ],
+  };
 }
 
 export function canPostThemedPanel(
@@ -157,15 +304,13 @@ export function buildPrivateTicketPermissionOverwrites(
   guild: Guild,
   resources: Pick<
     TicketConfigurationResources,
-    "category" | "supportRole" | "botMember"
+    "category" | "supportRole" | "managerRoles" | "botMember"
   >,
   ticket: TicketRecord,
   options: { includeOpener?: boolean } = {},
 ): OverwriteResolvable[] {
-  const { supportRole, botMember } = requireTicketChannelResources(
-    guild,
-    resources,
-  );
+  const { supportRole, managerRoles, botMember } =
+    requireTicketChannelResources(guild, resources);
   const permissionOverwrites: OverwriteResolvable[] = [
     {
       id: guild.roles.everyone.id,
@@ -211,6 +356,22 @@ export function buildPrivateTicketPermissionOverwrites(
       ],
     },
   );
+  const configuredRoleIds = new Set([supportRole.id]);
+  for (const managerRole of managerRoles) {
+    if (configuredRoleIds.has(managerRole.id)) continue;
+    configuredRoleIds.add(managerRole.id);
+    permissionOverwrites.splice(permissionOverwrites.length - 1, 0, {
+      id: managerRole.id,
+      type: OverwriteType.Role,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks,
+      ],
+    });
+  }
   return permissionOverwrites;
 }
 
@@ -218,7 +379,7 @@ export async function createPrivateTicketChannel(
   guild: Guild,
   resources: Pick<
     TicketConfigurationResources,
-    "category" | "supportRole" | "botMember"
+    "category" | "supportRole" | "managerRoles" | "botMember"
   >,
   ticket: TicketRecord,
   options: { includeOpener?: boolean } = {},
@@ -234,7 +395,7 @@ export async function createPrivateTicketChannel(
     name: buildTicketChannelName(ticket.ticketNumber, ticket.subject),
     type: ChannelType.GuildText,
     parent: category.id,
-    topic: buildTicketChannelTopic(ticket),
+    topic: buildTicketChannelTopic(ticket, managedTicketRoleIds(resources)),
     permissionOverwrites,
     reason: `Superior ticket #${ticket.ticketNumber} opened by ${ticket.openerId}`,
   });
@@ -245,24 +406,34 @@ export async function reconcilePrivateTicketChannel(
   channel: TextChannel,
   resources: Pick<
     TicketConfigurationResources,
-    "category" | "supportRole" | "botMember"
+    "category" | "supportRole" | "managerRoles" | "botMember"
   >,
   ticket: TicketRecord,
   options: { includeOpener?: boolean } = {},
 ): Promise<TextChannel> {
-  const { category } = requireTicketChannelResources(guild, resources);
+  const { category, botMember } = requireTicketChannelResources(
+    guild,
+    resources,
+  );
   if (channel.guild.id !== guild.id || channel.type !== ChannelType.GuildText) {
     throw new Error("Ticket channel does not belong to this server.");
   }
+  const desired = buildPrivateTicketPermissionOverwrites(
+    guild,
+    resources,
+    ticket,
+    options,
+  );
+  const permissionOverwrites = reconcileTicketPermissionOverwrites(
+    channel,
+    desired,
+    ticket,
+    botMember.id,
+  );
   return channel.edit({
     parent: category.id,
-    topic: buildTicketChannelTopic(ticket),
-    permissionOverwrites: buildPrivateTicketPermissionOverwrites(
-      guild,
-      resources,
-      ticket,
-      options,
-    ),
+    topic: buildTicketChannelTopic(ticket, managedTicketRoleIds(resources)),
+    permissionOverwrites,
     reason: `Superior ticket #${ticket.ticketNumber} permission recovery`,
   });
 }
@@ -325,6 +496,7 @@ function getTicketPermissionIssues(
   category: CategoryChannel | null,
   logChannel: GuildTextBasedChannel | null,
   supportRole: Role | null,
+  managerRoles: readonly Role[],
   botMember: GuildMember,
 ): string[] {
   const issues: string[] = [];
@@ -341,6 +513,16 @@ function getTicketPermissionIssues(
     botMember.roles.highest.comparePositionTo(supportRole) <= 0
   ) {
     issues.push("Superior's highest role must be above the support role.");
+  }
+  for (const managerRole of managerRoles) {
+    if (
+      managerRole.guild.id !== botMember.guild.id ||
+      botMember.roles.highest.comparePositionTo(managerRole) <= 0
+    ) {
+      issues.push(
+        `Superior's highest role must be above delegated ticket-management role ${managerRole.id}.`,
+      );
+    }
   }
   if (category) {
     const permissions = category.permissionsFor(botMember);
@@ -408,8 +590,11 @@ function buildTicketChannelName(ticketNumber: number, subject: string): string {
   return `ticket-${ticketNumber}-${slug || "support"}`.slice(0, 100);
 }
 
-function buildTicketChannelTopic(ticket: TicketRecord): string {
-  return `Superior ticket #${ticket.ticketNumber} · opener ${ticket.openerId} · ${ticket.subject} · ${ticketChannelRecoveryMarker(ticket.ticketId)}`.slice(
+function buildTicketChannelTopic(
+  ticket: TicketRecord,
+  managedRoleIds: readonly string[],
+): string {
+  return `Superior ticket #${ticket.ticketNumber} · opener ${ticket.openerId} · ${ticketChannelRecoveryMarker(ticket.ticketId)} · ${ticketChannelAclMarker(managedRoleIds)} · ${ticket.subject}`.slice(
     0,
     1_024,
   );
@@ -419,29 +604,92 @@ export function ticketChannelRecoveryMarker(ticketId: string): string {
   return `superior-ref:${ticketId}`;
 }
 
+function ticketChannelAclMarker(roleIds: readonly string[]): string {
+  return `superior-acl:${[...new Set(roleIds)].sort().join(",")}`;
+}
+
+function parseTicketChannelAclMarker(topic: string | null): Set<string> | null {
+  if (!topic) return null;
+  const match = /(?:^|\s)superior-acl:([0-9,]*)(?:\s|$)/u.exec(topic);
+  if (!match) return null;
+  const ids = match[1]
+    ? match[1].split(",").filter((roleId) => /^\d{17,20}$/u.test(roleId))
+    : [];
+  return new Set(ids);
+}
+
+function managedTicketRoleIds(
+  resources: Pick<TicketConfigurationResources, "supportRole" | "managerRoles">,
+): string[] {
+  return [
+    ...new Set(
+      [
+        resources.supportRole?.id,
+        ...resources.managerRoles.map(({ id }) => id),
+      ].filter((roleId): roleId is string => Boolean(roleId)),
+    ),
+  ];
+}
+
+function reconcileTicketPermissionOverwrites(
+  channel: TextChannel,
+  desired: OverwriteResolvable[],
+  ticket: TicketRecord,
+  botMemberId: string,
+): OverwriteResolvable[] {
+  const previouslyManaged = parseTicketChannelAclMarker(channel.topic);
+  if (!previouslyManaged) return desired;
+  const desiredIds = new Set(desired.map((overwrite) => overwrite.id));
+  const alwaysManaged = new Set([
+    channel.guild.roles.everyone.id,
+    ticket.openerId,
+    botMemberId,
+  ]);
+  const preserved: OverwriteResolvable[] = [];
+  for (const overwrite of channel.permissionOverwrites.cache.values()) {
+    if (
+      desiredIds.has(overwrite.id) ||
+      alwaysManaged.has(overwrite.id) ||
+      previouslyManaged.has(overwrite.id)
+    ) {
+      continue;
+    }
+    preserved.push(overwrite);
+  }
+  const merged = [...desired, ...preserved];
+  if (merged.length > MAX_CHANNEL_PERMISSION_OVERWRITES) {
+    throw new Error(
+      "Ticket recovery would exceed Discord's channel permission-overwrite limit.",
+    );
+  }
+  return merged;
+}
+
 function requireTicketChannelResources(
   guild: Guild,
   resources: Pick<
     TicketConfigurationResources,
-    "category" | "supportRole" | "botMember"
+    "category" | "supportRole" | "managerRoles" | "botMember"
   >,
 ): {
   category: CategoryChannel;
   supportRole: Role;
+  managerRoles: Role[];
   botMember: GuildMember;
 } {
-  const { category, supportRole, botMember } = resources;
+  const { category, supportRole, managerRoles, botMember } = resources;
   if (!category || !supportRole || !botMember) {
     throw new Error("Ticket resources are incomplete.");
   }
   if (
     category.guild.id !== guild.id ||
     supportRole.guild.id !== guild.id ||
-    botMember.guild.id !== guild.id
+    botMember.guild.id !== guild.id ||
+    managerRoles.some((role) => role.guild.id !== guild.id)
   ) {
     throw new Error("Ticket resources do not belong to this server.");
   }
-  return { category, supportRole, botMember };
+  return { category, supportRole, managerRoles, botMember };
 }
 
 function supportRoleIssue(reason: string): string {

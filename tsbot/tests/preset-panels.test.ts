@@ -98,6 +98,7 @@ function createHarness(existing = false) {
     }),
     recordCommandMetric: vi.fn(),
     listPostedPanels: vi.fn(() => (tracked ? [tracked] : [])),
+    countPostedPanels: vi.fn((): number => (tracked ? 1 : 0)),
   };
   const settings = createDefaultGuildSettings();
   settings.enabled = true;
@@ -138,6 +139,41 @@ function createHarness(existing = false) {
 }
 
 describe("preset panel delivery", () => {
+  it("bounds panel status rows and reports when more bindings exist", async () => {
+    const harness = createHarness();
+    const panels = Array.from({ length: 20 }, (_, index) => ({
+      guildId: GUILD_ID,
+      panelId: `panel_${String(index).padStart(2, "0")}`,
+      preset: "help" as const,
+      channelId: CHANNEL_ID,
+      messageId: `${MESSAGE_ID.slice(0, -2)}${String(index).padStart(2, "0")}`,
+      configuration: {},
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    }));
+    harness.interaction.options.getSubcommand = vi.fn(() => "status");
+    harness.storage.listPostedPanels.mockReturnValue(panels);
+    harness.storage.countPostedPanels.mockReturnValue(21);
+
+    await handlePresetPanelCommand(
+      harness.interaction as never,
+      harness.runtime,
+      harness.actor as never,
+    );
+
+    expect(harness.storage.listPostedPanels).toHaveBeenCalledWith(
+      undefined,
+      20,
+      0,
+    );
+    expect(harness.storage.countPostedPanels).toHaveBeenCalledOnce();
+    expect(harness.interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("20+ of 21"),
+      }),
+    );
+  });
+
   it("posts a fixed themed preset and persists its Discord binding", async () => {
     const harness = createHarness();
 
