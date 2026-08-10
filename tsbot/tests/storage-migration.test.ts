@@ -18,8 +18,9 @@ import {
   initializeV3Schema,
   initializeV4Schema,
   initializeV5Schema,
-  V6_EXPLICIT_INDEX_NAMES,
-  V6_TABLE_NAMES,
+  initializeV6Schema,
+  V7_EXPLICIT_INDEX_NAMES,
+  V7_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import {
   createV2FixtureDatabase,
@@ -38,7 +39,7 @@ afterEach(() => {
   }
 });
 
-describe("explicit schema migration to v6", () => {
+describe("explicit schema migration to v7", () => {
   it("preserves active tenant data and discards retired state", () => {
     const dbFile = fixturePath("active.db");
     const db = createV2FixtureDatabase(dbFile);
@@ -116,15 +117,15 @@ describe("explicit schema migration to v6", () => {
     expect(result).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v2",
-      toSchema: "current-v6",
+      toSchema: "current-v7",
       guilds: 2,
       settingsRequiringReview: 1,
       metricsPreserved: 3,
       metricsDropped: 3,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 6 })).toMatchObject({
-      schema: "current-v6",
-      schemaVersion: 6,
+    expect(validateDatabaseFile(dbFile, { expect: 7 })).toMatchObject({
+      schema: "current-v7",
+      schemaVersion: 7,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -132,10 +133,10 @@ describe("explicit schema migration to v6", () => {
     const migrated = new Database(dbFile, { readonly: true });
     try {
       expect(schemaObjects(migrated, "table")).toEqual(
-        [...V6_TABLE_NAMES].sort(),
+        [...V7_TABLE_NAMES].sort(),
       );
       expect(schemaObjects(migrated, "index")).toEqual(
-        [...V6_EXPLICIT_INDEX_NAMES].sort(),
+        [...V7_EXPLICIT_INDEX_NAMES].sort(),
       );
       expect(
         migrated
@@ -345,14 +346,14 @@ describe("explicit schema migration to v6", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v3",
-      toSchema: "current-v6",
+      toSchema: "current-v7",
       guilds: 1,
       metricsPreserved: 1,
       metricsDropped: 0,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 6 })).toMatchObject({
-      schema: "current-v6",
-      schemaVersion: 6,
+    expect(validateDatabaseFile(dbFile, { expect: 7 })).toMatchObject({
+      schema: "current-v7",
+      schemaVersion: 7,
     });
 
     const db = new Database(dbFile, { readonly: true });
@@ -388,6 +389,7 @@ describe("explicit schema migration to v6", () => {
         { version: 4 },
         { version: 5 },
         { version: 6 },
+        { version: 7 },
       ]);
       for (const table of [
         "ticket_departments",
@@ -451,11 +453,11 @@ describe("explicit schema migration to v6", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v4",
-      toSchema: "current-v6",
+      toSchema: "current-v7",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 6 }).schema).toBe(
-      "current-v6",
+    expect(validateDatabaseFile(dbFile, { expect: 7 }).schema).toBe(
+      "current-v7",
     );
 
     const db = new Database(dbFile);
@@ -534,7 +536,12 @@ describe("explicit schema migration to v6", () => {
         db
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([{ version: 4 }, { version: 5 }, { version: 6 }]);
+      ).toEqual([
+        { version: 4 },
+        { version: 5 },
+        { version: 6 },
+        { version: 7 },
+      ]);
       expect(() =>
         db
           .prepare(
@@ -608,7 +615,116 @@ describe("explicit schema migration to v6", () => {
     },
   );
 
-  it("additively migrates an exact schema-v5 database to v6", () => {
+  it("additively migrates an exact schema-v6 database to v7", () => {
+    const dbFile = fixturePath("v6.db");
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV6Schema(db, "2026-01-01T00:00:00.000Z");
+    db.prepare(
+      `INSERT INTO guilds (
+         guild_id, enabled, name, joined_at, left_at, created_at, updated_at
+       ) VALUES (?, 0, 'Preserved v6', ?, NULL, ?, ?)`,
+    ).run(
+      GUILD_A,
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+    );
+    db.prepare(
+      `INSERT INTO guild_settings (
+         guild_id, settings_version, settings_json, updated_at
+       ) VALUES (?, 2, ?, ?)`,
+    ).run(
+      GUILD_A,
+      serializeGuildSettings(createDefaultGuildSettings()),
+      "2026-01-01T00:00:00.000Z",
+    );
+    db.prepare(
+      `INSERT INTO metrics (guild_id, metric_key, metric_value, updated_at)
+       VALUES (?, 'command_usage.utility.ping', 3, ?)`,
+    ).run(GUILD_A, "2026-01-01T00:00:00.000Z");
+    db.close();
+
+    expect(
+      migrateDatabase({
+        dbFile,
+        now: () => "2026-02-01T00:00:00.000Z",
+      }),
+    ).toMatchObject({
+      status: "migrated",
+      fromSchema: "legacy-v6",
+      toSchema: "current-v7",
+      guilds: 1,
+      metricsPreserved: 1,
+    });
+    expect(validateDatabaseFile(dbFile, { expect: 7 })).toMatchObject({
+      schema: "current-v7",
+      schemaVersion: 7,
+    });
+
+    const migrated = new Database(dbFile, { readonly: true });
+    try {
+      expect(
+        migrated
+          .prepare("SELECT version FROM schema_migrations ORDER BY version")
+          .all(),
+      ).toEqual([{ version: 6 }, { version: 7 }]);
+      expect(
+        migrated
+          .prepare("SELECT name FROM guilds WHERE guild_id = ?")
+          .get(GUILD_A),
+      ).toEqual({ name: "Preserved v6" });
+      expect(
+        migrated
+          .prepare("SELECT COUNT(*) AS count FROM mudae_watch_deliveries")
+          .get(),
+      ).toEqual({ count: 0 });
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it.each<MigrationFailurePoint>([
+    "after-create",
+    "after-version",
+    "before-commit",
+  ])("rolls an interrupted v6-to-v7 %s back byte-for-byte", (failurePoint) => {
+    const dbFile = fixturePath(`v6-${failurePoint}.db`);
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV6Schema(db, "2026-01-01T00:00:00.000Z");
+    db.close();
+    const before = fs.readFileSync(dbFile);
+
+    expect(() => migrateDatabase({ dbFile, failurePoint })).toThrow(
+      `Injected migration failure at ${failurePoint}`,
+    );
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 6 }).schema).toBe(
+      "legacy-v6",
+    );
+  });
+
+  it("dry-runs schema v6 to v7 without modifying the source", () => {
+    const dbFile = fixturePath("v6-dry-run.db");
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV6Schema(db, "2026-01-01T00:00:00.000Z");
+    db.close();
+    const before = fs.readFileSync(dbFile);
+
+    expect(migrateDatabase({ dbFile, dryRun: true })).toMatchObject({
+      status: "dry-run",
+      fromSchema: "legacy-v6",
+      toSchema: "current-v7",
+    });
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 6 }).schema).toBe(
+      "legacy-v6",
+    );
+  });
+
+  it("additively migrates an exact schema-v5 database to v7", () => {
     const dbFile = fixturePath("v5.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -623,12 +739,12 @@ describe("explicit schema migration to v6", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v5",
-      toSchema: "current-v6",
+      toSchema: "current-v7",
       guilds: 0,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 6 })).toMatchObject({
-      schema: "current-v6",
-      schemaVersion: 6,
+    expect(validateDatabaseFile(dbFile, { expect: 7 })).toMatchObject({
+      schema: "current-v7",
+      schemaVersion: 7,
     });
     const migrated = new Database(dbFile, { readonly: true });
     try {
@@ -636,16 +752,16 @@ describe("explicit schema migration to v6", () => {
         migrated
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([{ version: 5 }, { version: 6 }]);
+      ).toEqual([{ version: 5 }, { version: 6 }, { version: 7 }]);
       expect(schemaObjects(migrated, "table")).toEqual(
-        [...V6_TABLE_NAMES].sort(),
+        [...V7_TABLE_NAMES].sort(),
       );
     } finally {
       migrated.close();
     }
   });
 
-  it("rolls an interrupted v5-to-v6 migration back byte-for-byte", () => {
+  it("rolls an interrupted v5-to-v7 migration back byte-for-byte", () => {
     const dbFile = fixturePath("v5-rollback.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -670,12 +786,12 @@ describe("explicit schema migration to v6", () => {
     storage.close();
     expect(migrateDatabase({ dbFile })).toMatchObject({
       status: "already-current",
-      fromSchema: "current-v6",
-      toSchema: "current-v6",
+      fromSchema: "current-v7",
+      toSchema: "current-v7",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 6 }).schema).toBe(
-      "current-v6",
+    expect(validateDatabaseFile(dbFile, { expect: 7 }).schema).toBe(
+      "current-v7",
     );
   });
 

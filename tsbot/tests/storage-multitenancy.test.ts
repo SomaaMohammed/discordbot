@@ -419,6 +419,7 @@ describe("active guild storage", () => {
       restrictedPingUserCooldowns:
         importedPhase2.restrictedPingUserCooldowns.length,
       restrictedPingEvents: importedPhase2.restrictedPingEvents.length,
+      mudaeWatchDeliveries: 0,
     };
     expect(storage.previewGuildPurge(GUILD_A)).toEqual(expectedPurge);
     expect(storage.purgeGuildData(GUILD_A)).toEqual(expectedPurge);

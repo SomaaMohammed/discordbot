@@ -16,6 +16,27 @@ function read(relativePath: string): string {
 }
 
 describe("Windows portable packaging", () => {
+  it("does not publish the private watcher in user-facing documentation", () => {
+    const publicFiles = [
+      "README.md",
+      ".env.example",
+      "windows/PORTABLE-README.txt",
+      ...fs
+        .readdirSync(path.join(repoRoot, "docs"), {
+          recursive: true,
+          withFileTypes: true,
+        })
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+        .map((entry) =>
+          path.relative(repoRoot, path.join(entry.parentPath, entry.name)),
+        ),
+    ];
+
+    for (const publicFile of publicFiles) {
+      expect(read(publicFile), publicFile).not.toMatch(/mudae/i);
+    }
+  });
+
   it("keeps public package identity and version metadata synchronized", () => {
     const packageJson = JSON.parse(read("tsbot/package.json")) as {
       name: string;
@@ -31,7 +52,7 @@ describe("Windows portable packaging", () => {
 
     expect(packageJson).toMatchObject({
       name: "superior-discord-bot",
-      version: "5.4.0",
+      version: "5.5.0",
       private: true,
     });
     expect(packageLock).toMatchObject({

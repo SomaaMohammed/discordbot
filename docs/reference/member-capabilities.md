@@ -71,7 +71,7 @@ The guild owner and freshly verified members with Administrator permission retai
 
 Only the guild owner can replace live data with `/setup import` or permanently purge the guild's live database rows; both require exact confirmation. Owner/Administrator evaluation happens before delegated storage, so broken delegation cannot lock out recovery.
 
-Format-5, legacy format-4, and legacy format-3 imports replace operational data for their supported era; legacy format 2 replaces settings/metrics and preserves current operational rows. Every import disables the guild and makes imported authority/resource bindings, including restricted-ping mappings, dormant until current Discord resources are reviewed. See [Configuration](../configuration.md#export-import-purge-and-recovery-review).
+Format-5, legacy format-4, and legacy format-3 imports replace portable operational data for their supported era while internal delivery deduplication is preserved; legacy format 2 replaces settings/metrics and preserves current operational rows. Every import disables the guild and makes imported authority/resource bindings, including restricted-ping mappings, dormant until current Discord resources are reviewed. See [Configuration](../configuration.md#export-import-purge-and-recovery-review).
 
 Administrator status does not bypass Discord's permissions for the bot itself. Cleanup, channel changes, roles, timeouts, ticket categories/logs, suggestion threads, and private application channels all require the bot's current effective permissions and safe hierarchy.
 

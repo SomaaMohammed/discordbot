@@ -35,7 +35,7 @@ Copy `.env.example` to `.env` in the application root. For a Windows portable bu
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------- |
 | `DISCORD_TOKEN`             | Yes           | Bot token from the Developer Portal.                                                        |
 | `DB_FILE`                   | No            | SQLite path. A relative value resolves from the application root; default is `superior.db`. |
-| `BOT_VERSION`               | No            | Display override; normally leave blank to use package version 5.4.0.                        |
+| `BOT_VERSION`               | No            | Display override; normally leave blank to use package version 5.5.0.                        |
 | `COMMAND_REGISTRATION_MODE` | No            | `global` for production or `guild` for development. Defaults to `global`.                   |
 | `DEV_GUILD_IDS`             | In guild mode | Comma-separated development guild IDs.                                                      |
 
@@ -199,7 +199,7 @@ Only the applicant can use `/application status` for their records or `/applicat
 
 `/setup import` is owner-only, requires exact same-guild confirmation, validates collection limits and references, and runs in one transaction:
 
-- Format 5 replaces settings, metrics, and the complete current operational model.
+- Format 5 replaces settings, metrics, and the complete portable operational model while preserving internal delivery deduplication.
 - Legacy format 4 replaces its complete schema-v5 model and leaves restricted-ping collections empty.
 - Legacy format 3 replaces settings, metrics, panels, and the Phase 1 ticket model, converting it to a `General Support` department with Subject/Details responses. Phase 2 collections absent from the file are cleared.
 - Legacy format 2 replaces settings and metrics while preserving all current operational rows.
@@ -229,4 +229,4 @@ The `roleinfo`, `channelinfo`, `snowflake`, and `timestamp` utilities validate b
 
 Events and interactions are rejected when the guild is missing, disabled, inactive, removed, purged, or has changed generation during asynchronous work. Guild resources are revalidated against the interaction guild. Discord API work stays outside long SQLite transactions, list operations are bounded or paginated, and successful metrics are written only after the corresponding reply succeeds.
 
-Only one Superior process may write a database. Running several processes against a shared SQLite file is unsupported even on a network filesystem. Future multi-process deployment requires a different coordination/storage design; no configuration flag enables it in 5.4.0.
+Only one Superior process may write a database. Running several processes against a shared SQLite file is unsupported even on a network filesystem. Future multi-process deployment requires a different coordination/storage design; no configuration flag enables it in 5.5.0.

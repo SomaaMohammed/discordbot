@@ -7,7 +7,10 @@ import {
   buildCommandRegistrationPlan,
   synchronizeCommands,
 } from "../src/discord/registration.js";
-import { buildSuperiorCommandGuide } from "../src/discord/commands.js";
+import {
+  buildCommandDefinitions,
+  buildSuperiorCommandGuide,
+} from "../src/discord/commands.js";
 
 describe("command guide", () => {
   it("covers the complete Phase 2 command surface", () => {
@@ -24,6 +27,16 @@ describe("command guide", () => {
     expect(guide).toContain("delegated");
     expect(guide).toContain("format-5");
     expect(guide.length).toBeLessThanOrEqual(2_000);
+  });
+
+  it("keeps private operator backends out of commands and help", () => {
+    const definitions = buildCommandDefinitions().map((definition) =>
+      definition.toJSON(),
+    );
+    const serialized = JSON.stringify(definitions);
+
+    expect(serialized).not.toMatch(/mudae/i);
+    expect(buildSuperiorCommandGuide()).not.toMatch(/mudae/i);
   });
 });
 

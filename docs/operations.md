@@ -1,6 +1,6 @@
 # Operations
 
-This runbook covers source deployments on Linux and the schema-v6 data lifecycle. Windows portable operation is covered in the [Windows guide](windows.md).
+This runbook covers source deployments on Linux and the schema-v7 data lifecycle. Windows portable operation is covered in the [Windows guide](windows.md).
 
 ## Invariants
 
@@ -28,13 +28,13 @@ Run from the repository root:
 ./ops.sh rollout
 ```
 
-`rollout` refuses a non-v6 database. It fast-forwards the selected branch, installs dependencies, runs formatting, typecheck, tests, and a clean build, validates and backs up an existing v6 database, then restarts the service. The default dirty-tree policy refuses tracked changes; `DIRTY_POLICY=stash` stashes tracked changes only and does not move ignored operator data.
+`rollout` refuses a non-v7 database. It fast-forwards the selected branch, installs dependencies, runs formatting, typecheck, tests, and a clean build, validates and backs up an existing v7 database, then restarts the service. The default dirty-tree policy refuses tracked changes; `DIRTY_POLICY=stash` stashes tracked changes only and does not move ignored operator data.
 
 An external checkout-directory or service rename is not performed by this repository. Update `APP_DIR`, `SERVICE_NAME`, the systemd unit, working directory, and environment paths together during a separately planned maintenance window.
 
 ## Fresh database
 
-With no file at `DB_FILE`, startup creates schema v6 transactionally. An empty existing file is also eligible. If another database exists under an earlier default name while `DB_FILE` is unset, startup and operations refuse to create a second database; select the intended file explicitly and follow the upgrade workflow.
+With no file at `DB_FILE`, startup creates schema v7 transactionally. An empty existing file is also eligible. If another database exists under an earlier default name while `DB_FILE` is unset, startup and operations refuse to create a second database; select the intended file explicitly and follow the upgrade workflow.
 
 After first startup, run:
 
@@ -44,15 +44,15 @@ After first startup, run:
 
 Then configure and enable each guild with `/setup`. Operational services remain unavailable until their Discord bindings are configured and verified.
 
-## Required offline migration from schema v5
+## Required offline migration from schema v6
 
-Schema v5 is the normal source for a 5.3.0 deployment. Build 5.4.0 first, but do not start it against v5. Confirm that all processes and maintenance sessions that can write the selected file will be stopped. A dry run performs exact schema classification and the complete additive conversion in a transaction that is deliberately rolled back:
+Schema v6 is the normal source for a 5.4.0 deployment. Build 5.5.0 first, but do not start it against v6. Confirm that all processes and maintenance sessions that can write the selected file will be stopped. A dry run performs exact schema classification and the complete additive conversion in a transaction that is deliberately rolled back:
 
 ```bash
 cd tsbot
 npm ci
 npm run build
-node dist/src/storage/check-cli.js --db /absolute/path/to/superior.db --expect 5
+node dist/src/storage/check-cli.js --db /absolute/path/to/superior.db --expect 6
 node dist/src/storage/migrate-cli.js --db /absolute/path/to/superior.db --dry-run
 cd ..
 ```
@@ -60,16 +60,18 @@ cd ..
 Run the guarded workflow from the repository root:
 
 ```bash
-DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v6
+DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v7
 ```
 
-The workflow validates exact v5, stops the service if active, creates and validates a private schema-v5 backup, runs one immediate transaction, validates exact v6 plus integrity and foreign keys, restricts file permissions, and restarts only if the service was previously active. A migration error rolls back the transaction, retains the validated v5 backup, and leaves the service stopped.
+The workflow validates exact v6, stops the service if active, creates and validates a private schema-v6 backup, runs one immediate transaction, validates exact v7 plus integrity and foreign keys, restricts file permissions, and restarts only if the service was previously active. A migration error rolls back the transaction, retains the validated v6 backup, and leaves the service stopped.
 
-The v5-to-v6 step preserves every existing row and adds four empty restricted-ping tables and their indexes. It never invents, enables, or infers a role/channel mapping. After migration, restart 5.4.0 so Discord command synchronization registers `/pingrole` and `/restrictedping`; global registration can take time to propagate.
+The v6-to-v7 step preserves every existing row and adds one empty bounded internal delivery-deduplication table and its indexes. After migration, restart 5.5.0 and inspect startup/database-check logs before enabling new work.
 
-## Supported legacy v4, v3, and v2 paths
+## Supported legacy v5, v4, v3, and v2 paths
 
-The v6 migration CLI also accepts exact schema v4, schema v3, and the exact supported schema-v2 layout. These paths run the frozen conversion to v4, the historical v4-to-v5 conversion, and the additive v5-to-v6 step inside one outer transaction.
+The v7 migration CLI also accepts exact schema v5, schema v4, schema v3, and the exact supported schema-v2 layout. These paths run the applicable frozen historical conversions and the additive v6-to-v7 step inside one outer transaction.
+
+For v5, validate with `--expect 5`, retain a schema-v5 backup, and run `DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v6`. This compatibility command migrates the exact v5 source through v6 to current v7.
 
 For v4:
 
@@ -101,7 +103,7 @@ DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v2
 
 The v2 path preserves active guild metadata, safely convertible settings, greeting text without fixed member IDs, and supported metrics. Data with no active consumer is removed. Unsafe or malformed settings become disabled and require review; invocation branding is reset or sanitized; unresolved moderation-recovery metadata blocks migration. A failed v4, v3, or v2 transaction leaves the source generation unchanged and keeps its validated backup.
 
-Schema v1 is not accepted. Upgrade it with the final 4.0.0 source release until it validates as schema v2, stop that process, retain its backup, and then follow the v2-to-v6 procedure. Renaming a database file never upgrades its contents.
+Schema v1 is not accepted. Upgrade it with the final 4.0.0 source release until it validates as schema v2, stop that process, retain its backup, and then follow the v2-to-v7 procedure. Renaming a database file never upgrades its contents.
 
 ## Post-migration review
 
@@ -119,7 +121,7 @@ Review every guild before enabling new work:
 3. Inspect `/panel status` and refresh any missing tracked launcher.
 4. Inspect ticket department health and recover a representative active migrated ticket before accepting new tickets.
 5. Setup suggestions and application forms from current Discord resources; migrations do not invent or enable them.
-6. Run `/restrictedping list` and confirm migration created no mappings. Add only reviewed safe role/channel pairs, then verify one disposable `/pingrole` delivery and both cooldowns.
+6. Run `/restrictedping list`, verify every retained mapping, then test one disposable `/pingrole` delivery and both cooldowns.
 7. In a disposable test workflow, verify ticket closure/transcript delivery, suggestion submit/vote/review, and private application submit/claim/decision.
 
 Do not interpret Discord message IDs alone as healthy bindings. The runtime re-fetches current channels, roles, messages, members, and bot permissions.
@@ -132,17 +134,17 @@ Create a current backup with:
 ./ops.sh backup
 ```
 
-The backup CLI uses SQLite's online backup API, refuses an existing destination, validates exact schema v6, integrity, and foreign keys, and writes a private timestamped file. It is safe for a running single process; do not copy a live `.db` plus sidecars with ordinary filesystem tools.
+The backup CLI uses SQLite's online backup API, refuses an existing destination, validates exact schema v7, integrity, and foreign keys, and writes a private timestamped file. It is safe for a running single process; do not copy a live `.db` plus sidecars with ordinary filesystem tools.
 
-Restore a v6 backup into a 5.4.0 deployment with:
+Restore a v7 backup into a 5.5.0 deployment with:
 
 ```bash
-./ops.sh restore backups/superior-schema6-YYYYMMDDTHHMMSSZ.db
+./ops.sh restore backups/superior-schema7-YYYYMMDDTHHMMSSZ.db
 ```
 
 Restore refuses the live database as its source. It makes a consistent private candidate through SQLite's backup API and validates it before stopping the service. It keeps the rollback directory on the database filesystem, moves the current database and sidecars there, installs the candidate atomically, validates again, restores the prior files on installation failure, and restarts only when appropriate. Keep the rollback directory until the application and guild checks pass.
 
-Backups are not expired automatically. Define and test retention, encryption, off-host storage, access control, restore drills, and verified deletion appropriate to the deployment. A schema-v6 backup can contain delegated actor/role IDs, ticket questions/answers/transcripts metadata, suggestion authors/title/details/votes/review reasons, application applicants/private answers/decision reasons, restricted-ping mappings/member cooldowns/audit actors, panel content, delivery identifiers, and audit events. Treat application and ticket text as potentially sensitive even though users are warned not to submit sensitive data.
+Backups are not expired automatically. Define and test retention, encryption, off-host storage, access control, restore drills, and verified deletion appropriate to the deployment. A schema-v7 backup can contain delegated actor/role IDs, ticket questions/answers/transcripts metadata, suggestion authors/title/details/votes/review reasons, application applicants/private answers/decision reasons, restricted-ping mappings/member cooldowns/audit actors, panel content, bounded internal delivery identifiers, and audit events. Treat application and ticket text as potentially sensitive even though users are warned not to submit sensitive data.
 
 ## Guild export, import, and purge
 
@@ -155,7 +157,7 @@ The guild owner and Administrators can create a bounded same-guild JSON export w
 
 Parsing validates collection limits, audit-history caps, tenant identity, uniqueness, and cross-record references before replacement. Every successful import disables the guild. Inserted grants are inactive; service/form/department/restricted-ping configurations are disabled; and external role/channel bindings are unverified until administrators inspect current Discord resources and explicitly reconfigure or enable them.
 
-Guild purge deletes the `guilds` row and schema-v6 tenant data through foreign-key cascades. A confirmed Discord `guildDelete` removal invokes the same live-database purge and clears guild-scoped process state. Startup reconciliation remains deliberately conservative: a guild missing or temporarily unavailable while the process starts is marked inactive so a Discord outage cannot be mistaken for confirmed removal. Import and purge affect only the live database. They do not remove downloaded exports, backups, SQLite free pages, Discord panels, suggestion messages/threads, application review messages, ticket channels/transcripts/logs, prior restricted-role notifications, direct messages, host logs, or vendor copies. Apply separate retention and verified-deletion procedures to each copy.
+Guild purge deletes the `guilds` row and schema-v7 tenant data through foreign-key cascades. A confirmed Discord `guildDelete` removal invokes the same live-database purge and clears guild-scoped process state. Startup reconciliation remains deliberately conservative: a guild missing or temporarily unavailable while the process starts is marked inactive so a Discord outage cannot be mistaken for confirmed removal. Import and purge affect only the live database. They do not remove downloaded exports, backups, SQLite free pages, Discord panels, suggestion messages/threads, application review messages, ticket channels/transcripts/logs, prior restricted-role notifications, direct messages, host logs, or vendor copies. Apply separate retention and verified-deletion procedures to each copy.
 
 ## Workflow recovery
 
@@ -171,20 +173,18 @@ Recovery actions are designed to be repeatable, but Discord deletion, delivery, 
 
 Application and schema generations must match:
 
-- To recover a 5.4.0 deployment while retaining schema v6, deploy a known-good 5.4.0 build and restore a validated v6 backup if data restoration is necessary.
-- To return to 5.3.0 after a v5-to-v6 migration, stop all writers, preserve the current v6 database separately, validate the pre-migration v5 backup, restore it through a controlled atomic file replacement, deploy the exact known-good v5-compatible 5.3.0 build/configuration, then start and verify it. Restricted-ping state created in v6 cannot be represented in v5.
-- To return to 5.2.1 after a direct v4-to-v6 migration, use the original validated pre-migration v4 backup and exact compatible application generation.
-- To return to 5.1.0 after a direct v3-to-v6 migration, use the original validated v3 backup and exact compatible application generation.
-- To return to a schema-v2 application after a direct v2-to-v6 migration, use the original validated v2 backup and exact compatible generation.
+- To recover a 5.5.0 deployment while retaining schema v7, deploy a known-good 5.5.0 build and restore a validated v7 backup if data restoration is necessary.
+- To return to 5.4.0 after a v6-to-v7 migration, stop all writers, preserve the current v7 database separately, validate the pre-migration v6 backup, restore it through a controlled atomic file replacement, deploy the exact known-good v6-compatible 5.4.0 build/configuration, then start and verify it. Internal delivery-deduplication state created in v7 cannot be represented in v6.
+- To return to an older application after a direct v5/v4/v3/v2-to-v7 migration, use the original validated generation-matched backup and exact compatible application generation.
 
-The 5.4.0 `restore` command intentionally accepts only v6. Release-level rollback to v5/v4/v3/v2 therefore requires the stopped-process procedure, not `./ops.sh restore`. Never start 5.4.0 against an older schema or an older application against v6.
+The 5.5.0 `restore` command intentionally accepts only v7. Release-level rollback to v6/v5/v4/v3/v2 therefore requires the stopped-process procedure, not `./ops.sh restore`. Never start 5.5.0 against an older schema or an older application against v7.
 
 ## Verification checklist
 
 - The service account owns `.env`, database, sidecars, backup directory, and lock with restrictive permissions.
 - Exactly one bot process is configured to write the database; it is on a local reliable filesystem.
-- `./ops.sh status` reports schema 6 and integrity `ok`; foreign-key check is empty.
-- The 24 expected tables exist and no unexpected application views/triggers exist. See [Development](development.md#schema-v6).
+- `./ops.sh status` reports schema 7 and integrity `ok`; foreign-key check is empty.
+- The 25 expected tables exist and no unexpected application views/triggers exist. See [Development](development.md#schema-v7).
 - Every expected guild appears; inactive guilds remain disabled.
 - `/setup status`, `/access list`, `/panel status`, `/restrictedping list`, ticket department health, a private utility, and deliberate addressed chat work in a test guild.
 - Enabled ticket, suggestion, application, and restricted-ping services pass current channel/role/member/bot permission checks and a disposable end-to-end workflow.

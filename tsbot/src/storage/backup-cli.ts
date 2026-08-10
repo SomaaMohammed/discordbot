@@ -3,13 +3,13 @@ import { backupDatabase } from "./backup.js";
 interface BackupArguments {
   dbFile: string;
   outputFile: string;
-  expect: 2 | 3 | 4 | 5 | 6;
+  expect: 2 | 3 | 4 | 5 | 6 | 7;
 }
 
 function parseArguments(argv: string[]): BackupArguments {
   let dbFile: string | null = null;
   let outputFile: string | null = null;
-  let expect: 2 | 3 | 4 | 5 | 6 | null = null;
+  let expect: 2 | 3 | 4 | 5 | 6 | 7 | null = null;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     const value = argv[index + 1];
@@ -29,9 +29,10 @@ function parseArguments(argv: string[]): BackupArguments {
         value === "3" ||
         value === "4" ||
         value === "5" ||
-        value === "6")
+        value === "6" ||
+        value === "7")
     ) {
-      expect = Number(value) as 2 | 3 | 4 | 5 | 6;
+      expect = Number(value) as 2 | 3 | 4 | 5 | 6 | 7;
       index += 1;
       continue;
     }
@@ -39,7 +40,7 @@ function parseArguments(argv: string[]): BackupArguments {
   }
   if (!dbFile || !outputFile || expect === null) {
     throw new Error(
-      "Usage: backup --db <source> --out <new-file> --expect 2|3|4|5|6",
+      "Usage: backup --db <source> --out <new-file> --expect 2|3|4|5|6|7",
     );
   }
   return { dbFile, outputFile, expect };

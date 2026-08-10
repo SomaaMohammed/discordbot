@@ -10,10 +10,11 @@ import {
   initializeV3Schema,
   initializeV4Schema,
   initializeV5Schema,
+  initializeV6Schema,
   validateV2Schema,
-  validateV6Schema,
-  V6_EXPLICIT_INDEX_NAMES,
-  V6_TABLE_NAMES,
+  validateV7Schema,
+  V7_EXPLICIT_INDEX_NAMES,
+  V7_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import { createV2FixtureDatabase } from "./helpers/v2-fixture.js";
 
@@ -25,13 +26,13 @@ afterEach(() => {
   }
 });
 
-describe("schema v6", () => {
+describe("schema v7", () => {
   it("creates only the exact active tables and required index", () => {
     const dbFile = freshDatabase();
-    const validation = validateDatabaseFile(dbFile, { expect: 6 });
+    const validation = validateDatabaseFile(dbFile, { expect: 7 });
     expect(validation).toEqual({
-      schema: "current-v6",
-      schemaVersion: 6,
+      schema: "current-v7",
+      schemaVersion: 7,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -46,19 +47,19 @@ describe("schema v6", () => {
         .all() as Array<{ type: string; name: string }>;
       expect(
         objects.filter((row) => row.type === "table").map(rowName),
-      ).toEqual([...V6_TABLE_NAMES].sort());
+      ).toEqual([...V7_TABLE_NAMES].sort());
       expect(
         objects.filter((row) => row.type === "index").map(rowName),
-      ).toEqual([...V6_EXPLICIT_INDEX_NAMES].sort());
+      ).toEqual([...V7_EXPLICIT_INDEX_NAMES].sort());
       expect(objects.some((row) => row.type === "view")).toBe(false);
       expect(objects.some((row) => row.type === "trigger")).toBe(false);
-      expect(validateV6Schema(db)).toEqual([]);
+      expect(validateV7Schema(db)).toEqual([]);
     } finally {
       db.close();
     }
   });
 
-  it("rejects user-principal capability grants in a fresh v6 schema", () => {
+  it("rejects user-principal capability grants in a fresh v7 schema", () => {
     const dbFile = freshDatabase();
     const storage = new BotStorage({ dbFile });
     storage.initStorage();
@@ -121,7 +122,78 @@ describe("schema v6", () => {
         "UPDATE guild_settings SET settings_json = '{malformed' WHERE guild_id = ?",
       ).run("111111111111111111");
       expect(detectDatabaseSchema(db)).toBe("unknown");
-      expect(validateV6Schema(db).join(" ")).toMatch(/settings are invalid/);
+      expect(validateV7Schema(db).join(" ")).toMatch(/settings are invalid/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects incoherent internal delivery reservations", () => {
+    const dbFile = freshDatabase();
+    const storage = new BotStorage({ dbFile });
+    storage.initStorage();
+    storage.ensureGuild("111111111111111111");
+    storage.close();
+
+    const db = new Database(dbFile);
+    try {
+      db.pragma("ignore_check_constraints = ON");
+      db.prepare(
+        `INSERT INTO mudae_watch_deliveries (
+           guild_id, message_id, delivery_state, reservation_id,
+           completed_at, created_at, updated_at
+         ) VALUES (?, ?, 'reserved', NULL, ?, ?, ?)`,
+      ).run(
+        "111111111111111111",
+        "222222222222222222",
+        "2026-01-01T00:00:00.000Z",
+        "not-a-timestamp",
+        "2026-01-01T00:00:00.000Z",
+      );
+      db.pragma("ignore_check_constraints = OFF");
+
+      expect(validateV7Schema(db).join(" ")).toMatch(
+        /invalid timestamps|invalid delivery state/,
+      );
+      expect(detectDatabaseSchema(db)).toBe("unknown");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects internal delivery history above its per-guild cap", () => {
+    const dbFile = freshDatabase();
+    const storage = new BotStorage({ dbFile });
+    storage.initStorage();
+    storage.ensureGuild("111111111111111111");
+    storage.close();
+
+    const db = new Database(dbFile);
+    try {
+      db.prepare(
+        `WITH RECURSIVE sequence(value) AS (
+           SELECT 1
+           UNION ALL
+           SELECT value + 1 FROM sequence WHERE value <= 10000
+         )
+         INSERT INTO mudae_watch_deliveries (
+           guild_id, message_id, delivery_state, reservation_id,
+           completed_at, created_at, updated_at
+         )
+         SELECT ?, printf('%018d', 100000000000000000 + value),
+                'delivered', NULL, ?, ?, ?
+         FROM sequence`,
+      ).run(
+        "111111111111111111",
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:00.000Z",
+      );
+
+      expect(validateV7Schema(db).join(" ")).toMatch(
+        /exceeds the per-guild record limit/,
+      );
+      expect(detectDatabaseSchema(db)).toBe("unknown");
     } finally {
       db.close();
     }
@@ -146,7 +218,7 @@ describe("schema v6", () => {
       db.exec("DROP TABLE ticket_events");
       db.exec(table.sql.replace("'creation_reserved'", "'CREATION_RESERVED'"));
       db.exec(index.sql);
-      expect(validateV6Schema(db).join(" ")).toMatch(
+      expect(validateV7Schema(db).join(" ")).toMatch(
         /ticket_events SQL does not match/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -179,7 +251,7 @@ describe("schema v6", () => {
         "2026-01-01T00:00:00.000Z",
       );
       db.pragma("ignore_check_constraints = OFF");
-      expect(validateV6Schema(db).join(" ")).toMatch(
+      expect(validateV7Schema(db).join(" ")).toMatch(
         /invalid or oversized JSON/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -220,7 +292,7 @@ describe("schema v6", () => {
         );
         db.pragma("ignore_check_constraints = OFF");
 
-        expect(validateV6Schema(db).join(" ")).toMatch(/non-text data/);
+        expect(validateV7Schema(db).join(" ")).toMatch(/non-text data/);
         expect(detectDatabaseSchema(db)).toBe("unknown");
       } finally {
         db.close();
@@ -252,7 +324,7 @@ describe("schema v6", () => {
         "2026-01-01T00:00:00.000Z",
       );
 
-      expect(validateV6Schema(db).join(" ")).toMatch(
+      expect(validateV7Schema(db).join(" ")).toMatch(
         /enabled application form does not have 1-5 fields/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -460,6 +532,26 @@ describe("schema v6", () => {
     expect(fs.readFileSync(dbFile)).toEqual(before);
     expect(validateDatabaseFile(dbFile, { expect: 5 }).schema).toBe(
       "legacy-v5",
+    );
+  });
+
+  it("normal startup read-only classifies and refuses schema v6 unchanged", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "v6.db");
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV6Schema(db, "2026-01-01T00:00:00.000Z");
+    db.close();
+    const before = fs.readFileSync(dbFile);
+
+    const storage = new BotStorage({ dbFile });
+    expect(() => storage.initStorage()).toThrow(
+      /schema v6 requires an explicit migration/i,
+    );
+    storage.close();
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 6 }).schema).toBe(
+      "legacy-v6",
     );
   });
 

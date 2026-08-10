@@ -54,14 +54,21 @@ import {
 } from "./metric-keys.js";
 import {
   detectDatabaseSchema,
-  initializeV6Schema,
-  validateV6Schema,
+  initializeV7Schema,
+  validateV7Schema,
 } from "./schema.js";
 import { GuildOperationalRepository } from "./operational-repository.js";
 import { GuildAccessRepository } from "./access-repository.js";
 import { TicketDepartmentRepository } from "./ticket-department-repository.js";
 import { SuggestionRepository } from "./suggestion-repository.js";
 import { RestrictedPingRepository } from "./restricted-ping-repository.js";
+import {
+  MudaeWatchDeliveryRepository,
+  pruneAllMudaeWatchDeliveries,
+  type MudaeWatchDeliveryOutcome,
+  type MudaeWatchDeliveryRecord,
+  type MudaeWatchDeliveryReservationResult,
+} from "./mudae-watch-delivery-repository.js";
 import {
   ApplicationRepository,
   type ApplicationListFilter,
@@ -197,7 +204,7 @@ export class BotStorage {
       const memory = new Database(":memory:", { timeout: 5_000 });
       try {
         memory.pragma("foreign_keys = ON");
-        initializeV6Schema(memory, utcNow());
+        initializeV7Schema(memory, utcNow());
         this.db = memory;
       } catch (error) {
         memory.close();
@@ -223,7 +230,7 @@ export class BotStorage {
 
     if (schema === "legacy-v1") {
       throw new Error(
-        "Database schema v1 is not supported by v6 startup. Upgrade through the final v4 release to schema v2, create an offline backup, then run the v6 migration command.",
+        "Database schema v1 is not supported by v7 startup. Upgrade through the final v4 release to schema v2, create an offline backup, then run the v7 migration command.",
       );
     }
     if (schema === "legacy-v2") {
@@ -246,6 +253,11 @@ export class BotStorage {
         `Database schema v5 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
       );
     }
+    if (schema === "legacy-v6") {
+      throw new Error(
+        `Database schema v6 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
+      );
+    }
     if (schema === "unknown") {
       throw new Error(
         "Database schema is unknown or incomplete; startup refused without modifying it",
@@ -256,9 +268,9 @@ export class BotStorage {
     try {
       writable.pragma("foreign_keys = ON");
       if (schema === "empty") {
-        initializeV6Schema(writable, utcNow());
+        initializeV7Schema(writable, utcNow());
       } else {
-        const issues = validateV6Schema(writable);
+        const issues = validateV7Schema(writable);
         if (issues.length > 0) {
           throw new Error(
             `Database changed after read-only classification: ${issues.join("; ")}`,
@@ -279,6 +291,10 @@ export class BotStorage {
       this.db.close();
     }
     this.db = null;
+  }
+
+  public pruneMudaeWatchDeliveries(): number {
+    return pruneAllMudaeWatchDeliveries(this.requireDatabase());
   }
 
   public forGuild(guildId: string): GuildStorage {
@@ -744,6 +760,7 @@ export class BotStorage {
         "metrics",
         ...PHASE2_GUILD_TABLES,
         ...RESTRICTED_PING_GUILD_TABLES,
+        "mudae_watch_deliveries",
       ] as const) {
         if (this.countGuildRows(table, normalized) !== 0) {
           throw new Error(`Guild purge left rows in ${table}`);
@@ -879,6 +896,10 @@ export class BotStorage {
         "restricted_ping_events",
         guildId,
       ),
+      mudaeWatchDeliveries: this.countGuildRows(
+        "mudae_watch_deliveries",
+        guildId,
+      ),
     };
   }
 
@@ -930,7 +951,8 @@ export class BotStorage {
       | "guild_settings"
       | "metrics"
       | (typeof PHASE2_GUILD_TABLES)[number]
-      | (typeof RESTRICTED_PING_GUILD_TABLES)[number],
+      | (typeof RESTRICTED_PING_GUILD_TABLES)[number]
+      | "mudae_watch_deliveries",
     guildId: string,
   ): number {
     const row = this.requireDatabase()
@@ -947,6 +969,7 @@ export class GuildStorage {
   private readonly suggestions: SuggestionRepository;
   private readonly applications: ApplicationRepository;
   private readonly restrictedPings: RestrictedPingRepository;
+  private readonly mudaeWatchDeliveries: MudaeWatchDeliveryRepository;
 
   public constructor(
     private readonly db: Database.Database,
@@ -959,6 +982,38 @@ export class GuildStorage {
     this.suggestions = new SuggestionRepository(db, guildId);
     this.applications = new ApplicationRepository(db, guildId);
     this.restrictedPings = new RestrictedPingRepository(db, guildId);
+    this.mudaeWatchDeliveries = new MudaeWatchDeliveryRepository(db, guildId);
+  }
+
+  public getMudaeWatchDelivery(
+    messageId: string,
+  ): MudaeWatchDeliveryRecord | null {
+    return this.mudaeWatchDeliveries.getDelivery(messageId);
+  }
+
+  public countMudaeWatchDeliveries(): number {
+    return this.mudaeWatchDeliveries.countDeliveries();
+  }
+
+  public reserveMudaeWatchDelivery(
+    messageId: string,
+  ): MudaeWatchDeliveryReservationResult {
+    return this.mudaeWatchDeliveries.reserveDelivery(messageId);
+  }
+
+  public completeMudaeWatchDelivery(
+    reservationId: string,
+    outcome: MudaeWatchDeliveryOutcome,
+  ): MudaeWatchDeliveryRecord | null {
+    return this.mudaeWatchDeliveries.completeDelivery(reservationId, outcome);
+  }
+
+  public releaseMudaeWatchDelivery(reservationId: string): boolean {
+    return this.mudaeWatchDeliveries.releaseDelivery(reservationId);
+  }
+
+  public pruneMudaeWatchDeliveries(): number {
+    return this.mudaeWatchDeliveries.pruneDeliveries();
   }
 
   public grantRoleCapability(

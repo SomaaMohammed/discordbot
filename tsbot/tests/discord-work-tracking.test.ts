@@ -92,4 +92,45 @@ describe("Discord work tracking", () => {
     await expect(lifecycle?.drain(100)).resolves.toBe(true);
     expect(runtime.forGuild).not.toHaveBeenCalled();
   });
+
+  it("drains private watcher message-update work during shutdown", async () => {
+    const watcherWork = deferred<"duplicate">();
+    const processMessage = vi.fn(() => watcherWork.promise);
+    const runtime = {
+      forGuild: vi.fn(async () => null),
+      privateMudaeWatcher: {
+        enabled: true,
+        isConfiguredLocation: vi.fn(() => true),
+        isTrustedAuthor: vi.fn(() => true),
+        isCandidate: vi.fn(() => true),
+        processMessage,
+      },
+    } as unknown as BotRuntime;
+    const client = createDiscordClient(runtime);
+    clients.push(client);
+    const message = {
+      partial: false,
+      guildId: GUILD_ID,
+      guild: { id: GUILD_ID },
+      channelId: "223456789012345678",
+      channel: { guildId: GUILD_ID },
+      author: { id: "323456789012345678", bot: true },
+    } as unknown as Message;
+
+    (client as unknown as EventEmitter).emit("messageUpdate", message, message);
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledOnce());
+
+    const lifecycle = getDiscordClientWorkLifecycle(client);
+    lifecycle?.stop();
+    let completed = false;
+    const drain = lifecycle?.drain(1_000).then((result) => {
+      completed = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(completed).toBe(false);
+
+    watcherWork.resolve("duplicate");
+    await expect(drain).resolves.toBe(true);
+  });
 });

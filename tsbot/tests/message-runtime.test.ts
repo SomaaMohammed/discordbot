@@ -14,6 +14,7 @@ import {
   REPLY_MODERATION_MINUTES,
   canTimeoutTarget,
   handleMessageCreate,
+  handleMessageUpdate,
   handleReactionAdd,
   wireMessageRuntime,
 } from "../src/message-runtime.js";
@@ -630,6 +631,107 @@ describe("moderation eligibility", () => {
   });
 });
 
+describe("private watcher routing", () => {
+  it("routes a trusted bot candidate before the normal bot-message return", async () => {
+    const harness = createHarness();
+    const processMessage = vi.fn(async () => "native-forwarded" as const);
+    const watcher = {
+      isCandidate: vi.fn(() => true),
+      processMessage,
+    };
+    Object.assign(harness.processRuntime, { privateMudaeWatcher: watcher });
+    Object.assign(harness.message.author, {
+      id: "723456789012345679",
+      bot: true,
+      username: "Mudae",
+    });
+
+    await handleMessageCreate(harness.message, harness.processRuntime);
+
+    expect(watcher.isCandidate).toHaveBeenCalledWith(harness.message);
+    expect(processMessage).toHaveBeenCalledWith(harness.message);
+    expect(harness.processRuntime.forGuild).not.toHaveBeenCalled();
+  });
+
+  it("keeps untrusted bot messages out of normal conversation processing", async () => {
+    const harness = createHarness();
+    const processMessage = vi.fn();
+    const watcher = {
+      isCandidate: vi.fn(() => false),
+      processMessage,
+    };
+    Object.assign(harness.processRuntime, { privateMudaeWatcher: watcher });
+    Object.assign(harness.message.author, {
+      id: "823456789012345679",
+      bot: true,
+      username: "Mudae",
+    });
+
+    await handleMessageCreate(harness.message, harness.processRuntime);
+
+    expect(watcher.isCandidate).toHaveBeenCalledWith(harness.message);
+    expect(processMessage).not.toHaveBeenCalled();
+    expect(harness.processRuntime.forGuild).not.toHaveBeenCalled();
+  });
+
+  it("fetches configured partial updates and revalidates the full message", async () => {
+    const harness = createHarness();
+    const fullMessage = {
+      ...harness.message,
+      partial: false,
+      author: { id: "723456789012345679", bot: true },
+    } as unknown as Message;
+    const fetch = vi.fn(async () => fullMessage);
+    const updated = {
+      partial: true,
+      guildId: GUILD_ID,
+      channelId: CHANNEL_ID,
+      author: { id: "723456789012345679", bot: true },
+      fetch,
+    } as unknown as Message;
+    const processMessage = vi.fn(async () => "native-forwarded" as const);
+    const watcher = {
+      enabled: true,
+      isConfiguredLocation: vi.fn(() => true),
+      isTrustedAuthor: vi.fn(
+        (author: { id: string }) => author.id === "723456789012345679",
+      ),
+      isCandidate: vi.fn((message: Message) => message === fullMessage),
+      processMessage,
+    };
+    Object.assign(harness.processRuntime, { privateMudaeWatcher: watcher });
+
+    await handleMessageUpdate(updated, updated, harness.processRuntime);
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(watcher.isCandidate).toHaveBeenCalledWith(fullMessage);
+    expect(processMessage).toHaveBeenCalledWith(fullMessage);
+    expect(harness.processRuntime.forGuild).not.toHaveBeenCalled();
+  });
+
+  it("does not fetch partial updates outside configured locations", async () => {
+    const harness = createHarness();
+    const fetch = vi.fn();
+    const updated = {
+      partial: true,
+      guildId: GUILD_ID,
+      channelId: CHANNEL_ID,
+      author: null,
+      fetch,
+    } as unknown as Message;
+    const watcher = {
+      enabled: true,
+      isConfiguredLocation: vi.fn(() => false),
+    };
+    Object.assign(harness.processRuntime, { privateMudaeWatcher: watcher });
+
+    await handleMessageUpdate(updated, updated, harness.processRuntime);
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(harness.processRuntime.forGuild).not.toHaveBeenCalled();
+  });
+});
+
 describe("reaction activity metrics", () => {
   it("records opted-in same-guild reactions and rejects cross-guild messages", async () => {
     const harness = createHarness();
@@ -667,7 +769,7 @@ describe("reaction activity metrics", () => {
 });
 
 describe("runtime wiring", () => {
-  it("registers only message and reaction handlers", () => {
+  it("registers create, update, and reaction handlers", () => {
     const harness = createHarness();
     const events: string[] = [];
     const client = {
@@ -679,6 +781,10 @@ describe("runtime wiring", () => {
 
     wireMessageRuntime(client, harness.processRuntime);
 
-    expect(events).toEqual(["messageCreate", "messageReactionAdd"]);
+    expect(events).toEqual([
+      "messageCreate",
+      "messageUpdate",
+      "messageReactionAdd",
+    ]);
   });
 });

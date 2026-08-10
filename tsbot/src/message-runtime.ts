@@ -6,6 +6,7 @@ import {
   type Message,
   type MessageMentionOptions,
   type MessageReaction,
+  type PartialMessage,
   type PartialMessageReaction,
   type PartialUser,
   type User,
@@ -20,6 +21,8 @@ import { logError, logInfo } from "./logging.js";
 import { buildConversationReply, escapeUserText } from "./reply-catalog.js";
 import type { BotRuntime, GuildRuntime } from "./runtime.js";
 import { AsyncWorkTracker } from "./discord/work-tracker.js";
+import { describeMudaeDeliveryFailure } from "./mudae-watch-delivery.js";
+import type { PrivateMudaeWatcher } from "./mudae-watch-service.js";
 import type { UserActivityMetric } from "./types.js";
 
 export const REPLY_MODERATION_MINUTES = 1;
@@ -85,6 +88,17 @@ export function wireMessageRuntime(
       }),
   );
 
+  client.on("messageUpdate", (oldMessage, newMessage) =>
+    workTracker
+      .run(() => handleMessageUpdate(oldMessage, newMessage, runtime))
+      .catch((error) => {
+        logPrivateMudaeRuntimeFailure(
+          "Tracked private watcher update failed",
+          error,
+        );
+      }),
+  );
+
   client.on("messageReactionAdd", (reaction, user) =>
     workTracker
       .run(() => handleReactionAdd(reaction, user, runtime))
@@ -102,6 +116,10 @@ export async function handleMessageCreate(
   processRuntime: BotRuntime,
 ): Promise<void> {
   if (message.author.bot) {
+    await processPrivateMudaeMessage(
+      message,
+      processRuntime.privateMudaeWatcher ?? null,
+    );
     return;
   }
 
@@ -193,6 +211,46 @@ export async function handleMessageCreate(
       incrementUserMetricSafely(runtime, member.id, "messages_sent");
     }
   }
+}
+
+export async function handleMessageUpdate(
+  oldMessage: Message | PartialMessage,
+  newMessage: Message | PartialMessage,
+  processRuntime: BotRuntime,
+): Promise<void> {
+  const watcher = processRuntime.privateMudaeWatcher;
+  if (
+    !watcher?.enabled ||
+    !watcher.isConfiguredLocation(newMessage.guildId, newMessage.channelId)
+  ) {
+    return;
+  }
+
+  const knownAuthors = [newMessage.author, oldMessage.author].filter(
+    (author) => author !== null,
+  );
+  if (knownAuthors.some((author) => !watcher.isTrustedAuthor(author))) {
+    return;
+  }
+
+  let message: Message;
+  if (newMessage.partial) {
+    const fetched = await newMessage.fetch().catch((error) => {
+      logPrivateMudaeRuntimeFailure(
+        "Private watcher could not fetch an updated message",
+        error,
+      );
+      return null;
+    });
+    if (!fetched) {
+      return;
+    }
+    message = fetched;
+  } else {
+    message = newMessage;
+  }
+
+  await processPrivateMudaeMessage(message, watcher);
 }
 
 export async function handleReactionAdd(
@@ -690,6 +748,33 @@ function truncateCodePoints(value: string, maximum: number): string {
 
 function normalizeFiniteNumber(value: number | null): number | null {
   return value !== null && Number.isFinite(value) ? value : null;
+}
+
+async function processPrivateMudaeMessage(
+  message: Message,
+  watcher: PrivateMudaeWatcher | null,
+): Promise<void> {
+  if (!watcher) {
+    return;
+  }
+  try {
+    if (watcher.isCandidate(message)) {
+      await watcher.processMessage(message);
+    }
+  } catch (error) {
+    logPrivateMudaeRuntimeFailure(
+      "Private watcher message processing failed",
+      error,
+    );
+  }
+}
+
+function logPrivateMudaeRuntimeFailure(message: string, error: unknown): void {
+  const failure = describeMudaeDeliveryFailure(error);
+  logError("private-mudae-watch", message, {
+    failureName: failure.name,
+    ...(failure.code === null ? {} : { failureCode: failure.code }),
+  });
 }
 
 function recordCommandMetricSafely(

@@ -2,6 +2,13 @@ import { DateTime } from "luxon";
 import { getNow } from "./time.js";
 import type { GuildSettings, ProcessConfig } from "./types.js";
 import { BotStorage, type GuildStorage } from "./storage/db.js";
+import { logError, logInfo, logWarn } from "./logging.js";
+import { loadPrivateMudaeWatchConfig } from "./mudae-watch-config.js";
+import {
+  PrivateMudaeWatcher,
+  type PrivateMudaeWatchDeduplicationStore,
+  type PrivateMudaeWatchLogger,
+} from "./mudae-watch-service.js";
 
 export interface GuildRuntime {
   readonly guildId: string;
@@ -21,6 +28,7 @@ export interface GuildRuntime {
 export interface BotRuntime {
   readonly processConfig: ProcessConfig;
   readonly storage: BotStorage;
+  readonly privateMudaeWatcher: PrivateMudaeWatcher | null;
   readonly randomInt: (maxExclusive: number) => number;
   forGuild: (guildId: string) => Promise<GuildRuntime | null>;
   invalidateGuild: (guildId: string) => void;
@@ -28,10 +36,14 @@ export interface BotRuntime {
 
 export function createRuntime(
   processConfig: ProcessConfig,
-  _repoRoot?: string,
+  applicationRoot?: string,
 ): BotRuntime {
   const storage = new BotStorage({ dbFile: processConfig.dbFile });
   storage.initStorage();
+  storage.pruneMudaeWatchDeliveries();
+  const privateMudaeWatcher = applicationRoot
+    ? createPrivateMudaeWatcher(storage, applicationRoot)
+    : null;
   const guildGenerations = new Map<string, number>();
   const randomInt = (maxExclusive: number): number =>
     Math.floor(Math.random() * Math.max(maxExclusive, 1));
@@ -39,6 +51,7 @@ export function createRuntime(
   const runtime: BotRuntime = {
     processConfig,
     storage,
+    privateMudaeWatcher,
     randomInt,
     async forGuild(guildId: string): Promise<GuildRuntime | null> {
       const normalizedGuildId = String(guildId).trim();
@@ -139,3 +152,73 @@ export function createRuntime(
   };
   return runtime;
 }
+
+function createPrivateMudaeWatcher(
+  storage: BotStorage,
+  applicationRoot: string,
+): PrivateMudaeWatcher | null {
+  const loaded = loadPrivateMudaeWatchConfig(applicationRoot);
+  if (loaded.status === "missing") {
+    return null;
+  }
+  if (loaded.status === "invalid") {
+    logError(
+      "private-mudae-watch",
+      "Private watcher configuration is invalid; watcher disabled",
+      { issueCount: loaded.issues.length },
+    );
+    return null;
+  }
+
+  const channelCount = loaded.config.locations.reduce(
+    (total, location) => total + location.channelIds.length,
+    0,
+  );
+  logInfo("private-mudae-watch", "Private watcher configuration loaded", {
+    enabled: loaded.config.enabled,
+    guildCount: loaded.config.locations.length,
+    channelCount,
+    seriesCount: loaded.config.series.length,
+  });
+
+  return new PrivateMudaeWatcher(loaded.config, {
+    deduplicationStore: createPrivateMudaeDeduplicationStore(storage),
+    logger: PRIVATE_MUDAE_WATCH_LOGGER,
+  });
+}
+
+function createPrivateMudaeDeduplicationStore(
+  storage: BotStorage,
+): PrivateMudaeWatchDeduplicationStore {
+  return {
+    reserveMudaeWatchNotification(reservation) {
+      const guild = storage.getGuild(reservation.guildId);
+      if (!guild || guild.leftAt !== null) {
+        throw new Error("Configured watcher guild is not currently active");
+      }
+      const result = storage
+        .forGuild(reservation.guildId)
+        .reserveMudaeWatchDelivery(reservation.sourceMessageId);
+      return result.status === "duplicate"
+        ? { status: "duplicate" }
+        : { status: "reserved", reservationId: result.reservationId };
+    },
+    completeMudaeWatchNotification(guildId, reservationId, outcome) {
+      if (!storage.getGuild(guildId)) {
+        return;
+      }
+      storage
+        .forGuild(guildId)
+        .completeMudaeWatchDelivery(reservationId, outcome);
+    },
+  };
+}
+
+const PRIVATE_MUDAE_WATCH_LOGGER: PrivateMudaeWatchLogger = {
+  warn(message, metadata): void {
+    logWarn("private-mudae-watch", message, { ...metadata });
+  },
+  error(message, metadata): void {
+    logError("private-mudae-watch", message, { ...metadata });
+  },
+};

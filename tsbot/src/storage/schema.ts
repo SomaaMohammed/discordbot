@@ -6,7 +6,8 @@ import {
 } from "../guild-settings.js";
 import { isActiveMetricKey } from "./metric-keys.js";
 
-export const CURRENT_SCHEMA_VERSION = 6 as const;
+export const CURRENT_SCHEMA_VERSION = 7 as const;
+export const LEGACY_V6_SCHEMA_VERSION = 6 as const;
 export const LEGACY_V5_SCHEMA_VERSION = 5 as const;
 export const LEGACY_V4_SCHEMA_VERSION = 4 as const;
 export const LEGACY_V3_SCHEMA_VERSION = 3 as const;
@@ -46,7 +47,8 @@ export type DatabaseSchemaKind =
   | "legacy-v3"
   | "legacy-v4"
   | "legacy-v5"
-  | "current-v6"
+  | "legacy-v6"
+  | "current-v7"
   | "unknown";
 
 export const SCHEMA_MIGRATIONS_TABLE_SQL = `
@@ -1229,6 +1231,44 @@ CREATE TABLE restricted_ping_events (
 )
 `;
 
+export const MAX_MUDAE_WATCH_DELIVERIES_PER_GUILD = 10_000;
+
+export const MUDAE_WATCH_DELIVERIES_TABLE_SQL = `
+CREATE TABLE mudae_watch_deliveries (
+  guild_id TEXT NOT NULL,
+  message_id TEXT NOT NULL
+    CHECK (
+      length(message_id) BETWEEN 17 AND 20
+      AND message_id NOT GLOB '*[^0-9]*'
+    ),
+  delivery_state TEXT NOT NULL
+    CHECK (delivery_state IN ('reserved', 'delivered', 'failed')),
+  reservation_id TEXT
+    CHECK (
+      reservation_id IS NULL OR (
+        length(reservation_id) BETWEEN 8 AND 24
+        AND reservation_id NOT GLOB '*[^A-Za-z0-9_-]*'
+      )
+    ),
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, message_id),
+  CHECK (
+    (
+      delivery_state = 'reserved'
+      AND reservation_id IS NOT NULL
+      AND completed_at IS NULL
+    ) OR (
+      delivery_state IN ('delivered', 'failed')
+      AND reservation_id IS NULL
+      AND completed_at IS NOT NULL
+    )
+  ),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
 export const CAPABILITY_GRANTS_GUILD_CAPABILITY_INDEX_SQL = `
 CREATE INDEX idx_capability_grants_guild_capability
 ON delegated_capability_grants (guild_id, active, capability, principal_type, principal_id)
@@ -1334,6 +1374,19 @@ ON restricted_ping_events (guild_id, role_id, event_number DESC)
 export const RESTRICTED_PING_EVENTS_SUCCESS_NUMBER_INDEX_SQL = `
 CREATE INDEX idx_restricted_ping_events_success_number
 ON restricted_ping_events (guild_id, event_type, event_number DESC)
+`;
+
+export const MUDAE_WATCH_DELIVERIES_GUILD_STATE_UPDATED_INDEX_SQL = `
+CREATE INDEX idx_mudae_watch_deliveries_guild_state_updated
+ON mudae_watch_deliveries (
+  guild_id, delivery_state, updated_at DESC, message_id
+)
+`;
+
+export const MUDAE_WATCH_DELIVERIES_RESERVATION_INDEX_SQL = `
+CREATE UNIQUE INDEX idx_mudae_watch_deliveries_reservation
+ON mudae_watch_deliveries (guild_id, reservation_id)
+WHERE reservation_id IS NOT NULL
 `;
 
 export const V5_TABLE_NAMES = [
@@ -1482,6 +1535,30 @@ const V6_INDEX_SQL: Record<(typeof V6_EXPLICIT_INDEX_NAMES)[number], string> = {
     RESTRICTED_PING_EVENTS_ROLE_NUMBER_INDEX_SQL,
   idx_restricted_ping_events_success_number:
     RESTRICTED_PING_EVENTS_SUCCESS_NUMBER_INDEX_SQL,
+};
+
+export const V7_TABLE_NAMES = [
+  ...V6_TABLE_NAMES,
+  "mudae_watch_deliveries",
+] as const;
+
+export const V7_EXPLICIT_INDEX_NAMES = [
+  ...V6_EXPLICIT_INDEX_NAMES,
+  "idx_mudae_watch_deliveries_guild_state_updated",
+  "idx_mudae_watch_deliveries_reservation",
+] as const;
+
+const V7_TABLE_SQL: Record<(typeof V7_TABLE_NAMES)[number], string> = {
+  ...V6_TABLE_SQL,
+  mudae_watch_deliveries: MUDAE_WATCH_DELIVERIES_TABLE_SQL,
+};
+
+const V7_INDEX_SQL: Record<(typeof V7_EXPLICIT_INDEX_NAMES)[number], string> = {
+  ...V6_INDEX_SQL,
+  idx_mudae_watch_deliveries_guild_state_updated:
+    MUDAE_WATCH_DELIVERIES_GUILD_STATE_UPDATED_INDEX_SQL,
+  idx_mudae_watch_deliveries_reservation:
+    MUDAE_WATCH_DELIVERIES_RESERVATION_INDEX_SQL,
 };
 
 export const V1_TABLE_NAMES = [
@@ -1774,6 +1851,25 @@ export function createV6Objects(db: Database.Database): void {
   createV6OperationalObjects(db);
 }
 
+/** Adds only the internal delivery-deduplication objects introduced by schema v7. */
+export function createV7OperationalObjects(db: Database.Database): void {
+  for (const table of V7_TABLE_NAMES) {
+    if (!(V6_TABLE_NAMES as readonly string[]).includes(table)) {
+      db.exec(V7_TABLE_SQL[table]);
+    }
+  }
+  for (const index of V7_EXPLICIT_INDEX_NAMES) {
+    if (!(V6_EXPLICIT_INDEX_NAMES as readonly string[]).includes(index)) {
+      db.exec(V7_INDEX_SQL[index]);
+    }
+  }
+}
+
+export function createV7Objects(db: Database.Database): void {
+  createV6Objects(db);
+  createV7OperationalObjects(db);
+}
+
 export function recordV4SchemaVersion(
   db: Database.Database,
   appliedAt: string,
@@ -1790,6 +1886,15 @@ export function recordV5SchemaVersion(
   db.prepare(
     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
   ).run(LEGACY_V5_SCHEMA_VERSION, appliedAt);
+}
+
+export function recordV6SchemaVersion(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  db.prepare(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+  ).run(LEGACY_V6_SCHEMA_VERSION, appliedAt);
 }
 
 export function recordCurrentSchemaVersion(
@@ -1854,8 +1959,23 @@ export function initializeV6Schema(
 ): void {
   const initialize = db.transaction(() => {
     createV6Objects(db);
-    recordCurrentSchemaVersion(db, appliedAt);
+    recordV6SchemaVersion(db, appliedAt);
     const issues = validateV6Schema(db);
+    if (issues.length > 0) {
+      throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
+    }
+  });
+  initialize.immediate();
+}
+
+export function initializeV7Schema(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  const initialize = db.transaction(() => {
+    createV7Objects(db);
+    recordCurrentSchemaVersion(db, appliedAt);
+    const issues = validateV7Schema(db);
     if (issues.length > 0) {
       throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
     }
@@ -1883,8 +2003,11 @@ export function detectDatabaseSchema(
     .map((row) => row.name)
     .sort();
 
+  if (sameStrings(tables, [...V7_TABLE_NAMES].sort())) {
+    return validateV7Schema(db).length === 0 ? "current-v7" : "unknown";
+  }
   if (sameStrings(tables, [...V6_TABLE_NAMES].sort())) {
-    return validateV6Schema(db).length === 0 ? "current-v6" : "unknown";
+    return validateV6Schema(db).length === 0 ? "legacy-v6" : "unknown";
   }
   if (sameStrings(tables, [...V5_TABLE_NAMES].sort())) {
     return validateV5Schema(db).length === 0 ? "legacy-v5" : "unknown";
@@ -2168,18 +2291,18 @@ export function validateV6Schema(db: Database.Database): string[] {
     .all() as Array<{ version: number; applied_at: string }>;
   const versionNumbers = versions.map((row) => row.version);
   const validVersionSequence = [
-    [CURRENT_SCHEMA_VERSION],
-    [LEGACY_V5_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION],
+    [LEGACY_V6_SCHEMA_VERSION],
+    [LEGACY_V5_SCHEMA_VERSION, LEGACY_V6_SCHEMA_VERSION],
     [
       LEGACY_V4_SCHEMA_VERSION,
       LEGACY_V5_SCHEMA_VERSION,
-      CURRENT_SCHEMA_VERSION,
+      LEGACY_V6_SCHEMA_VERSION,
     ],
     [
       LEGACY_V3_SCHEMA_VERSION,
       LEGACY_V4_SCHEMA_VERSION,
       LEGACY_V5_SCHEMA_VERSION,
-      CURRENT_SCHEMA_VERSION,
+      LEGACY_V6_SCHEMA_VERSION,
     ],
   ].some(
     (expected) =>
@@ -2198,6 +2321,68 @@ export function validateV6Schema(db: Database.Database): string[] {
   validateV3Data(db, issues);
   validateV5Data(db, issues);
   validateV6Data(db, issues);
+  validateDatabaseHealth(db, issues);
+  return issues;
+}
+
+export function validateV7Schema(db: Database.Database): string[] {
+  const issues = validateExactObjects(
+    db,
+    [...V7_TABLE_NAMES],
+    [...V7_EXPLICIT_INDEX_NAMES],
+  );
+  if (issues.length > 0) {
+    return issues;
+  }
+
+  validateSqlDefinitions(db, V7_TABLE_SQL, "table", issues);
+  validateSqlDefinitions(db, V7_INDEX_SQL, "index", issues);
+
+  const versions = db
+    .prepare(
+      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
+    )
+    .all() as Array<{ version: number; applied_at: string }>;
+  const versionNumbers = versions.map((row) => row.version);
+  const validVersionSequence = [
+    [CURRENT_SCHEMA_VERSION],
+    [LEGACY_V6_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION],
+    [
+      LEGACY_V5_SCHEMA_VERSION,
+      LEGACY_V6_SCHEMA_VERSION,
+      CURRENT_SCHEMA_VERSION,
+    ],
+    [
+      LEGACY_V4_SCHEMA_VERSION,
+      LEGACY_V5_SCHEMA_VERSION,
+      LEGACY_V6_SCHEMA_VERSION,
+      CURRENT_SCHEMA_VERSION,
+    ],
+    [
+      LEGACY_V3_SCHEMA_VERSION,
+      LEGACY_V4_SCHEMA_VERSION,
+      LEGACY_V5_SCHEMA_VERSION,
+      LEGACY_V6_SCHEMA_VERSION,
+      CURRENT_SCHEMA_VERSION,
+    ],
+  ].some(
+    (expected) =>
+      expected.length === versionNumbers.length &&
+      expected.every((version, index) => versionNumbers[index] === version),
+  );
+  if (
+    !validVersionSequence ||
+    versions.some((row) => !isValidTimestamp(row.applied_at))
+  ) {
+    issues.push(
+      "schema_migrations must contain version 7, optionally following version 6, versions 5 and 6, versions 4 through 6, or versions 3 through 6",
+    );
+  }
+
+  validateV3Data(db, issues);
+  validateV5Data(db, issues);
+  validateV6Data(db, issues);
+  validateV7Data(db, issues);
   validateDatabaseHealth(db, issues);
   return issues;
 }
@@ -3059,6 +3244,60 @@ function validateV6Data(db: Database.Database, issues: string[]): void {
         OR length(CAST(details_json AS BLOB)) NOT BETWEEN 2 AND 4000
      LIMIT 1`,
     "restricted_ping_events contains invalid or oversized JSON",
+    issues,
+  );
+}
+
+function validateV7Data(db: Database.Database, issues: string[]): void {
+  validateTextColumnTypes(
+    db,
+    "mudae_watch_deliveries",
+    ["guild_id", "message_id", "delivery_state", "created_at", "updated_at"],
+    ["reservation_id", "completed_at"],
+    issues,
+  );
+  validateTimestampColumns(
+    db,
+    "mudae_watch_deliveries",
+    ["created_at", "updated_at"],
+    ["completed_at"],
+    issues,
+  );
+  validateGuildForeignKey(db, "mudae_watch_deliveries", issues);
+
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM mudae_watch_deliveries
+     WHERE length(message_id) NOT BETWEEN 17 AND 20
+        OR message_id GLOB '*[^0-9]*'
+        OR delivery_state NOT IN ('reserved', 'delivered', 'failed')
+        OR (reservation_id IS NOT NULL AND (
+          length(reservation_id) NOT BETWEEN 8 AND 24
+          OR reservation_id GLOB '*[^A-Za-z0-9_-]*'
+        ))
+        OR NOT (
+          (
+            delivery_state = 'reserved'
+            AND reservation_id IS NOT NULL
+            AND completed_at IS NULL
+          ) OR (
+            delivery_state IN ('delivered', 'failed')
+            AND reservation_id IS NULL
+            AND completed_at IS NOT NULL
+          )
+        )
+     LIMIT 1`,
+    "mudae_watch_deliveries contains invalid delivery state",
+    issues,
+  );
+
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM mudae_watch_deliveries
+     GROUP BY guild_id
+     HAVING COUNT(*) > ${MAX_MUDAE_WATCH_DELIVERIES_PER_GUILD}
+     LIMIT 1`,
+    "mudae_watch_deliveries exceeds the per-guild record limit",
     issues,
   );
 }

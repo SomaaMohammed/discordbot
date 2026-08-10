@@ -957,6 +957,7 @@ export interface GuildPurgeResult {
   restrictedPingMappings: number;
   restrictedPingUserCooldowns: number;
   restrictedPingEvents: number;
+  mudaeWatchDeliveries: number;
 }
 
 export const USER_ACTIVITY_METRICS = [

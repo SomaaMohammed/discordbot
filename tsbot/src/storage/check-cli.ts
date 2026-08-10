@@ -2,12 +2,12 @@ import { validateDatabaseFile } from "./migration.js";
 
 interface CheckArguments {
   dbFile: string;
-  expect: 2 | 3 | 4 | 5 | 6;
+  expect: 2 | 3 | 4 | 5 | 6 | 7;
 }
 
 function parseArguments(argv: string[]): CheckArguments {
   let dbFile: string | null = null;
-  let expect: 2 | 3 | 4 | 5 | 6 | undefined;
+  let expect: 2 | 3 | 4 | 5 | 6 | 7 | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     const value = argv[index + 1];
@@ -22,16 +22,17 @@ function parseArguments(argv: string[]): CheckArguments {
         value === "3" ||
         value === "4" ||
         value === "5" ||
-        value === "6")
+        value === "6" ||
+        value === "7")
     ) {
-      expect = Number(value) as 2 | 3 | 4 | 5 | 6;
+      expect = Number(value) as 2 | 3 | 4 | 5 | 6 | 7;
       index += 1;
       continue;
     }
     throw new Error(`Unknown or incomplete db:check option: ${argument}`);
   }
   if (!dbFile || expect === undefined) {
-    throw new Error("Usage: db:check --db <path> --expect 2|3|4|5|6");
+    throw new Error("Usage: db:check --db <path> --expect 2|3|4|5|6|7");
   }
   return { dbFile, expect };
 }
