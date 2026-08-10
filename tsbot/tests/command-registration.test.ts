@@ -22,7 +22,7 @@ describe("command guide", () => {
       expect(guide).toContain(`\`${command}\``);
     }
     expect(guide).toContain("delegated");
-    expect(guide).toContain("format-4");
+    expect(guide).toContain("format-5");
     expect(guide.length).toBeLessThanOrEqual(2_000);
   });
 });

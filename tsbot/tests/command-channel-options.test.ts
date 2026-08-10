@@ -62,6 +62,8 @@ describe("public command surface", () => {
       "suggestion",
       "application",
       "access",
+      "pingrole",
+      "restrictedping",
       "utility",
       "fun",
       "greetings",

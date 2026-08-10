@@ -54,13 +54,14 @@ import {
 } from "./metric-keys.js";
 import {
   detectDatabaseSchema,
-  initializeV5Schema,
-  validateV5Schema,
+  initializeV6Schema,
+  validateV6Schema,
 } from "./schema.js";
 import { GuildOperationalRepository } from "./operational-repository.js";
 import { GuildAccessRepository } from "./access-repository.js";
 import { TicketDepartmentRepository } from "./ticket-department-repository.js";
 import { SuggestionRepository } from "./suggestion-repository.js";
+import { RestrictedPingRepository } from "./restricted-ping-repository.js";
 import {
   ApplicationRepository,
   type ApplicationListFilter,
@@ -98,6 +99,17 @@ import type {
   SuggestionVoteCounts,
   SuggestionVoteResult,
   SuggestionVoteValue,
+  RestrictedPingAddMappingInput,
+  RestrictedPingAddMappingResult,
+  RestrictedPingCleanupResult,
+  RestrictedPingCompletionResult,
+  RestrictedPingConfigureInput,
+  RestrictedPingEvent,
+  RestrictedPingMapping,
+  RestrictedPingRemoveMappingResult,
+  RestrictedPingReservationInput,
+  RestrictedPingReservationResult,
+  RestrictedPingRoleConfiguration,
   TicketDepartment,
   TicketDepartmentDeleteResult,
   TicketDepartmentField,
@@ -116,6 +128,11 @@ import {
   PHASE2_GUILD_TABLES,
   readPhase2OperationalData,
 } from "./guild-data-v4.js";
+import {
+  deactivateRestrictedPingBindings,
+  readRestrictedPingGuildData,
+  RESTRICTED_PING_GUILD_TABLES,
+} from "./guild-data-v5.js";
 export { createOpaqueStorageId } from "./operational-repository.js";
 
 interface GuildRow {
@@ -180,7 +197,7 @@ export class BotStorage {
       const memory = new Database(":memory:", { timeout: 5_000 });
       try {
         memory.pragma("foreign_keys = ON");
-        initializeV5Schema(memory, utcNow());
+        initializeV6Schema(memory, utcNow());
         this.db = memory;
       } catch (error) {
         memory.close();
@@ -206,7 +223,7 @@ export class BotStorage {
 
     if (schema === "legacy-v1") {
       throw new Error(
-        "Database schema v1 is not supported by v5 startup. Upgrade through the final v4 release to schema v2, create an offline backup, then run the v5 migration command.",
+        "Database schema v1 is not supported by v6 startup. Upgrade through the final v4 release to schema v2, create an offline backup, then run the v6 migration command.",
       );
     }
     if (schema === "legacy-v2") {
@@ -224,6 +241,11 @@ export class BotStorage {
         `Database schema v4 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
       );
     }
+    if (schema === "legacy-v5") {
+      throw new Error(
+        `Database schema v5 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
+      );
+    }
     if (schema === "unknown") {
       throw new Error(
         "Database schema is unknown or incomplete; startup refused without modifying it",
@@ -234,9 +256,9 @@ export class BotStorage {
     try {
       writable.pragma("foreign_keys = ON");
       if (schema === "empty") {
-        initializeV5Schema(writable, utcNow());
+        initializeV6Schema(writable, utcNow());
       } else {
-        const issues = validateV5Schema(writable);
+        const issues = validateV6Schema(writable);
         if (issues.length > 0) {
           throw new Error(
             `Database changed after read-only classification: ${issues.join("; ")}`,
@@ -584,6 +606,26 @@ export class BotStorage {
           counts.applicationEvents,
           GUILD_DATA_COLLECTION_LIMITS.applicationEvents,
         ],
+        [
+          "restricted ping roles",
+          counts.restrictedPingRoles,
+          GUILD_DATA_COLLECTION_LIMITS.restrictedPingRoles,
+        ],
+        [
+          "restricted ping mappings",
+          counts.restrictedPingMappings,
+          GUILD_DATA_COLLECTION_LIMITS.restrictedPingMappings,
+        ],
+        [
+          "restricted ping user cooldowns",
+          counts.restrictedPingUserCooldowns,
+          GUILD_DATA_COLLECTION_LIMITS.restrictedPingUserCooldowns,
+        ],
+        [
+          "restricted ping events",
+          counts.restrictedPingEvents,
+          GUILD_DATA_COLLECTION_LIMITS.restrictedPingEvents,
+        ],
       ] as const;
       for (const [label, count, maximum] of boundedCollections) {
         if (count > maximum) {
@@ -611,7 +653,7 @@ export class BotStorage {
         )
         .all(normalized) as MetricRow[];
       return {
-        formatVersion: 4,
+        formatVersion: 5,
         guildId: normalized,
         exportedAt: utcNow(),
         metadata,
@@ -622,6 +664,7 @@ export class BotStorage {
           updatedAt: row.updated_at,
         })),
         ...readPhase2OperationalData(db, normalized),
+        ...readRestrictedPingGuildData(db, normalized),
       };
     });
     return exportSnapshot.deferred();
@@ -654,7 +697,10 @@ export class BotStorage {
       this.upsertSettings(normalized, reviewed, now);
       db.prepare("DELETE FROM metrics WHERE guild_id = ?").run(normalized);
       if (imported.sourceFormatVersion >= 3) {
-        for (const table of [...PHASE2_GUILD_TABLES].reverse()) {
+        for (const table of [
+          ...PHASE2_GUILD_TABLES,
+          ...RESTRICTED_PING_GUILD_TABLES,
+        ].reverse()) {
           db.prepare(`DELETE FROM ${table} WHERE guild_id = ?`).run(normalized);
         }
       }
@@ -670,6 +716,7 @@ export class BotStorage {
         insertImportedOperationalData(db, normalized, imported);
       }
       deactivatePhase2OperationalBindings(db, normalized);
+      deactivateRestrictedPingBindings(db, normalized);
       saved = reviewed;
     });
     apply.immediate();
@@ -696,6 +743,7 @@ export class BotStorage {
         "guild_settings",
         "metrics",
         ...PHASE2_GUILD_TABLES,
+        ...RESTRICTED_PING_GUILD_TABLES,
       ] as const) {
         if (this.countGuildRows(table, normalized) !== 0) {
           throw new Error(`Guild purge left rows in ${table}`);
@@ -815,6 +863,22 @@ export class BotStorage {
         guildId,
       ),
       applicationEvents: this.countGuildRows("application_events", guildId),
+      restrictedPingRoles: this.countGuildRows(
+        "restricted_ping_roles",
+        guildId,
+      ),
+      restrictedPingMappings: this.countGuildRows(
+        "restricted_ping_channels",
+        guildId,
+      ),
+      restrictedPingUserCooldowns: this.countGuildRows(
+        "restricted_ping_user_cooldowns",
+        guildId,
+      ),
+      restrictedPingEvents: this.countGuildRows(
+        "restricted_ping_events",
+        guildId,
+      ),
     };
   }
 
@@ -824,6 +888,7 @@ export class BotStorage {
       "guild_settings",
       "metrics",
       ...PHASE2_GUILD_TABLES,
+      ...RESTRICTED_PING_GUILD_TABLES,
     ] as const;
     return tables.reduce(
       (total, table) => total + this.estimateGuildTableBytes(table, guildId),
@@ -836,7 +901,8 @@ export class BotStorage {
       | "guilds"
       | "guild_settings"
       | "metrics"
-      | (typeof PHASE2_GUILD_TABLES)[number],
+      | (typeof PHASE2_GUILD_TABLES)[number]
+      | (typeof RESTRICTED_PING_GUILD_TABLES)[number],
     guildId: string,
   ): number {
     const db = this.requireDatabase();
@@ -863,7 +929,8 @@ export class BotStorage {
       | "guilds"
       | "guild_settings"
       | "metrics"
-      | (typeof PHASE2_GUILD_TABLES)[number],
+      | (typeof PHASE2_GUILD_TABLES)[number]
+      | (typeof RESTRICTED_PING_GUILD_TABLES)[number],
     guildId: string,
   ): number {
     const row = this.requireDatabase()
@@ -879,6 +946,7 @@ export class GuildStorage {
   private readonly departments: TicketDepartmentRepository;
   private readonly suggestions: SuggestionRepository;
   private readonly applications: ApplicationRepository;
+  private readonly restrictedPings: RestrictedPingRepository;
 
   public constructor(
     private readonly db: Database.Database,
@@ -890,6 +958,7 @@ export class GuildStorage {
     this.departments = new TicketDepartmentRepository(db, guildId);
     this.suggestions = new SuggestionRepository(db, guildId);
     this.applications = new ApplicationRepository(db, guildId);
+    this.restrictedPings = new RestrictedPingRepository(db, guildId);
   }
 
   public grantRoleCapability(
@@ -930,6 +999,107 @@ export class GuildStorage {
     roleIds: readonly string[],
   ): RoleCapabilityGrant[] {
     return this.access.listCapabilitiesForRoles(roleIds);
+  }
+
+  public getRestrictedPingRole(
+    roleId: string,
+  ): RestrictedPingRoleConfiguration | null {
+    return this.restrictedPings.getRole(roleId);
+  }
+
+  public listRestrictedPingRoles(
+    limit?: number,
+    offset?: number,
+  ): RestrictedPingRoleConfiguration[] {
+    return this.restrictedPings.listRoles(limit, offset);
+  }
+
+  public countRestrictedPingRoles(): number {
+    return this.restrictedPings.countRoles();
+  }
+
+  public listRestrictedPingMappings(
+    roleId: string,
+    limit?: number,
+    offset?: number,
+  ): RestrictedPingMapping[] {
+    return this.restrictedPings.listMappings(roleId, limit, offset);
+  }
+
+  public addRestrictedPingMapping(
+    input: RestrictedPingAddMappingInput,
+  ): RestrictedPingAddMappingResult {
+    return this.restrictedPings.addMapping(input);
+  }
+
+  public removeRestrictedPingMapping(
+    roleId: string,
+    channelId: string,
+    removedBy: string,
+  ): RestrictedPingRemoveMappingResult {
+    return this.restrictedPings.removeMapping(roleId, channelId, removedBy);
+  }
+
+  public configureRestrictedPingRole(
+    roleId: string,
+    update: RestrictedPingConfigureInput,
+  ): RestrictedPingRoleConfiguration | null {
+    return this.restrictedPings.configureRole(roleId, update);
+  }
+
+  public setRestrictedPingRoleEnabled(
+    roleId: string,
+    enabled: boolean,
+    updatedBy: string,
+    bindingsVerifiedAt?: string | null,
+  ): RestrictedPingRoleConfiguration | null {
+    return this.restrictedPings.setRoleEnabled(
+      roleId,
+      enabled,
+      updatedBy,
+      bindingsVerifiedAt,
+    );
+  }
+
+  public reserveRestrictedPing(
+    input: RestrictedPingReservationInput,
+  ): RestrictedPingReservationResult {
+    return this.restrictedPings.reservePing(input);
+  }
+
+  public completeRestrictedPing(
+    reservationId: string,
+    messageId?: string | null,
+  ): RestrictedPingCompletionResult {
+    return this.restrictedPings.completePing(reservationId, messageId);
+  }
+
+  public releaseRestrictedPing(
+    reservationId: string,
+    reason?: string,
+  ): boolean {
+    return this.restrictedPings.releasePing(reservationId, reason);
+  }
+
+  public cleanupRestrictedPingRole(
+    roleId: string,
+    actorId?: string,
+  ): RestrictedPingCleanupResult {
+    return this.restrictedPings.cleanupDeletedRole(roleId, actorId);
+  }
+
+  public cleanupRestrictedPingChannel(
+    channelId: string,
+    actorId?: string,
+  ): RestrictedPingCleanupResult {
+    return this.restrictedPings.cleanupDeletedChannel(channelId, actorId);
+  }
+
+  public listRestrictedPingEvents(
+    limit?: number,
+    offset?: number,
+  ): RestrictedPingEvent[] {
+    return this.restrictedPings.listEvents(limit, offset);
   }
 
   public createTicketDepartment(

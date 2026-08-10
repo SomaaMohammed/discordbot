@@ -108,6 +108,146 @@ export type CapabilityRevokeResult =
   | { status: "revoked"; grant: RoleCapabilityGrant }
   | { status: "not-found"; grant: null };
 
+export const RESTRICTED_PING_EVENT_TYPES = [
+  "mapping_added",
+  "mapping_removed",
+  "configuration_updated",
+  "enabled",
+  "disabled",
+  "role_deleted",
+  "channel_deleted",
+  "ping_succeeded",
+] as const;
+
+export type RestrictedPingEventType =
+  (typeof RESTRICTED_PING_EVENT_TYPES)[number];
+
+export interface RestrictedPingRoleConfiguration {
+  guildId: string;
+  roleId: string;
+  enabled: boolean;
+  userCooldownSeconds: number;
+  roleCooldownSeconds: number;
+  allowThreads: boolean;
+  bindingsVerifiedAt: string | null;
+  lastRoleSuccessAt: string | null;
+  successCount: number;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RestrictedPingMapping {
+  guildId: string;
+  roleId: string;
+  channelId: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface RestrictedPingUserCooldown {
+  guildId: string;
+  roleId: string;
+  userId: string;
+  lastSuccessAt: string;
+  successCount: number;
+  updatedAt: string;
+}
+
+export interface RestrictedPingEvent {
+  guildId: string;
+  eventId: string;
+  eventNumber: number;
+  type: RestrictedPingEventType;
+  actorId: string | null;
+  roleId: string;
+  channelId: string | null;
+  userId: string | null;
+  source: string;
+  details: unknown;
+  createdAt: string;
+}
+
+export interface RestrictedPingAddMappingInput {
+  roleId: string;
+  channelId: string;
+  createdBy: string;
+  enabled?: boolean;
+  userCooldownSeconds?: number;
+  roleCooldownSeconds?: number;
+  allowThreads?: boolean;
+  bindingsVerifiedAt?: string | null;
+}
+
+export type RestrictedPingAddMappingResult = {
+  status: "created" | "duplicate";
+  configuration: RestrictedPingRoleConfiguration;
+  mapping: RestrictedPingMapping;
+};
+
+export type RestrictedPingRemoveMappingResult =
+  | {
+      status: "removed";
+      mapping: RestrictedPingMapping;
+      configurationDeleted: boolean;
+    }
+  | {
+      status: "not-found";
+      mapping: null;
+      configurationDeleted: false;
+    };
+
+export interface RestrictedPingConfigureInput {
+  updatedBy: string;
+  userCooldownSeconds?: number;
+  roleCooldownSeconds?: number;
+  allowThreads?: boolean;
+  bindingsVerifiedAt?: string | null;
+}
+
+export interface RestrictedPingReservationInput {
+  roleId: string;
+  userId: string;
+  /** Actual command/send channel, including a thread or forum post ID. */
+  channelId: string;
+  /** Configured channel ID; differs from channelId only for an allowed child thread. */
+  mappingChannelId: string;
+  source: string;
+}
+
+export type RestrictedPingReservationResult =
+  | {
+      status: "reserved";
+      reservationId: string;
+      expiresAt: string;
+      configuration: RestrictedPingRoleConfiguration;
+    }
+  | {
+      status: "not-configured" | "disabled" | "channel-not-allowed";
+      configuration: RestrictedPingRoleConfiguration | null;
+    }
+  | {
+      status: "active-reservation" | "user-cooldown" | "role-cooldown";
+      retryAt: string;
+      configuration: RestrictedPingRoleConfiguration;
+    };
+
+export type RestrictedPingCompletionResult =
+  | {
+      status: "completed";
+      configuration: RestrictedPingRoleConfiguration;
+      event: RestrictedPingEvent;
+    }
+  | { status: "not-found"; configuration: null; event: null };
+
+export interface RestrictedPingCleanupResult {
+  rolesDeleted: number;
+  mappingsDeleted: number;
+  userCooldownsDeleted: number;
+  roleIds: string[];
+}
+
 export const FORM_FIELD_TYPES = ["short", "paragraph"] as const;
 export type FormFieldType = (typeof FORM_FIELD_TYPES)[number];
 
@@ -764,7 +904,7 @@ export interface ApplicationEvent {
 
 /** Portable, tenant-scoped export of the active product data model. */
 export interface GuildDataExport {
-  formatVersion: 4;
+  formatVersion: 5;
   guildId: string;
   exportedAt: string;
   metadata: GuildRecord;
@@ -786,6 +926,10 @@ export interface GuildDataExport {
   applications: ApplicationRecord[];
   applicationResponses: ApplicationResponse[];
   applicationEvents: ApplicationEvent[];
+  restrictedPingRoles: RestrictedPingRoleConfiguration[];
+  restrictedPingMappings: RestrictedPingMapping[];
+  restrictedPingUserCooldowns: RestrictedPingUserCooldown[];
+  restrictedPingEvents: RestrictedPingEvent[];
 }
 
 export interface GuildPurgeResult {
@@ -809,6 +953,10 @@ export interface GuildPurgeResult {
   applications: number;
   applicationResponses: number;
   applicationEvents: number;
+  restrictedPingRoles: number;
+  restrictedPingMappings: number;
+  restrictedPingUserCooldowns: number;
+  restrictedPingEvents: number;
 }
 
 export const USER_ACTIVITY_METRICS = [

@@ -15,7 +15,7 @@ afterEach(() => {
   for (const storage of storages.splice(0)) storage.close();
 });
 
-describe("guild data export format 4", () => {
+describe("guild data export format 5", () => {
   it("round-trips all Phase 2 collections with authority and bindings dormant", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
@@ -106,7 +106,7 @@ describe("guild data export format 4", () => {
 
     const payload = storage.exportGuildData(GUILD);
     expect(payload).toMatchObject({
-      formatVersion: 4,
+      formatVersion: 5,
       delegatedCapabilityGrants: [{ active: true }],
       ticketDepartments: [{ departmentId: "department_a", enabled: true }],
       ticketDepartmentFields: [{ fieldId: "question_a" }],
@@ -161,7 +161,7 @@ describe("guild data export format 4", () => {
     expect(storage.getGuild(GUILD)).toBeNull();
   });
 
-  it("rejects user-principal capability grants in format 4 imports", () => {
+  it("rejects user-principal capability grants in format 5 imports", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
     storage.forGuild(GUILD).grantRoleCapability(ROLE, "panels.manage", ADMIN);
@@ -178,7 +178,7 @@ describe("guild data export format 4", () => {
     ]);
   });
 
-  it("rejects a malformed Unicode department emoji in format 4", () => {
+  it("rejects a malformed Unicode department emoji in format 5", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
     const guild = storage.forGuild(GUILD);
@@ -247,7 +247,7 @@ describe("guild data export format 4", () => {
     expect(restored.ticketDepartmentFields).toHaveLength(2);
   });
 
-  it("rejects more than 100 imported audit events for one format 4 ticket", () => {
+  it("rejects more than 100 imported audit events for one format 5 ticket", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
     const guild = storage.forGuild(GUILD);
@@ -389,7 +389,7 @@ describe("guild data export format 4", () => {
     );
   });
 
-  it("rejects format 4 audit histories above the per-record limit", () => {
+  it("rejects format 5 audit histories above the per-record limit", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
     const guild = storage.forGuild(GUILD);

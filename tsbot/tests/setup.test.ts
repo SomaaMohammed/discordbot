@@ -808,7 +808,7 @@ describe("active-only setup behavior", () => {
   it("refuses an oversized complete export instead of sending partial data", async () => {
     const settings = createDefaultGuildSettings();
     const exportGuildData = vi.fn(() => ({
-      formatVersion: 4,
+      formatVersion: 5,
       guildId: GUILD_ID,
       oversized: "x".repeat(2 * 1024 * 1024),
     }));
@@ -848,7 +848,7 @@ describe("active-only setup behavior", () => {
     );
   });
 
-  it("describes every Phase 2 collection in a successful export", async () => {
+  it("describes every current collection in a successful export", async () => {
     const settings = createDefaultGuildSettings();
     const interaction: Record<string, any> = {
       guild: { id: GUILD_ID },
@@ -866,7 +866,7 @@ describe("active-only setup behavior", () => {
     const runtime = {
       storage: {
         exportGuildData: vi.fn(() => ({
-          formatVersion: 4,
+          formatVersion: 5,
           guildId: GUILD_ID,
         })),
       },
@@ -883,7 +883,7 @@ describe("active-only setup behavior", () => {
 
     const response = interaction.editReply.mock.calls[0]?.[0];
     expect(response).toMatchObject({
-      content: expect.stringContaining("Format-4"),
+      content: expect.stringContaining("Format-5"),
       files: [expect.anything()],
       allowedMentions: { parse: [] },
     });
@@ -892,6 +892,7 @@ describe("active-only setup behavior", () => {
       "ticket departments/fields/tickets/responses/events",
       "suggestion configuration/suggestions/votes/events",
       "application forms/fields/applications/responses/events",
+      "restricted-ping roles/mappings/user cooldowns/events",
       "delivery identifiers",
     ]) {
       expect(response.content).toContain(collection);

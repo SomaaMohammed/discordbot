@@ -25,6 +25,12 @@ import {
   PHASE2_COLLECTION_LIMITS,
   upgradeLegacyV3OperationalData,
 } from "./guild-data-v4.js";
+import {
+  emptyRestrictedPingGuildData,
+  insertRestrictedPingGuildData,
+  parseRestrictedPingGuildData,
+  RESTRICTED_PING_COLLECTION_LIMITS,
+} from "./guild-data-v5.js";
 
 const MAX_IMPORTED_METRICS = 50_000;
 const LEGACY_V3_PANEL_PRESETS = [
@@ -37,10 +43,11 @@ const LEGACY_V3_PANEL_PRESETS = [
 export const GUILD_DATA_COLLECTION_LIMITS = Object.freeze({
   metrics: MAX_IMPORTED_METRICS,
   ...PHASE2_COLLECTION_LIMITS,
+  ...RESTRICTED_PING_COLLECTION_LIMITS,
 });
 
 export interface ParsedGuildDataImport extends GuildDataExport {
-  sourceFormatVersion: 2 | 3 | 4;
+  sourceFormatVersion: 2 | 3 | 4 | 5;
 }
 
 type LegacyTicketRecord = Omit<TicketRecord, "departmentId">;
@@ -67,9 +74,10 @@ export function parseGuildDataExport(
   if (
     candidate.formatVersion !== 2 &&
     candidate.formatVersion !== 3 &&
-    candidate.formatVersion !== 4
+    candidate.formatVersion !== 4 &&
+    candidate.formatVersion !== 5
   ) {
-    throw new TypeError("Guild import formatVersion must be 2, 3, or 4");
+    throw new TypeError("Guild import formatVersion must be 2, 3, 4, or 5");
   }
   if (
     candidate.guildId !== guildId ||
@@ -135,7 +143,7 @@ export function parseGuildDataExport(
   }
   const exportedAt = normalizeImportedTimestamp(candidate.exportedAt);
   const operational =
-    candidate.formatVersion === 4
+    candidate.formatVersion === 4 || candidate.formatVersion === 5
       ? parsePhase2OperationalData(candidate, guildId)
       : candidate.formatVersion === 3
         ? upgradeLegacyV3OperationalData({
@@ -146,15 +154,20 @@ export function parseGuildDataExport(
             fallbackTimestamp: exportedAt,
           })
         : emptyPhase2OperationalData();
+  const restrictedPings =
+    candidate.formatVersion === 5
+      ? parseRestrictedPingGuildData(candidate, guildId)
+      : emptyRestrictedPingGuildData();
   return {
     sourceFormatVersion: candidate.formatVersion,
-    formatVersion: 4,
+    formatVersion: 5,
     guildId,
     exportedAt,
     metadata: candidate.metadata as GuildRecord,
     settings,
     metrics,
     ...operational,
+    ...restrictedPings,
   };
 }
 
@@ -453,6 +466,7 @@ export function insertImportedOperationalData(
   imported: GuildDataExport,
 ): void {
   insertPhase2OperationalData(db, guildId, imported);
+  insertRestrictedPingGuildData(db, guildId, imported);
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {

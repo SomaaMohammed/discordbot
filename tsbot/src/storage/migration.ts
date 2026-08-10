@@ -15,19 +15,21 @@ import {
   createV4Objects,
   createV4OperationalObjects,
   createV5OperationalObjects,
-  CURRENT_SCHEMA_VERSION,
+  createV6OperationalObjects,
   databaseIntegrityCheck,
   detectDatabaseSchema,
   type DatabaseSchemaKind,
   LEGACY_V4_SCHEMA_VERSION,
   recordCurrentSchemaVersion,
   recordV4SchemaVersion,
+  recordV5SchemaVersion,
   V2_TABLE_NAMES,
   V4_EXPLICIT_INDEX_NAMES,
   validateV2Schema,
   validateV3Schema,
   validateV4Schema,
   validateV5Schema,
+  validateV6Schema,
 } from "./schema.js";
 
 export type MigrationFailurePoint =
@@ -51,8 +53,9 @@ export interface MigrationOptions {
 
 export interface MigrationResult {
   status: "migrated" | "dry-run" | "already-current";
-  fromSchema: "legacy-v2" | "legacy-v3" | "legacy-v4" | "current-v5";
-  toSchema: "current-v5";
+  fromSchema:
+    "legacy-v2" | "legacy-v3" | "legacy-v4" | "legacy-v5" | "current-v6";
+  toSchema: "current-v6";
   guilds: number;
   settingsRequiringReview: number;
   metricsPreserved: number;
@@ -189,21 +192,56 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       options.onLockAcquired?.();
       assertIntegrity(db);
       const schema = detectDatabaseSchema(db);
-      if (schema === "current-v5") {
-        const issues = validateV5Schema(db);
+      if (schema === "current-v6") {
+        const issues = validateV6Schema(db);
         if (issues.length > 0) {
-          throw new Error(`Schema v5 validation failed: ${issues.join("; ")}`);
+          throw new Error(`Schema v6 validation failed: ${issues.join("; ")}`);
         }
         return {
           status: "already-current",
-          fromSchema: "current-v5",
-          toSchema: "current-v5",
+          fromSchema: "current-v6",
+          toSchema: "current-v6",
           guilds: countRows(db, "guilds"),
           settingsRequiringReview: countReviewRequiredSettings(db),
           metricsPreserved: countRows(db, "metrics"),
           metricsDropped: 0,
           warnings: 0,
         };
+      }
+      if (schema === "legacy-v5") {
+        const v5Issues = validateV5Schema(db);
+        if (v5Issues.length > 0) {
+          throw new Error(
+            `Schema v5 validation failed: ${v5Issues.join("; ")}`,
+          );
+        }
+        const now = (options.now ?? utcNow)();
+        const result: MigrationResult = {
+          status: options.dryRun ? "dry-run" : "migrated",
+          fromSchema: "legacy-v5",
+          toSchema: "current-v6",
+          guilds: countRows(db, "guilds"),
+          settingsRequiringReview: countReviewRequiredSettings(db),
+          metricsPreserved: countRows(db, "metrics"),
+          metricsDropped: 0,
+          warnings: 0,
+        };
+        createV6OperationalObjects(db);
+        injectFailure(options, "after-create");
+        recordCurrentSchemaVersion(db, now);
+        injectFailure(options, "after-version");
+        const finalIssues = validateV6Schema(db);
+        if (finalIssues.length > 0) {
+          throw new Error(
+            `Migrated schema validation failed: ${finalIssues.join("; ")}`,
+          );
+        }
+        injectFailure(options, "before-commit");
+        if (options.dryRun) {
+          dryRunResult = result;
+          throw new DryRunRollback("validated dry run");
+        }
+        return result;
       }
       if (schema === "legacy-v4") {
         const v4Issues = validateV4Schema(db);
@@ -216,7 +254,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         const result: MigrationResult = {
           status: options.dryRun ? "dry-run" : "migrated",
           fromSchema: "legacy-v4",
-          toSchema: "current-v5",
+          toSchema: "current-v6",
           guilds: countRows(db, "guilds"),
           settingsRequiringReview: countReviewRequiredSettings(db),
           metricsPreserved: countRows(db, "metrics"),
@@ -224,9 +262,17 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
           warnings: 0,
         };
         upgradeV4ToV5(db, options, true);
+        recordV5SchemaVersion(db, now);
+        const v5FinalIssues = validateV5Schema(db);
+        if (v5FinalIssues.length > 0) {
+          throw new Error(
+            `Intermediate schema-v5 validation failed: ${v5FinalIssues.join("; ")}`,
+          );
+        }
+        createV6OperationalObjects(db);
         recordCurrentSchemaVersion(db, now);
         injectFailure(options, "after-version");
-        const finalIssues = validateV5Schema(db);
+        const finalIssues = validateV6Schema(db);
         if (finalIssues.length > 0) {
           throw new Error(
             `Migrated schema validation failed: ${finalIssues.join("; ")}`,
@@ -251,7 +297,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         const result: MigrationResult = {
           status: options.dryRun ? "dry-run" : "migrated",
           fromSchema: "legacy-v3",
-          toSchema: "current-v5",
+          toSchema: "current-v6",
           guilds: snapshot.guilds.length,
           settingsRequiringReview: countReviewRequiredSettings(db),
           metricsPreserved: snapshot.metrics.length,
@@ -274,9 +320,17 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
           );
         }
         upgradeV4ToV5(db, options, false);
+        recordV5SchemaVersion(db, now);
+        const v5FinalIssues = validateV5Schema(db);
+        if (v5FinalIssues.length > 0) {
+          throw new Error(
+            `Intermediate schema-v5 validation failed: ${v5FinalIssues.join("; ")}`,
+          );
+        }
+        createV6OperationalObjects(db);
         recordCurrentSchemaVersion(db, now);
         injectFailure(options, "after-version");
-        const finalIssues = validateV5Schema(db);
+        const finalIssues = validateV6Schema(db);
         if (finalIssues.length > 0) {
           throw new Error(
             `Migrated schema validation failed: ${finalIssues.join("; ")}`,
@@ -291,7 +345,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       }
       if (schema === "legacy-v1") {
         throw new Error(
-          "Schema v1 cannot be migrated by v5. Upgrade with the final v4 release to schema v2, stop the bot, create an offline backup, then run the v5 migration.",
+          "Schema v1 cannot be migrated by v6. Upgrade with the final v4 release to schema v2, stop the bot, create an offline backup, then run the v6 migration.",
         );
       }
       if (schema !== "legacy-v2") {
@@ -341,12 +395,22 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       }
 
       upgradeV4ToV5(db, options, false);
-      // The marker is deliberately the last data write. A database claiming
-      // version 5 has already passed source, transformation, and copy checks.
+      // Freeze and validate each intermediate schema marker before adding the
+      // next schema's objects.
+      recordV5SchemaVersion(db, now);
+      const v5FinalIssues = validateV5Schema(db);
+      if (v5FinalIssues.length > 0) {
+        throw new Error(
+          `Intermediate schema-v5 validation failed: ${v5FinalIssues.join("; ")}`,
+        );
+      }
+      createV6OperationalObjects(db);
+      // The v6 marker remains the final data write after every intermediate
+      // schema has been built and validated.
       recordCurrentSchemaVersion(db, now);
       injectFailure(options, "after-version");
 
-      const finalIssues = validateV5Schema(db);
+      const finalIssues = validateV6Schema(db);
       if (finalIssues.length > 0) {
         throw new Error(
           `Migrated schema validation failed: ${finalIssues.join("; ")}`,
@@ -380,7 +444,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
 
 export function validateDatabaseFile(
   dbFile: string,
-  options: { expect: 2 | 3 | 4 | 5 },
+  options: { expect: 2 | 3 | 4 | 5 | 6 },
 ): DatabaseValidationResult {
   const db = new Database(dbFile, {
     readonly: true,
@@ -406,7 +470,8 @@ export function validateDatabaseFile(
       (expected === 2 && schema !== "legacy-v2") ||
       (expected === 3 && schema !== "legacy-v3") ||
       (expected === 4 && schema !== "legacy-v4") ||
-      (expected === 5 && schema !== "current-v5")
+      (expected === 5 && schema !== "legacy-v5") ||
+      (expected === 6 && schema !== "current-v6")
     ) {
       throw new Error(
         `Database schema is ${schema}; expected exact schema v${expected}`,
@@ -821,7 +886,7 @@ function prepareMigration(
     ),
     result: {
       fromSchema: "legacy-v2",
-      toSchema: "current-v5",
+      toSchema: "current-v6",
       guilds: guilds.length,
       settingsRequiringReview,
       metricsPreserved: preparedMetrics.size,
@@ -1053,7 +1118,8 @@ function readSchemaVersion(
     schema !== "legacy-v2" &&
     schema !== "legacy-v3" &&
     schema !== "legacy-v4" &&
-    schema !== "current-v5"
+    schema !== "legacy-v5" &&
+    schema !== "current-v6"
   ) {
     return null;
   }

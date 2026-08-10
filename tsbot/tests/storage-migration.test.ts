@@ -17,8 +17,9 @@ import {
   detectDatabaseSchema,
   initializeV3Schema,
   initializeV4Schema,
-  V5_EXPLICIT_INDEX_NAMES,
-  V5_TABLE_NAMES,
+  initializeV5Schema,
+  V6_EXPLICIT_INDEX_NAMES,
+  V6_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import {
   createV2FixtureDatabase,
@@ -37,7 +38,7 @@ afterEach(() => {
   }
 });
 
-describe("explicit schema migration to v5", () => {
+describe("explicit schema migration to v6", () => {
   it("preserves active tenant data and discards retired state", () => {
     const dbFile = fixturePath("active.db");
     const db = createV2FixtureDatabase(dbFile);
@@ -115,15 +116,15 @@ describe("explicit schema migration to v5", () => {
     expect(result).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v2",
-      toSchema: "current-v5",
+      toSchema: "current-v6",
       guilds: 2,
       settingsRequiringReview: 1,
       metricsPreserved: 3,
       metricsDropped: 3,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 5 })).toMatchObject({
-      schema: "current-v5",
-      schemaVersion: 5,
+    expect(validateDatabaseFile(dbFile, { expect: 6 })).toMatchObject({
+      schema: "current-v6",
+      schemaVersion: 6,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -131,10 +132,10 @@ describe("explicit schema migration to v5", () => {
     const migrated = new Database(dbFile, { readonly: true });
     try {
       expect(schemaObjects(migrated, "table")).toEqual(
-        [...V5_TABLE_NAMES].sort(),
+        [...V6_TABLE_NAMES].sort(),
       );
       expect(schemaObjects(migrated, "index")).toEqual(
-        [...V5_EXPLICIT_INDEX_NAMES].sort(),
+        [...V6_EXPLICIT_INDEX_NAMES].sort(),
       );
       expect(
         migrated
@@ -344,14 +345,14 @@ describe("explicit schema migration to v5", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v3",
-      toSchema: "current-v5",
+      toSchema: "current-v6",
       guilds: 1,
       metricsPreserved: 1,
       metricsDropped: 0,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 5 })).toMatchObject({
-      schema: "current-v5",
-      schemaVersion: 5,
+    expect(validateDatabaseFile(dbFile, { expect: 6 })).toMatchObject({
+      schema: "current-v6",
+      schemaVersion: 6,
     });
 
     const db = new Database(dbFile, { readonly: true });
@@ -382,7 +383,12 @@ describe("explicit schema migration to v5", () => {
         db
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([{ version: 3 }, { version: 4 }, { version: 5 }]);
+      ).toEqual([
+        { version: 3 },
+        { version: 4 },
+        { version: 5 },
+        { version: 6 },
+      ]);
       for (const table of [
         "ticket_departments",
         "posted_panels",
@@ -445,11 +451,11 @@ describe("explicit schema migration to v5", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v4",
-      toSchema: "current-v5",
+      toSchema: "current-v6",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 5 }).schema).toBe(
-      "current-v5",
+    expect(validateDatabaseFile(dbFile, { expect: 6 }).schema).toBe(
+      "current-v6",
     );
 
     const db = new Database(dbFile);
@@ -528,7 +534,7 @@ describe("explicit schema migration to v5", () => {
         db
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([{ version: 4 }, { version: 5 }]);
+      ).toEqual([{ version: 4 }, { version: 5 }, { version: 6 }]);
       expect(() =>
         db
           .prepare(
@@ -602,6 +608,60 @@ describe("explicit schema migration to v5", () => {
     },
   );
 
+  it("additively migrates an exact schema-v5 database to v6", () => {
+    const dbFile = fixturePath("v5.db");
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV5Schema(db, "2026-01-01T00:00:00.000Z");
+    db.close();
+
+    expect(
+      migrateDatabase({
+        dbFile,
+        now: () => "2026-02-01T00:00:00.000Z",
+      }),
+    ).toMatchObject({
+      status: "migrated",
+      fromSchema: "legacy-v5",
+      toSchema: "current-v6",
+      guilds: 0,
+    });
+    expect(validateDatabaseFile(dbFile, { expect: 6 })).toMatchObject({
+      schema: "current-v6",
+      schemaVersion: 6,
+    });
+    const migrated = new Database(dbFile, { readonly: true });
+    try {
+      expect(
+        migrated
+          .prepare("SELECT version FROM schema_migrations ORDER BY version")
+          .all(),
+      ).toEqual([{ version: 5 }, { version: 6 }]);
+      expect(schemaObjects(migrated, "table")).toEqual(
+        [...V6_TABLE_NAMES].sort(),
+      );
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it("rolls an interrupted v5-to-v6 migration back byte-for-byte", () => {
+    const dbFile = fixturePath("v5-rollback.db");
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV5Schema(db, "2026-01-01T00:00:00.000Z");
+    db.close();
+    const before = fs.readFileSync(dbFile);
+
+    expect(() =>
+      migrateDatabase({ dbFile, failurePoint: "after-create" }),
+    ).toThrow("Injected migration failure at after-create");
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 5 }).schema).toBe(
+      "legacy-v5",
+    );
+  });
+
   it("is idempotent for an already-current database", () => {
     const dbFile = fixturePath("current.db");
     const storage = new BotStorage({ dbFile });
@@ -610,12 +670,12 @@ describe("explicit schema migration to v5", () => {
     storage.close();
     expect(migrateDatabase({ dbFile })).toMatchObject({
       status: "already-current",
-      fromSchema: "current-v5",
-      toSchema: "current-v5",
+      fromSchema: "current-v6",
+      toSchema: "current-v6",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 5 }).schema).toBe(
-      "current-v5",
+    expect(validateDatabaseFile(dbFile, { expect: 6 }).schema).toBe(
+      "current-v6",
     );
   });
 

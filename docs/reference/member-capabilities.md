@@ -12,8 +12,9 @@ All members of an enabled guild may:
 - use `/greetings send` with a configured profile;
 - interact with a current role panel when the target role remains safe and manageable;
 - open a ticket in an enabled department, subject to one active ticket per department and three across the guild, and inspect the state of their own ticket;
-- submit, view, withdraw, and vote on suggestions while the service/state/cooldown permits; and
-- submit an enabled staff-application form, privately view their own status, and withdraw their own still-pending application.
+- submit, view, withdraw, and vote on suggestions while the service/state/cooldown permits;
+- submit an enabled staff-application form, privately view their own status, and withdraw their own still-pending application; and
+- use `/pingrole` for a configured, enabled role they currently hold in its exact allowed channel or explicitly enabled child thread/post, subject to current permissions and both persisted cooldowns.
 
 Utilities disclose only information available from the current guild or supplied public Discord ID. Requested members, roles, and channels must belong to the current guild. Inputs are bounded and validated before a response or metric write.
 
@@ -28,6 +29,12 @@ Configured workflow roles provide content authority only for the workflow that n
 - An application form's reviewer role may inspect private answers, claim the application, accept/reject with a reason, and recover its private review delivery.
 
 Membership and the configured role are fetched again before a control is accepted. `@everyone`, managed roles, missing roles, and roles belonging to another guild are invalid. A workflow role does not configure the service, grant delegated access, or authorize a different department/form.
+
+## Restricted-ping role members
+
+A restricted-ping role grants only the ability to request that same role's notification through `/pingrole`. Membership alone does not authorize another role, another channel, another guild, or an unrelated thread. Channel presence alone does not replace current role membership. The member must also retain View Channel, Use Application Commands, and the applicable direct-channel or thread send permission.
+
+Superior sends the notification rather than making the role mentionable or giving the member Mention Everyone. The outgoing payload allows exactly the one authorized role mention and contains no member-controlled text. Per-user/per-role and guild-wide/per-role cooldowns begin only after successful Discord delivery; no owner, Administrator, or role member bypasses them. Missing/deleted resources, bots/webhooks, stale mappings, disabled roles, permission loss, and Discord failures fail privately without claiming success.
 
 ## Delegated managers
 
@@ -58,12 +65,13 @@ The guild owner and freshly verified members with Administrator permission retai
 - configure and validate the guild with `/setup`, feature flags, limits, triggers, and greeting profiles;
 - grant/revoke/list/status delegated role capabilities with `/access`;
 - use `/superior` announcements, panels, message/channel/member moderation, bounded bulk actions, activity backfill, and help;
-- configure all six fixed panel presets and all ticket/suggestion/application workflows; and
+- configure all six fixed panel presets and all ticket/suggestion/application workflows;
+- add, remove, inspect, enable, disable, and tune restricted-ping role/channel mappings; and
 - export current same-guild data.
 
 Only the guild owner can replace live data with `/setup import` or permanently purge the guild's live database rows; both require exact confirmation. Owner/Administrator evaluation happens before delegated storage, so broken delegation cannot lock out recovery.
 
-Format-4 and legacy format-3 imports replace operational data for their supported era; legacy format 2 replaces settings/metrics and preserves current operational rows. Every import disables the guild and makes imported authority/resource bindings dormant until current Discord resources are reviewed. See [Configuration](../configuration.md#export-import-purge-and-recovery-review).
+Format-5, legacy format-4, and legacy format-3 imports replace operational data for their supported era; legacy format 2 replaces settings/metrics and preserves current operational rows. Every import disables the guild and makes imported authority/resource bindings, including restricted-ping mappings, dormant until current Discord resources are reviewed. See [Configuration](../configuration.md#export-import-purge-and-recovery-review).
 
 Administrator status does not bypass Discord's permissions for the bot itself. Cleanup, channel changes, roles, timeouts, ticket categories/logs, suggestion threads, and private application channels all require the bot's current effective permissions and safe hierarchy.
 

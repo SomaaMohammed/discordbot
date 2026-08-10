@@ -175,11 +175,25 @@ describe("active guild storage", () => {
       applicantId: "303030303030303030",
       applicationMessageId: "313131313131313131",
     });
+    const restrictedA = seedRestrictedPingData(storage, GUILD_A, {
+      roleId: "323232323232323232",
+      channelId: "343434343434343434",
+      actorId: "353535353535353535",
+      userId: "363636363636363636",
+      messageId: "373737373737373737",
+    });
+    seedRestrictedPingData(storage, GUILD_B, {
+      roleId: "383838383838383838",
+      channelId: "393939393939393939",
+      actorId: "404040404040404040",
+      userId: "414141414141414141",
+      messageId: "424242424242424242",
+    });
     const guildBCountsBefore = storage.previewGuildPurge(GUILD_B);
     const payload = storage.exportGuildData(GUILD_A);
 
     expect(payload).toMatchObject({
-      formatVersion: 4,
+      formatVersion: 5,
       guildId: GUILD_A,
       metrics: [
         {
@@ -234,8 +248,28 @@ describe("active guild storage", () => {
           responseText: "A private tenant application answer.",
         },
       ],
+      restrictedPingRoles: [
+        {
+          roleId: restrictedA.roleId,
+          enabled: true,
+          successCount: 1,
+        },
+      ],
+      restrictedPingMappings: [
+        {
+          roleId: restrictedA.roleId,
+          channelId: restrictedA.channelId,
+        },
+      ],
+      restrictedPingUserCooldowns: [
+        {
+          roleId: restrictedA.roleId,
+          userId: restrictedA.userId,
+          successCount: 1,
+        },
+      ],
     });
-    expect(JSON.stringify(payload)).not.toContain('userId":null');
+    expect(payload.delegatedCapabilityGrants[0]).not.toHaveProperty("userId");
     const invalidGreetingPayload = structuredClone(payload);
     invalidGreetingPayload.settings.greetings = [
       { name: "Too long", message: "{user}".repeat(87) },
@@ -323,6 +357,19 @@ describe("active guild storage", () => {
     expect(importedPhase2.applications).toHaveLength(1);
     expect(importedPhase2.applicationResponses).toHaveLength(1);
     expect(importedPhase2.applicationEvents.length).toBeGreaterThan(0);
+    expect(importedPhase2.restrictedPingRoles).toEqual([
+      expect.objectContaining({
+        roleId: restrictedA.roleId,
+        enabled: false,
+        bindingsVerifiedAt: null,
+        successCount: 1,
+      }),
+    ]);
+    expect(importedPhase2.restrictedPingMappings).toHaveLength(1);
+    expect(importedPhase2.restrictedPingUserCooldowns).toEqual([
+      expect.objectContaining({ userId: restrictedA.userId, successCount: 1 }),
+    ]);
+    expect(importedPhase2.restrictedPingEvents).toHaveLength(2);
 
     const legacyV2Payload = {
       formatVersion: 2,
@@ -367,6 +414,11 @@ describe("active guild storage", () => {
       applications: importedPhase2.applications.length,
       applicationResponses: importedPhase2.applicationResponses.length,
       applicationEvents: importedPhase2.applicationEvents.length,
+      restrictedPingRoles: importedPhase2.restrictedPingRoles.length,
+      restrictedPingMappings: importedPhase2.restrictedPingMappings.length,
+      restrictedPingUserCooldowns:
+        importedPhase2.restrictedPingUserCooldowns.length,
+      restrictedPingEvents: importedPhase2.restrictedPingEvents.length,
     };
     expect(storage.previewGuildPurge(GUILD_A)).toEqual(expectedPurge);
     expect(storage.purgeGuildData(GUILD_A)).toEqual(expectedPurge);
@@ -468,6 +520,50 @@ function seedPhase2Data(
     formId: form.formId,
     applicationId: application.application.applicationId,
   };
+}
+
+function seedRestrictedPingData(
+  storage: BotStorage,
+  guildId: string,
+  ids: {
+    roleId: string;
+    channelId: string;
+    actorId: string;
+    userId: string;
+    messageId: string;
+  },
+) {
+  const guild = storage.forGuild(guildId);
+  const mapping = guild.addRestrictedPingMapping({
+    roleId: ids.roleId,
+    channelId: ids.channelId,
+    createdBy: ids.actorId,
+    enabled: true,
+    userCooldownSeconds: 60,
+    roleCooldownSeconds: 0,
+    bindingsVerifiedAt: "2026-01-01T00:00:00.000Z",
+  });
+  if (mapping.status !== "created") {
+    throw new Error("Expected restricted ping mapping");
+  }
+  const reservation = guild.reserveRestrictedPing({
+    roleId: ids.roleId,
+    userId: ids.userId,
+    channelId: ids.channelId,
+    mappingChannelId: ids.channelId,
+    source: "pingrole",
+  });
+  if (reservation.status !== "reserved") {
+    throw new Error("Expected restricted ping reservation");
+  }
+  const completion = guild.completeRestrictedPing(
+    reservation.reservationId,
+    ids.messageId,
+  );
+  if (completion.status !== "completed") {
+    throw new Error("Expected restricted ping completion");
+  }
+  return ids;
 }
 
 function makeStorage(): BotStorage {

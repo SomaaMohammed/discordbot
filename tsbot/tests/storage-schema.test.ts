@@ -9,10 +9,11 @@ import {
   detectDatabaseSchema,
   initializeV3Schema,
   initializeV4Schema,
+  initializeV5Schema,
   validateV2Schema,
-  validateV5Schema,
-  V5_EXPLICIT_INDEX_NAMES,
-  V5_TABLE_NAMES,
+  validateV6Schema,
+  V6_EXPLICIT_INDEX_NAMES,
+  V6_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import { createV2FixtureDatabase } from "./helpers/v2-fixture.js";
 
@@ -24,13 +25,13 @@ afterEach(() => {
   }
 });
 
-describe("schema v5", () => {
+describe("schema v6", () => {
   it("creates only the exact active tables and required index", () => {
     const dbFile = freshDatabase();
-    const validation = validateDatabaseFile(dbFile, { expect: 5 });
+    const validation = validateDatabaseFile(dbFile, { expect: 6 });
     expect(validation).toEqual({
-      schema: "current-v5",
-      schemaVersion: 5,
+      schema: "current-v6",
+      schemaVersion: 6,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -45,19 +46,19 @@ describe("schema v5", () => {
         .all() as Array<{ type: string; name: string }>;
       expect(
         objects.filter((row) => row.type === "table").map(rowName),
-      ).toEqual([...V5_TABLE_NAMES].sort());
+      ).toEqual([...V6_TABLE_NAMES].sort());
       expect(
         objects.filter((row) => row.type === "index").map(rowName),
-      ).toEqual([...V5_EXPLICIT_INDEX_NAMES].sort());
+      ).toEqual([...V6_EXPLICIT_INDEX_NAMES].sort());
       expect(objects.some((row) => row.type === "view")).toBe(false);
       expect(objects.some((row) => row.type === "trigger")).toBe(false);
-      expect(validateV5Schema(db)).toEqual([]);
+      expect(validateV6Schema(db)).toEqual([]);
     } finally {
       db.close();
     }
   });
 
-  it("rejects user-principal capability grants in a fresh v5 schema", () => {
+  it("rejects user-principal capability grants in a fresh v6 schema", () => {
     const dbFile = freshDatabase();
     const storage = new BotStorage({ dbFile });
     storage.initStorage();
@@ -120,7 +121,7 @@ describe("schema v5", () => {
         "UPDATE guild_settings SET settings_json = '{malformed' WHERE guild_id = ?",
       ).run("111111111111111111");
       expect(detectDatabaseSchema(db)).toBe("unknown");
-      expect(validateV5Schema(db).join(" ")).toMatch(/settings are invalid/);
+      expect(validateV6Schema(db).join(" ")).toMatch(/settings are invalid/);
     } finally {
       db.close();
     }
@@ -145,7 +146,7 @@ describe("schema v5", () => {
       db.exec("DROP TABLE ticket_events");
       db.exec(table.sql.replace("'creation_reserved'", "'CREATION_RESERVED'"));
       db.exec(index.sql);
-      expect(validateV5Schema(db).join(" ")).toMatch(
+      expect(validateV6Schema(db).join(" ")).toMatch(
         /ticket_events SQL does not match/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -178,7 +179,7 @@ describe("schema v5", () => {
         "2026-01-01T00:00:00.000Z",
       );
       db.pragma("ignore_check_constraints = OFF");
-      expect(validateV5Schema(db).join(" ")).toMatch(
+      expect(validateV6Schema(db).join(" ")).toMatch(
         /invalid or oversized JSON/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -219,7 +220,7 @@ describe("schema v5", () => {
         );
         db.pragma("ignore_check_constraints = OFF");
 
-        expect(validateV5Schema(db).join(" ")).toMatch(/non-text data/);
+        expect(validateV6Schema(db).join(" ")).toMatch(/non-text data/);
         expect(detectDatabaseSchema(db)).toBe("unknown");
       } finally {
         db.close();
@@ -251,7 +252,7 @@ describe("schema v5", () => {
         "2026-01-01T00:00:00.000Z",
       );
 
-      expect(validateV5Schema(db).join(" ")).toMatch(
+      expect(validateV6Schema(db).join(" ")).toMatch(
         /enabled application form does not have 1-5 fields/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -439,6 +440,26 @@ describe("schema v5", () => {
     expect(fs.readFileSync(dbFile)).toEqual(before);
     expect(validateDatabaseFile(dbFile, { expect: 4 }).schema).toBe(
       "legacy-v4",
+    );
+  });
+
+  it("normal startup read-only classifies and refuses schema v5 unchanged", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "v5.db");
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV5Schema(db, "2026-01-01T00:00:00.000Z");
+    db.close();
+    const before = fs.readFileSync(dbFile);
+
+    const storage = new BotStorage({ dbFile });
+    expect(() => storage.initStorage()).toThrow(
+      /schema v5 requires an explicit migration/i,
+    );
+    storage.close();
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 5 }).schema).toBe(
+      "legacy-v5",
     );
   });
 

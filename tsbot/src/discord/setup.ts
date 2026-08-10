@@ -216,7 +216,7 @@ export function buildSetupCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
       subcommand
         .setName("import")
         .setDescription(
-          "Owner-only replacement from a same-server v2, v3, or v4 export",
+          "Owner-only replacement from a same-server v2, v3, v4, or v5 export",
         )
         .addAttachmentOption((option) =>
           option
@@ -702,7 +702,7 @@ async function exportGuild(
   });
   await interaction.editReply({
     content:
-      "Format-4 snapshot for this server only: metadata, settings, metrics, delegated grants, panels, ticket departments/fields/tickets/responses/events, suggestion configuration/suggestions/votes/events, application forms/fields/applications/responses/events, and delivery identifiers.",
+      "Format-5 snapshot for this server only: metadata, settings, metrics, delegated grants, panels, ticket departments/fields/tickets/responses/events, suggestion configuration/suggestions/votes/events, application forms/fields/applications/responses/events, restricted-ping roles/mappings/user cooldowns/events, and delivery identifiers. Live restricted-ping reservations are excluded.",
     files: [attachment],
     allowedMentions: { parse: [] },
   });
@@ -790,7 +790,7 @@ async function importGuild(
   );
   await interaction.editReply({
     content:
-      "Import replacement completed in disabled review mode. Imported ticket configuration remains disabled. Review `/setup status`, run `/setup validate` and `/setup enable`, then inspect `/panel status` and `/ticket status`; use `/ticket setup` to re-enable new tickets.",
+      "Import replacement completed in disabled review mode. Imported authority and workflow bindings, including restricted-ping roles, remain disabled/unverified. Review `/setup status`, run `/setup validate` and `/setup enable`, then inspect `/panel status`, `/ticket status`, `/suggestion status`, `/application status`, `/restrictedping list`, and `/restrictedping info`; explicitly re-enable only reviewed workflows and restricted roles.",
     allowedMentions: { parse: [] },
   });
 }
@@ -869,7 +869,7 @@ async function purgeGuild(
   clearPanelProcessState(guildRuntime.guildId);
   await interaction.editReply({
     content:
-      "This server's active settings, metrics, panel records, ticket configuration, tickets, and ticket audit events were permanently purged.",
+      "All of this server's stored configuration, workflow data, metrics, restricted-ping cooldowns, and audit events were permanently purged.",
     allowedMentions: { parse: [] },
   });
 }

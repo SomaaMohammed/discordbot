@@ -6,7 +6,8 @@ import {
 } from "../guild-settings.js";
 import { isActiveMetricKey } from "./metric-keys.js";
 
-export const CURRENT_SCHEMA_VERSION = 5 as const;
+export const CURRENT_SCHEMA_VERSION = 6 as const;
+export const LEGACY_V5_SCHEMA_VERSION = 5 as const;
 export const LEGACY_V4_SCHEMA_VERSION = 4 as const;
 export const LEGACY_V3_SCHEMA_VERSION = 3 as const;
 export const LEGACY_V2_SCHEMA_VERSION = 2 as const;
@@ -44,7 +45,8 @@ export type DatabaseSchemaKind =
   | "legacy-v2"
   | "legacy-v3"
   | "legacy-v4"
-  | "current-v5"
+  | "legacy-v5"
+  | "current-v6"
   | "unknown";
 
 export const SCHEMA_MIGRATIONS_TABLE_SQL = `
@@ -1051,6 +1053,182 @@ CREATE TABLE application_events (
 )
 `;
 
+export const RESTRICTED_PING_ROLES_TABLE_SQL = `
+CREATE TABLE restricted_ping_roles (
+  guild_id TEXT NOT NULL,
+  role_id TEXT NOT NULL
+    CHECK (
+      length(role_id) BETWEEN 17 AND 20
+      AND role_id NOT GLOB '*[^0-9]*'
+    ),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  user_cooldown_seconds INTEGER NOT NULL DEFAULT 60
+    CHECK (user_cooldown_seconds BETWEEN 1 AND 86400),
+  role_cooldown_seconds INTEGER NOT NULL DEFAULT 30
+    CHECK (role_cooldown_seconds BETWEEN 0 AND 86400),
+  allow_threads INTEGER NOT NULL DEFAULT 0 CHECK (allow_threads IN (0, 1)),
+  bindings_verified_at TEXT,
+  last_role_success_at TEXT,
+  success_count INTEGER NOT NULL DEFAULT 0
+    CHECK (success_count BETWEEN 0 AND 9007199254740991),
+  reservation_id TEXT
+    CHECK (
+      reservation_id IS NULL OR (
+        length(reservation_id) BETWEEN 8 AND 24
+        AND reservation_id NOT GLOB '*[^A-Za-z0-9_-]*'
+      )
+    ),
+  reservation_user_id TEXT
+    CHECK (
+      reservation_user_id IS NULL OR (
+        length(reservation_user_id) BETWEEN 17 AND 20
+        AND reservation_user_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  reservation_channel_id TEXT
+    CHECK (
+      reservation_channel_id IS NULL OR (
+        length(reservation_channel_id) BETWEEN 17 AND 20
+        AND reservation_channel_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  reservation_source TEXT
+    CHECK (
+      reservation_source IS NULL OR
+      length(reservation_source) BETWEEN 1 AND 100
+    ),
+  reservation_expires_at TEXT,
+  created_by TEXT NOT NULL
+    CHECK (
+      length(created_by) BETWEEN 17 AND 20
+      AND created_by NOT GLOB '*[^0-9]*'
+    ),
+  updated_by TEXT NOT NULL
+    CHECK (
+      length(updated_by) BETWEEN 17 AND 20
+      AND updated_by NOT GLOB '*[^0-9]*'
+    ),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, role_id),
+  CHECK (role_id <> guild_id),
+  CHECK ((last_role_success_at IS NULL) = (success_count = 0)),
+  CHECK (
+    (reservation_id IS NULL) = (reservation_user_id IS NULL)
+    AND (reservation_id IS NULL) = (reservation_channel_id IS NULL)
+    AND (reservation_id IS NULL) = (reservation_source IS NULL)
+    AND (reservation_id IS NULL) = (reservation_expires_at IS NULL)
+  ),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const RESTRICTED_PING_CHANNELS_TABLE_SQL = `
+CREATE TABLE restricted_ping_channels (
+  guild_id TEXT NOT NULL,
+  role_id TEXT NOT NULL
+    CHECK (
+      length(role_id) BETWEEN 17 AND 20
+      AND role_id NOT GLOB '*[^0-9]*'
+    ),
+  channel_id TEXT NOT NULL
+    CHECK (
+      length(channel_id) BETWEEN 17 AND 20
+      AND channel_id NOT GLOB '*[^0-9]*'
+    ),
+  created_by TEXT NOT NULL
+    CHECK (
+      length(created_by) BETWEEN 17 AND 20
+      AND created_by NOT GLOB '*[^0-9]*'
+    ),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, role_id, channel_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, role_id)
+    REFERENCES restricted_ping_roles(guild_id, role_id) ON DELETE CASCADE
+)
+`;
+
+export const RESTRICTED_PING_USER_COOLDOWNS_TABLE_SQL = `
+CREATE TABLE restricted_ping_user_cooldowns (
+  guild_id TEXT NOT NULL,
+  role_id TEXT NOT NULL
+    CHECK (
+      length(role_id) BETWEEN 17 AND 20
+      AND role_id NOT GLOB '*[^0-9]*'
+    ),
+  user_id TEXT NOT NULL
+    CHECK (
+      length(user_id) BETWEEN 17 AND 20
+      AND user_id NOT GLOB '*[^0-9]*'
+    ),
+  last_success_at TEXT NOT NULL,
+  success_count INTEGER NOT NULL DEFAULT 1
+    CHECK (success_count BETWEEN 1 AND 9007199254740991),
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, role_id, user_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, role_id)
+    REFERENCES restricted_ping_roles(guild_id, role_id) ON DELETE CASCADE
+)
+`;
+
+export const RESTRICTED_PING_EVENTS_TABLE_SQL = `
+CREATE TABLE restricted_ping_events (
+  guild_id TEXT NOT NULL,
+  event_id TEXT NOT NULL
+    CHECK (
+      length(event_id) BETWEEN 8 AND 24
+      AND event_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+  event_number INTEGER NOT NULL CHECK (event_number BETWEEN 1 AND 2147483647),
+  event_type TEXT NOT NULL
+    CHECK (
+      event_type IN (
+        'mapping_added', 'mapping_removed', 'configuration_updated',
+        'enabled', 'disabled', 'role_deleted', 'channel_deleted',
+        'ping_succeeded'
+      )
+    ),
+  actor_id TEXT
+    CHECK (
+      actor_id IS NULL OR (
+        length(actor_id) BETWEEN 17 AND 20
+        AND actor_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  role_id TEXT NOT NULL
+    CHECK (
+      length(role_id) BETWEEN 17 AND 20
+      AND role_id NOT GLOB '*[^0-9]*'
+    ),
+  channel_id TEXT
+    CHECK (
+      channel_id IS NULL OR (
+        length(channel_id) BETWEEN 17 AND 20
+        AND channel_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  user_id TEXT
+    CHECK (
+      user_id IS NULL OR (
+        length(user_id) BETWEEN 17 AND 20
+        AND user_id NOT GLOB '*[^0-9]*'
+      )
+    ),
+  source TEXT NOT NULL CHECK (length(source) BETWEEN 1 AND 100),
+  details_json TEXT NOT NULL DEFAULT '{}'
+    CHECK (
+      length(CAST(details_json AS BLOB)) BETWEEN 2 AND 4000
+      AND json_valid(details_json)
+    ),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, event_id),
+  UNIQUE (guild_id, event_number),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
 export const CAPABILITY_GRANTS_GUILD_CAPABILITY_INDEX_SQL = `
 CREATE INDEX idx_capability_grants_guild_capability
 ON delegated_capability_grants (guild_id, active, capability, principal_type, principal_id)
@@ -1134,6 +1312,28 @@ WHERE review_message_id IS NOT NULL
 export const APPLICATION_EVENTS_APPLICATION_INDEX_SQL = `
 CREATE INDEX idx_application_events_application
 ON application_events (guild_id, application_id, event_number)
+`;
+
+export const RESTRICTED_PING_ROLES_GUILD_ENABLED_INDEX_SQL = `
+CREATE INDEX idx_restricted_ping_roles_guild_enabled
+ON restricted_ping_roles (guild_id, enabled, role_id)
+`;
+export const RESTRICTED_PING_ROLES_RESERVATION_INDEX_SQL = `
+CREATE UNIQUE INDEX idx_restricted_ping_roles_reservation
+ON restricted_ping_roles (guild_id, reservation_id)
+WHERE reservation_id IS NOT NULL
+`;
+export const RESTRICTED_PING_CHANNELS_GUILD_CHANNEL_INDEX_SQL = `
+CREATE INDEX idx_restricted_ping_channels_guild_channel
+ON restricted_ping_channels (guild_id, channel_id, role_id)
+`;
+export const RESTRICTED_PING_EVENTS_ROLE_NUMBER_INDEX_SQL = `
+CREATE INDEX idx_restricted_ping_events_role_number
+ON restricted_ping_events (guild_id, role_id, event_number DESC)
+`;
+export const RESTRICTED_PING_EVENTS_SUCCESS_NUMBER_INDEX_SQL = `
+CREATE INDEX idx_restricted_ping_events_success_number
+ON restricted_ping_events (guild_id, event_type, event_number DESC)
 `;
 
 export const V5_TABLE_NAMES = [
@@ -1243,6 +1443,45 @@ const V5_INDEX_SQL: Record<(typeof V5_EXPLICIT_INDEX_NAMES)[number], string> = {
   idx_applications_guild_review_message:
     APPLICATIONS_GUILD_REVIEW_MESSAGE_INDEX_SQL,
   idx_application_events_application: APPLICATION_EVENTS_APPLICATION_INDEX_SQL,
+};
+
+export const V6_TABLE_NAMES = [
+  ...V5_TABLE_NAMES,
+  "restricted_ping_roles",
+  "restricted_ping_channels",
+  "restricted_ping_user_cooldowns",
+  "restricted_ping_events",
+] as const;
+
+export const V6_EXPLICIT_INDEX_NAMES = [
+  ...V5_EXPLICIT_INDEX_NAMES,
+  "idx_restricted_ping_roles_guild_enabled",
+  "idx_restricted_ping_roles_reservation",
+  "idx_restricted_ping_channels_guild_channel",
+  "idx_restricted_ping_events_role_number",
+  "idx_restricted_ping_events_success_number",
+] as const;
+
+const V6_TABLE_SQL: Record<(typeof V6_TABLE_NAMES)[number], string> = {
+  ...V5_TABLE_SQL,
+  restricted_ping_roles: RESTRICTED_PING_ROLES_TABLE_SQL,
+  restricted_ping_channels: RESTRICTED_PING_CHANNELS_TABLE_SQL,
+  restricted_ping_user_cooldowns: RESTRICTED_PING_USER_COOLDOWNS_TABLE_SQL,
+  restricted_ping_events: RESTRICTED_PING_EVENTS_TABLE_SQL,
+};
+
+const V6_INDEX_SQL: Record<(typeof V6_EXPLICIT_INDEX_NAMES)[number], string> = {
+  ...V5_INDEX_SQL,
+  idx_restricted_ping_roles_guild_enabled:
+    RESTRICTED_PING_ROLES_GUILD_ENABLED_INDEX_SQL,
+  idx_restricted_ping_roles_reservation:
+    RESTRICTED_PING_ROLES_RESERVATION_INDEX_SQL,
+  idx_restricted_ping_channels_guild_channel:
+    RESTRICTED_PING_CHANNELS_GUILD_CHANNEL_INDEX_SQL,
+  idx_restricted_ping_events_role_number:
+    RESTRICTED_PING_EVENTS_ROLE_NUMBER_INDEX_SQL,
+  idx_restricted_ping_events_success_number:
+    RESTRICTED_PING_EVENTS_SUCCESS_NUMBER_INDEX_SQL,
 };
 
 export const V1_TABLE_NAMES = [
@@ -1516,6 +1755,25 @@ export function createV5Objects(db: Database.Database): void {
   createV5OperationalObjects(db);
 }
 
+/** Adds only the restricted-role-ping objects introduced by schema v6. */
+export function createV6OperationalObjects(db: Database.Database): void {
+  for (const table of V6_TABLE_NAMES) {
+    if (!(V5_TABLE_NAMES as readonly string[]).includes(table)) {
+      db.exec(V6_TABLE_SQL[table]);
+    }
+  }
+  for (const index of V6_EXPLICIT_INDEX_NAMES) {
+    if (!(V5_EXPLICIT_INDEX_NAMES as readonly string[]).includes(index)) {
+      db.exec(V6_INDEX_SQL[index]);
+    }
+  }
+}
+
+export function createV6Objects(db: Database.Database): void {
+  createV5Objects(db);
+  createV6OperationalObjects(db);
+}
+
 export function recordV4SchemaVersion(
   db: Database.Database,
   appliedAt: string,
@@ -1523,6 +1781,15 @@ export function recordV4SchemaVersion(
   db.prepare(
     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
   ).run(LEGACY_V4_SCHEMA_VERSION, appliedAt);
+}
+
+export function recordV5SchemaVersion(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  db.prepare(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+  ).run(LEGACY_V5_SCHEMA_VERSION, appliedAt);
 }
 
 export function recordCurrentSchemaVersion(
@@ -1572,8 +1839,23 @@ export function initializeV5Schema(
 ): void {
   const initialize = db.transaction(() => {
     createV5Objects(db);
-    recordCurrentSchemaVersion(db, appliedAt);
+    recordV5SchemaVersion(db, appliedAt);
     const issues = validateV5Schema(db);
+    if (issues.length > 0) {
+      throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
+    }
+  });
+  initialize.immediate();
+}
+
+export function initializeV6Schema(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  const initialize = db.transaction(() => {
+    createV6Objects(db);
+    recordCurrentSchemaVersion(db, appliedAt);
+    const issues = validateV6Schema(db);
     if (issues.length > 0) {
       throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
     }
@@ -1601,8 +1883,11 @@ export function detectDatabaseSchema(
     .map((row) => row.name)
     .sort();
 
+  if (sameStrings(tables, [...V6_TABLE_NAMES].sort())) {
+    return validateV6Schema(db).length === 0 ? "current-v6" : "unknown";
+  }
   if (sameStrings(tables, [...V5_TABLE_NAMES].sort())) {
-    return validateV5Schema(db).length === 0 ? "current-v5" : "unknown";
+    return validateV5Schema(db).length === 0 ? "legacy-v5" : "unknown";
   }
   if (sameStrings(tables, [...V4_TABLE_NAMES].sort())) {
     return validateV4Schema(db).length === 0 ? "legacy-v4" : "unknown";
@@ -1836,12 +2121,12 @@ export function validateV5Schema(db: Database.Database): string[] {
     .all() as Array<{ version: number; applied_at: string }>;
   const versionNumbers = versions.map((row) => row.version);
   const validVersionSequence = [
-    [CURRENT_SCHEMA_VERSION],
-    [LEGACY_V4_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION],
+    [LEGACY_V5_SCHEMA_VERSION],
+    [LEGACY_V4_SCHEMA_VERSION, LEGACY_V5_SCHEMA_VERSION],
     [
       LEGACY_V3_SCHEMA_VERSION,
       LEGACY_V4_SCHEMA_VERSION,
-      CURRENT_SCHEMA_VERSION,
+      LEGACY_V5_SCHEMA_VERSION,
     ],
   ].some(
     (expected) =>
@@ -1859,6 +2144,60 @@ export function validateV5Schema(db: Database.Database): string[] {
 
   validateV3Data(db, issues);
   validateV5Data(db, issues);
+  validateDatabaseHealth(db, issues);
+  return issues;
+}
+
+export function validateV6Schema(db: Database.Database): string[] {
+  const issues = validateExactObjects(
+    db,
+    [...V6_TABLE_NAMES],
+    [...V6_EXPLICIT_INDEX_NAMES],
+  );
+  if (issues.length > 0) {
+    return issues;
+  }
+
+  validateSqlDefinitions(db, V6_TABLE_SQL, "table", issues);
+  validateSqlDefinitions(db, V6_INDEX_SQL, "index", issues);
+
+  const versions = db
+    .prepare(
+      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
+    )
+    .all() as Array<{ version: number; applied_at: string }>;
+  const versionNumbers = versions.map((row) => row.version);
+  const validVersionSequence = [
+    [CURRENT_SCHEMA_VERSION],
+    [LEGACY_V5_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION],
+    [
+      LEGACY_V4_SCHEMA_VERSION,
+      LEGACY_V5_SCHEMA_VERSION,
+      CURRENT_SCHEMA_VERSION,
+    ],
+    [
+      LEGACY_V3_SCHEMA_VERSION,
+      LEGACY_V4_SCHEMA_VERSION,
+      LEGACY_V5_SCHEMA_VERSION,
+      CURRENT_SCHEMA_VERSION,
+    ],
+  ].some(
+    (expected) =>
+      expected.length === versionNumbers.length &&
+      expected.every((version, index) => versionNumbers[index] === version),
+  );
+  if (
+    !validVersionSequence ||
+    versions.some((row) => !isValidTimestamp(row.applied_at))
+  ) {
+    issues.push(
+      "schema_migrations must contain version 6, optionally following version 5, versions 4 and 5, or versions 3 through 5",
+    );
+  }
+
+  validateV3Data(db, issues);
+  validateV5Data(db, issues);
+  validateV6Data(db, issues);
   validateDatabaseHealth(db, issues);
   return issues;
 }
@@ -2585,6 +2924,143 @@ function validateV5Data(db: Database.Database, issues: string[]): void {
       issues,
     );
   }
+}
+
+function validateV6Data(db: Database.Database, issues: string[]): void {
+  const textColumns: ReadonlyArray<
+    readonly [
+      table: string,
+      required: readonly string[],
+      nullable: readonly string[],
+    ]
+  > = [
+    [
+      "restricted_ping_roles",
+      [
+        "guild_id",
+        "role_id",
+        "created_by",
+        "updated_by",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "bindings_verified_at",
+        "last_role_success_at",
+        "reservation_id",
+        "reservation_user_id",
+        "reservation_channel_id",
+        "reservation_source",
+        "reservation_expires_at",
+      ],
+    ],
+    [
+      "restricted_ping_channels",
+      ["guild_id", "role_id", "channel_id", "created_by", "created_at"],
+      [],
+    ],
+    [
+      "restricted_ping_user_cooldowns",
+      ["guild_id", "role_id", "user_id", "last_success_at", "updated_at"],
+      [],
+    ],
+    [
+      "restricted_ping_events",
+      [
+        "guild_id",
+        "event_id",
+        "event_type",
+        "role_id",
+        "source",
+        "details_json",
+        "created_at",
+      ],
+      ["actor_id", "channel_id", "user_id"],
+    ],
+  ];
+  for (const [table, required, nullable] of textColumns) {
+    validateTextColumnTypes(db, table, required, nullable, issues);
+  }
+
+  const timestampColumns: ReadonlyArray<
+    readonly [
+      table: string,
+      required: readonly string[],
+      nullable: readonly string[],
+    ]
+  > = [
+    [
+      "restricted_ping_roles",
+      ["created_at", "updated_at"],
+      [
+        "bindings_verified_at",
+        "last_role_success_at",
+        "reservation_expires_at",
+      ],
+    ],
+    ["restricted_ping_channels", ["created_at"], []],
+    ["restricted_ping_user_cooldowns", ["last_success_at", "updated_at"], []],
+    ["restricted_ping_events", ["created_at"], []],
+  ];
+  for (const [table, required, nullable] of timestampColumns) {
+    validateTimestampColumns(db, table, required, nullable, issues);
+  }
+
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM restricted_ping_roles
+     WHERE role_id = guild_id
+        OR (last_role_success_at IS NULL) != (success_count = 0)
+        OR (reservation_id IS NULL) != (reservation_user_id IS NULL)
+        OR (reservation_id IS NULL) != (reservation_channel_id IS NULL)
+        OR (reservation_id IS NULL) != (reservation_source IS NULL)
+        OR (reservation_id IS NULL) != (reservation_expires_at IS NULL)
+     LIMIT 1`,
+    "restricted_ping_roles contains invalid success or reservation state",
+    issues,
+  );
+
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM restricted_ping_roles
+     WHERE length(role_id) NOT BETWEEN 17 AND 20
+        OR role_id GLOB '*[^0-9]*'
+        OR length(created_by) NOT BETWEEN 17 AND 20
+        OR created_by GLOB '*[^0-9]*'
+        OR length(updated_by) NOT BETWEEN 17 AND 20
+        OR updated_by GLOB '*[^0-9]*'
+        OR (reservation_user_id IS NOT NULL AND (
+          length(reservation_user_id) NOT BETWEEN 17 AND 20
+          OR reservation_user_id GLOB '*[^0-9]*'
+        ))
+        OR (reservation_channel_id IS NOT NULL AND (
+          length(reservation_channel_id) NOT BETWEEN 17 AND 20
+          OR reservation_channel_id GLOB '*[^0-9]*'
+        ))
+     LIMIT 1`,
+    "restricted_ping_roles contains invalid Discord identifiers",
+    issues,
+  );
+
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM restricted_ping_events
+     WHERE event_type = 'ping_succeeded'
+     GROUP BY guild_id HAVING COUNT(*) > 10000
+     LIMIT 1`,
+    "restricted_ping_events exceeds the per-guild successful event limit",
+    issues,
+  );
+
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM restricted_ping_events
+     WHERE json_valid(details_json) = 0
+        OR length(CAST(details_json AS BLOB)) NOT BETWEEN 2 AND 4000
+     LIMIT 1`,
+    "restricted_ping_events contains invalid or oversized JSON",
+    issues,
+  );
 }
 
 function validateTextColumnTypes(

@@ -3,7 +3,7 @@ import { USER_ACTIVITY_METRICS, type UserActivityMetric } from "../types.js";
 
 const USER_ACTIVITY_METRIC_SET = new Set<string>(USER_ACTIVITY_METRICS);
 const COMMAND_METRIC_PATTERN =
-  /^command_(?:usage|failures)\.(?:setup|superior|panel|ticket|utility|fun|greetings)\.[a-z0-9][a-z0-9._-]*$/;
+  /^command_(?:usage|failures)\.(?:setup|superior|panel|ticket|utility|fun|greetings|pingrole|restrictedping)\.[a-z0-9][a-z0-9._-]*$/;
 const USER_METRIC_PATTERN =
   /^user_stats\.(\d{17,20})\.(messages_sent|reactions_sent|reactions_received|battles_played|battles_won)$/;
 

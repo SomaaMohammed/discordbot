@@ -259,6 +259,73 @@ export function createDiscordClient(runtime: BotRuntime): Client {
       });
   });
 
+  client.on("roleDelete", (role) => {
+    return workTracker
+      .run(async () => {
+        if (!runtime.storage.getGuild(role.guild.id)) return;
+        const cleanup = runtime.storage
+          .forGuild(role.guild.id)
+          .cleanupRestrictedPingRole(role.id);
+        if (cleanup.mappingsDeleted === 0 && cleanup.rolesDeleted === 0) return;
+        runtime.invalidateGuild(role.guild.id);
+        logInfo(
+          "restricted-ping-lifecycle",
+          "Deleted role configuration cleaned up",
+          {
+            guildId: role.guild.id,
+            roleId: role.id,
+            rolesDeleted: cleanup.rolesDeleted,
+            mappingsDeleted: cleanup.mappingsDeleted,
+            userCooldownsDeleted: cleanup.userCooldownsDeleted,
+          },
+        );
+      })
+      .catch((error) => {
+        logError("restricted-ping-lifecycle", "Role deletion cleanup failed", {
+          guildId: role.guild.id,
+          roleId: role.id,
+          error,
+        });
+      });
+  });
+
+  client.on("channelDelete", (channel) => {
+    return workTracker
+      .run(async () => {
+        if (channel.isDMBased()) return;
+        const guildId = channel.guild.id;
+        if (!runtime.storage.getGuild(guildId)) return;
+        const cleanup = runtime.storage
+          .forGuild(guildId)
+          .cleanupRestrictedPingChannel(channel.id);
+        if (cleanup.mappingsDeleted === 0 && cleanup.rolesDeleted === 0) return;
+        runtime.invalidateGuild(guildId);
+        logInfo(
+          "restricted-ping-lifecycle",
+          "Deleted channel mappings cleaned up",
+          {
+            guildId,
+            channelId: channel.id,
+            roleIds: cleanup.roleIds,
+            rolesDeleted: cleanup.rolesDeleted,
+            mappingsDeleted: cleanup.mappingsDeleted,
+            userCooldownsDeleted: cleanup.userCooldownsDeleted,
+          },
+        );
+      })
+      .catch((error) => {
+        logError(
+          "restricted-ping-lifecycle",
+          "Channel deletion cleanup failed",
+          {
+            guildId: channel.isDMBased() ? "dm" : channel.guild.id,
+            channelId: channel.id,
+            error,
+          },
+        );
+      });
+  });
+
   client.on("interactionCreate", (interaction: Interaction) => {
     return workTracker
       .run(async () => {

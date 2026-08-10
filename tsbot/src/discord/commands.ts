@@ -6,6 +6,7 @@ import {
   type GuildMember,
   type ModalSubmitInteraction,
   type StringSelectMenuInteraction,
+  type SlashCommandOptionsOnlyBuilder,
   type SlashCommandSubcommandBuilder,
   type SlashCommandSubcommandsOnlyBuilder,
 } from "discord.js";
@@ -72,6 +73,14 @@ import {
   handleTicketModal,
   handleTicketSelect,
 } from "./ticket-interactions.js";
+import {
+  buildPingRoleCommandDefinition,
+  buildRestrictedPingCommandDefinition,
+} from "./restricted-ping-command.js";
+import {
+  handlePingRoleCommand,
+  handleRestrictedPingCommand,
+} from "./restricted-ping-commands-handler.js";
 
 const SUPERIOR_SUBCOMMANDS = [
   "say",
@@ -127,7 +136,9 @@ const FUN_METRICS: Array<{ name: string; value: keyof UserMetrics }> = [
 ];
 
 export function buildCommandDefinitions(): Array<
-  SlashCommandBuilder | SlashCommandSubcommandsOnlyBuilder
+  | SlashCommandBuilder
+  | SlashCommandOptionsOnlyBuilder
+  | SlashCommandSubcommandsOnlyBuilder
 > {
   const superior = new SlashCommandBuilder()
     .setName("superior")
@@ -213,6 +224,8 @@ export function buildCommandDefinitions(): Array<
     buildSuggestionCommandDefinition(),
     buildApplicationCommandDefinition(),
     buildAccessCommandDefinition(),
+    buildPingRoleCommandDefinition(),
+    buildRestrictedPingCommandDefinition(),
     buildUtilityCommandDefinition(),
     fun,
     greetings,
@@ -528,7 +541,7 @@ export async function handleChatInputCommand(
   }
   const command = interaction.commandName;
   const subcommand = interaction.options.getSubcommand(false);
-  if (!subcommand) {
+  if (command !== "pingrole" && !subcommand) {
     await replyPrivate(interaction, "Choose a supported subcommand.");
     return;
   }
@@ -563,6 +576,18 @@ export async function handleChatInputCommand(
       interaction,
       "This server was disabled or reconfigured. Please try again.",
     );
+    return;
+  }
+  if (command === "pingrole") {
+    await handlePingRoleCommand(interaction, guildRuntime);
+    return;
+  }
+  if (!subcommand) {
+    await replyPrivate(interaction, "Choose a supported subcommand.");
+    return;
+  }
+  if (command === "restrictedping") {
+    await handleRestrictedPingCommand(interaction, guildRuntime);
     return;
   }
   if (command === "access") {
@@ -798,7 +823,9 @@ async function handleHelp(
 export function buildSuperiorCommandGuide(): string {
   return [
     "**Superior command guide**",
-    "`/setup` — Administrator configuration, validation, format-4 export/import, and purge",
+    "`/pingrole role:@Role` - safely notify a configured role in its allowed channel",
+    "`/restrictedping` - owner/Administrator restricted-role mapping and cooldown configuration",
+    "`/setup` — Administrator configuration, validation, format-5 export/import, and purge",
     "`/access` — owner/Administrator grants and status for delegated role capabilities",
     "`/panel` — fixed help, server, resource, ticket, suggestion, and application panels",
     "`/ticket` — delegated department, form, routing, launcher, health, and recovery tools",
