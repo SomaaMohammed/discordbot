@@ -1,5 +1,6 @@
 import {
   ChannelType,
+  MessageFlags,
   escapeMarkdown,
   type ChatInputCommandInteraction,
   type GuildMember,
@@ -39,6 +40,7 @@ import {
 } from "./suggestion-delivery.js";
 import { inspectSuggestionResources } from "./phase2-permissions.js";
 import { postFeatureLauncher } from "./preset-panels.js";
+import { logDomainOutcome } from "./domain-outcomes.js";
 
 const PAGE_SIZE = 10;
 
@@ -113,7 +115,7 @@ export async function handleSuggestionCommand(
     case "withdraw":
       await withdrawSuggestion(interaction, runtime, storage);
       return;
-    case "setup":
+    case "configure":
       if (
         !(await requireCapability(
           interaction,
@@ -122,7 +124,7 @@ export async function handleSuggestionCommand(
         ))
       )
         return;
-      await setupSuggestions(interaction, runtime, storage);
+      await configureSuggestions(interaction, runtime, storage);
       return;
     case "panel":
       if (
@@ -165,6 +167,7 @@ export async function handleSuggestionCommand(
         "Suggestions are disabled. Stored suggestions and votes were retained.",
       );
       runtime.storage.recordCommandMetric("suggestion.disable");
+      logDomainOutcome("suggestion", "disable", runtime.guildId, "completed");
       return;
     case "recover":
       if (
@@ -185,7 +188,7 @@ export async function handleSuggestionCommand(
   }
 }
 
-async function setupSuggestions(
+async function configureSuggestions(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
   storage: SuggestionStorage,
@@ -242,7 +245,7 @@ async function setupSuggestions(
   if (resources.issues.length > 0) {
     await replyPrivate(
       interaction,
-      `Suggestion setup needs attention: ${resources.issues.join(" ")}`,
+      `Suggestion configuration needs attention: ${resources.issues.join(" ")}`,
     );
     return;
   }
@@ -263,7 +266,7 @@ async function setupSuggestions(
   if (!runtime.isCurrent()) {
     await replyPrivate(
       interaction,
-      "This server changed after suggestion setup was verified. No configuration was saved.",
+      "This server changed after suggestion configuration was verified. No configuration was saved.",
     );
     return;
   }
@@ -273,7 +276,11 @@ async function setupSuggestions(
     interaction,
     `Suggestions are enabled in <#${saved.suggestionChannelId}> with reviewer role <@&${saved.reviewerRoleId}>.`,
   );
-  runtime.storage.recordCommandMetric("suggestion.setup");
+  runtime.storage.recordCommandMetric("suggestion.configure");
+  logDomainOutcome("suggestion", "configure", runtime.guildId, "completed", {
+    channelId: saved.suggestionChannelId,
+    state: saved.enabled ? "enabled" : "disabled",
+  });
 }
 
 async function postSuggestionPanel(
@@ -394,6 +401,11 @@ async function withdrawSuggestion(
       : `Suggestion #${number} was withdrawn.`,
   );
   runtime.storage.recordCommandMetric("suggestion.withdraw");
+  logDomainOutcome("suggestion", "withdraw", runtime.guildId, result.status, {
+    recordId: result.suggestion.suggestionId,
+    recordNumber: result.suggestion.suggestionNumber,
+    state: result.suggestion.state,
+  });
 }
 
 async function listSuggestions(
@@ -498,6 +510,11 @@ async function reviewSuggestion(
       : `Suggestion #${number} is now **${state}**.`,
   );
   runtime.storage.recordCommandMetric("suggestion.review");
+  logDomainOutcome("suggestion", "review", runtime.guildId, result.status, {
+    recordId: result.suggestion.suggestionId,
+    recordNumber: result.suggestion.suggestionNumber,
+    state: result.suggestion.state,
+  });
 }
 
 async function recoverSuggestion(
@@ -587,12 +604,29 @@ async function recoverSuggestion(
       `Suggestion #${number} was reposted in <#${published.message.channelId}>.`,
     );
     runtime.storage.recordCommandMetric("suggestion.recover");
+    logDomainOutcome("suggestion", "recover", runtime.guildId, "delivered", {
+      recordId: published.suggestion.suggestionId,
+      recordNumber: published.suggestion.suggestionNumber,
+      channelId: published.message.channelId,
+      state: published.suggestion.state,
+    });
   } catch (error) {
     await replyPrivate(
       interaction,
       `Suggestion recovery failed safely: ${errorMessage(error)}`,
     );
     runtime.storage.recordCommandMetric("suggestion.recover", false);
+    logDomainOutcome(
+      "suggestion",
+      "recover",
+      runtime.guildId,
+      "failed-delivery",
+      {
+        recordId: suggestion.suggestionId,
+        recordNumber: suggestion.suggestionNumber,
+        state: suggestion.deliveryState,
+      },
+    );
   }
 }
 
@@ -789,7 +823,7 @@ async function deferPrivate(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -804,14 +838,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }

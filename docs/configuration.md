@@ -1,6 +1,6 @@
 # Configuration
 
-Superior uses one Discord application, one bot process, and one shared SQLite database. Guild configuration is isolated by guild ID and starts disabled.
+Superior uses one Discord application, one bot process, and one shared SQLite database. Guild configuration is isolated by guild ID and starts immediately usable with safe defaults.
 
 ## Discord application
 
@@ -35,7 +35,6 @@ Copy `.env.example` to `.env` in the application root. For a Windows portable bu
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------- |
 | `DISCORD_TOKEN`             | Yes           | Bot token from the Developer Portal.                                                        |
 | `DB_FILE`                   | No            | SQLite path. A relative value resolves from the application root; default is `superior.db`. |
-| `BOT_VERSION`               | No            | Display override; normally leave blank to use package version 5.5.0.                        |
 | `COMMAND_REGISTRATION_MODE` | No            | `global` for production or `guild` for development. Defaults to `global`.                   |
 | `DEV_GUILD_IDS`             | In guild mode | Comma-separated development guild IDs.                                                      |
 
@@ -47,29 +46,26 @@ Use global registration for production. Discord can take time to propagate globa
 
 Discord cannot vary slash-command visibility by a guild's delegated grants. `/panel`, `/ticket`, `/suggestion`, and `/application` therefore expose relevant command choices and enforce the exact permission at runtime. A visible command is not evidence that the member may use it. `/access` and `/restrictedping` are Administrator-restricted in Discord and also perform a fresh owner-or-Administrator check at runtime.
 
-## Guild onboarding
+## Immediate defaults and optional configuration
 
-After the bot joins a guild, the owner or a member with Administrator permission should run:
+After Superior joins or rejoins a guild, all core command families, greetings, deliberately addressed chat, reply moderation, activity metrics, and existing persistent interaction routes work immediately. No setup, validation, or enable sequence is required. The initial settings use UTC, a finite moderation limit, neutral invocation terms, and a neutral `Welcome` greeting profile.
 
-1. `/setup status`
-2. `/setup channel` if audit output should go to a dedicated channel
-3. `/setup timezone`
-4. `/setup trigger` to set a primary invocation and optional aliases
-5. `/setup feature` for `chat`, `reply-moderation`, `greetings`, and `activity-metrics`
-6. `/setup limits` to set the finite bulk-moderation cap
-7. `/setup greeting` to add neutral reusable profiles if greetings are enabled
-8. `/setup validate`
-9. `/setup enable`
+Owners and Administrators can inspect or tune those defaults when needed:
 
-Then configure only the operational services the guild needs:
+- `/config status` reports the current effective settings.
+- `/config bot-state enabled:<true|false>` is the explicit emergency switch for the whole guild.
+- `/config log set|clear`, `/config timezone`, `/config limits`, `/config trigger`, and `/config greeting` change their respective settings without disabling unrelated behavior.
+- `/data export`, owner-only `/data import`, and owner-confirmed `/data purge` manage tenant data.
 
-- Create ticket departments with `/ticket department create`, add up to five fields with `/ticket field add`, enable each healthy department, and post `/ticket panel`. `/ticket setup` remains the compatibility path for the migrated or default `General Support` department.
-- Configure suggestions with `/suggestion setup`, then post `/suggestion panel`.
+Configure only the external-resource workflows the guild needs:
+
+- Create ticket departments with `/ticket department create`, add up to five fields with `/ticket field add`, enable each healthy department, and post `/ticket panel`.
+- Configure suggestions with `/suggestion configure`, then post `/suggestion panel`.
 - Create application forms with `/application form create`, add 1–5 questions with `/application field add`, enable each healthy form, then post `/application panel`.
 - Register each restricted role and destination with `/restrictedping add`, review it with `/restrictedping info`, and leave the Discord role's **Allow anyone to @mention this role** setting off.
 - If routine management should be delegated, use `/access grant` only after the relevant roles exist and have been reviewed.
 
-`/setup disable` stops guild behavior without deleting data. A confirmed removal of Superior from a guild purges that guild's live SQLite rows and process state; a guild that is merely absent or unavailable during startup is marked inactive so an outage cannot trigger deletion. `/setup purge` is owner-only and permanently removes only that guild's live rows after exact confirmation; neither removal path deletes Discord-hosted messages, logs, exports, or backups.
+`/config bot-state enabled:false` stops guild behavior without deleting data. Removing Superior from a guild marks that tenant inactive and retains its rows and persistent-panel bindings so a later rejoin works without reposting. `/data purge` is owner-only and permanently removes only that guild's live rows after exact confirmation; neither departure nor purge deletes Discord-hosted messages, logs, exports, or backups.
 
 ## Delegated access
 
@@ -82,7 +78,7 @@ The seven capabilities are intentionally separate:
 | `panels.manage`          | List, post, refresh, and inspect fixed panels                                             | Ticket, suggestion, or application configuration |
 | `tickets.configure`      | Configure departments and fields, enable/disable them, post launchers, and inspect health | Reading or managing private ticket contents      |
 | `tickets.manage`         | Recover tickets and manage private ticket controls                                        | Editing departments or delegated access          |
-| `suggestions.configure`  | Setup/disable suggestions, post launchers, and recover public delivery                    | Reviewing suggestion content                     |
+| `suggestions.configure`  | Configure/disable suggestions, post launchers, and recover public delivery                | Reviewing suggestion content                     |
 | `suggestions.review`     | List and transition suggestions                                                           | Changing service configuration                   |
 | `applications.configure` | Configure forms/questions and post launchers                                              | Reading or deciding private applications         |
 | `applications.review`    | Review, claim, decide, and recover applications                                           | Changing form configuration                      |
@@ -175,13 +171,13 @@ Closing requires a bounded reason. Superior assembles a chronological plain-text
 
 ## Suggestions
 
-`/suggestion setup` selects a public suggestion channel, reviewer role, optional staff review channel, optional public discussion threads, a persisted cooldown, and whether authors may self-vote. The default is three submissions per 600 seconds; configuration accepts 1–10 submissions and a 60–3,600-second window. Self-voting is disabled by default.
+`/suggestion configure` selects a public suggestion channel, reviewer role, optional staff review channel, optional public discussion threads, a persisted cooldown, and whether authors may self-vote. The default is three submissions per 600 seconds; configuration accepts 1–10 submissions and a 60–3,600-second window. Self-voting is disabled by default.
 
 Members use `/suggestion submit` or the `suggestions` panel, complete a private modal, and receive a server-local number. Superior reserves the record before posting its public themed embed. Upvote/downvote buttons store one vote per member; clicking the same vote removes it and clicking the opposite vote switches it transactionally. Totals are public, voter identities are not, and voting is refused for ineligible state, stale/cross-guild controls, or a self-vote when disabled.
 
 Authors use `/suggestion status` for one or a bounded recent list and `/suggestion withdraw` while the proposal is `open` or `under-review`. Reviewers use `/suggestion list` and `/suggestion review`, or the review controls, with a bounded reason: `open` may become `under-review`, `accepted`, or `declined`; `under-review` may become `accepted` or `declined`; and `accepted` may become `implemented`. `withdrawn` is author-driven. Closed-state voting is disabled, the public embed is refreshed, an audit event is stored, and Superior attempts to DM the author.
 
-`/suggestion disable` stops new submissions without deleting records or votes. Previously verified bindings remain available for review and recovery of existing suggestions; an imported configuration with no verification marker remains dormant until explicit setup. `/suggestion recover` reconciles a missing public message and optional thread. Repeated delivery/state actions are backed by persisted identity and conditional transitions rather than an in-memory correctness assumption.
+`/suggestion disable` stops new submissions without deleting records or votes. Previously verified bindings remain available for review and recovery of existing suggestions; an imported configuration with no verification marker remains dormant until explicit configuration. `/suggestion recover` reconciles a missing public message and optional thread. Repeated delivery/state actions are backed by persisted identity and conditional transitions rather than an in-memory correctness assumption.
 
 ## Private staff applications
 
@@ -195,32 +191,34 @@ Only the applicant can use `/application status` for their records or `/applicat
 
 ## Export, import, purge, and recovery review
 
-`/setup export` lets the owner or an Administrator download a bounded same-guild format-5 snapshot. It contains metadata, settings, metrics, delegated grants, departments/fields/responses/events, panels, suggestions/votes/events, application forms/responses/events, restricted-ping configuration/mappings/audit history, and operational delivery identifiers.
+`/data export` lets the owner or an Administrator download a bounded same-guild format-6 snapshot. It contains metadata, settings, metrics, delegated grants, departments/fields/responses/events, persistent panels, suggestions/votes/events, application forms/responses/events, restricted-ping configuration/mappings/audit history, and operational delivery identifiers.
 
-`/setup import` is owner-only, requires exact same-guild confirmation, validates collection limits and references, and runs in one transaction:
+`/data import` is owner-only, requires exact same-guild confirmation, validates collection limits and references, and runs in one transaction:
 
-- Format 5 replaces settings, metrics, and the complete portable operational model while preserving internal delivery deduplication.
+- Format 6 replaces settings, metrics, and the complete portable operational model while preserving internal delivery deduplication.
+- Legacy format 5 replaces its schema-v7 portable model and converts settings to the current safe defaults while preserving its operational records.
 - Legacy format 4 replaces its complete schema-v5 model and leaves restricted-ping collections empty.
 - Legacy format 3 replaces settings, metrics, panels, and the Phase 1 ticket model, converting it to a `General Support` department with Subject/Details responses. Phase 2 collections absent from the file are cleared.
 - Legacy format 2 replaces settings and metrics while preserving all current operational rows.
 
-Every import disables the guild. Imported delegated grants are inactive; ticket departments, application forms, suggestion configuration, and restricted-ping roles are disabled; and all Discord bindings are marked unverified. Imported historical records remain for integrity. `/setup enable` alone does not reactivate ticket/suggestion/application controls or restricted role pings: an owner, Administrator, or properly separated configuration delegate must revalidate current resources and explicitly enable each department, service, form, or restricted role. Keep a protected pre-import export or operator backup when rollback may be necessary.
+Every import leaves the core guild bot active. Imported delegated grants are inactive; external ticket, application, suggestion, restricted-ping, and resource bindings remain dormant or unverified until the corresponding configuration or recovery path checks current Discord resources and permissions. Imported historical records remain intact. Keep a protected pre-import export or operator backup when rollback may be necessary.
 
 Import and purge affect only the live SQLite database. They do not delete downloaded exports, backups, SQLite free pages, Discord panels, ticket/application/suggestion messages, ticket channels, transcripts, review logs, discussion threads, or direct messages.
 
 ## Command reference
 
-- `/setup`: status, enable, disable, channel, feature, timezone, limits, trigger, greeting, validate, export, import, and guild-data purge.
+- `/config`: status, explicit bot-state switch, log-channel set/clear, timezone, limits, trigger, and greeting management.
+- `/data`: export, owner-only import, and owner-confirmed guild-data purge.
 - `/access`: grant, revoke, list, and status for delegated role capabilities.
 - `/pingrole role:<role>`: request one authorized restricted role ping in the current channel or allowed child thread/post.
 - `/restrictedping`: add/remove/list/info/enable/disable restricted role mappings, clean stale role/channel IDs, and configure cooldown/thread policy; owner-or-Administrator only.
 - `/panel`: list, post, and status for all six fixed presets.
-- `/ticket`: compatibility setup, status, panel, disable, recover; department list/create/edit/enable/disable/delete/health; field add/edit/remove/move.
-- `/suggestion`: submit, status, withdraw, setup, panel, list, review, disable, and recover.
+- `/ticket`: status, panel, disable, recover; department list/create/edit/enable/disable/delete/health; field add/edit/remove/move.
+- `/suggestion`: submit, status, withdraw, configure, panel, list, review, disable, and recover.
 - `/application`: submit, status, withdraw, panel, recover; form list/create/edit/enable/disable/delete; field add/edit/remove/move.
 - `/superior`: `say`, `dmpanel`, `rolepanel`, `rolepanelmulti`, `purge`, `purgeuser`, `lock`, `unlock`, `slowmode`, `timeout`, `untimeout`, `mutemany`, `unmutemany`, `muteall`, `unmuteall`, `backfillstats`, `backfillstatus`, and `help`.
 - `/utility`: `ping`, `avatar`, `userinfo`, `serverinfo`, `roleinfo`, `channelinfo`, `snowflake`, and `timestamp`.
-- `/fun`: `battle`, `stats`, and `leaderboard` while activity metrics are enabled.
+- `/fun`: `battle`, `stats`, and `leaderboard`.
 - `/greetings send`: send one configured profile as the current member.
 
 The `roleinfo`, `channelinfo`, `snowflake`, and `timestamp` utilities validate bounded input, remain guild-scoped where relevant, and reply privately. See [Member capabilities](reference/member-capabilities.md) for the authorization matrix.
@@ -229,4 +227,4 @@ The `roleinfo`, `channelinfo`, `snowflake`, and `timestamp` utilities validate b
 
 Events and interactions are rejected when the guild is missing, disabled, inactive, removed, purged, or has changed generation during asynchronous work. Guild resources are revalidated against the interaction guild. Discord API work stays outside long SQLite transactions, list operations are bounded or paginated, and successful metrics are written only after the corresponding reply succeeds.
 
-Only one Superior process may write a database. Running several processes against a shared SQLite file is unsupported even on a network filesystem. Future multi-process deployment requires a different coordination/storage design; no configuration flag enables it in 5.5.0.
+Only one Superior process may write a database. Running several processes against a shared SQLite file is unsupported even on a network filesystem. Future multi-process deployment requires a different coordination/storage design; no configuration flag enables it in this release.

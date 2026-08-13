@@ -1,6 +1,6 @@
 # Superior
 
-Superior 5.5.0 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
+Superior 6.0.0 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
 
 ## Windows quick start
 
@@ -14,7 +14,7 @@ The first launch places the immutable bundled runtime in the current Windows use
 
 ## Active capabilities
 
-- `/setup` configures each guild, including feature flags, a log channel, timezone, invocation terms, moderation limits, reusable greetings, export/import, and owner-confirmed purge.
+- `/config` reports or changes the explicit bot-state switch, log channel, timezone, invocation terms, moderation limits, and reusable greetings. `/data` provides export, owner-only import, and owner-confirmed purge.
 - `/access` lets the guild owner or a freshly verified Administrator grant one of seven narrow management capabilities to a safe guild role.
 - `/panel` posts and tracks fixed Superior `help`, `server-info`, `resources`, `tickets`, `suggestions`, and `applications` panels.
 - `/ticket` manages up to 10 routed departments, each with its own category, closure log, support role, and 1–5-field intake form. It also posts launchers and reconciles interrupted tickets.
@@ -26,8 +26,8 @@ The first launch places the immutable bundled runtime in the current Windows use
 
 ## Safety model
 
-- New and rejoined guilds stay disabled until an owner or Administrator validates and enables them with `/setup`.
-- Disabled, inactive, unconfigured, cross-guild, and DM contexts do not run guild behavior.
+- New and rejoined guilds are immediately usable with safe defaults: every core command family, greeting, conversational reply, activity metric, and persistent interaction route is active without onboarding.
+- The explicit `/config bot-state` switch is the emergency global disable. Disabled, departed, cross-guild, and unsupported DM contexts do not run guild behavior.
 - The owner and Administrators retain ultimate authority. Delegated roles receive only the exact capability granted: `panels.manage`, `tickets.configure`, `tickets.manage`, `suggestions.configure`, `suggestions.review`, `applications.configure`, or `applications.review`.
 - `/access` itself is never delegated. Privileged actions re-fetch the actor and relevant role or Discord resource; command visibility is not treated as authorization.
 - Ticket configuration does not grant access to ticket contents. Suggestion/application configuration does not grant review access, and a configure-only delegate cannot assign a new workflow content role that they hold. Department support roles and reviewer roles remain workflow-specific content authorities.
@@ -36,10 +36,9 @@ The first launch places the immutable bundled runtime in the current Windows use
 - Suggestion authors are public, self-voting is off by default, and the default persistent rate limit is three submissions per ten minutes. Vote changes are transactional and public totals do not expose voter identities.
 - Application answers are sent only to the configured private review channel. Applicant-controlled text suppresses mentions, and only the applicant can view their status or withdraw a pending application.
 - Restricted role pings require a live same-guild mapping, exact channel or explicitly enabled parent-thread match, current role membership, current user and bot channel permissions, and both per-user and per-role cooldowns. The bot never makes a role mentionable, and the outgoing message permits only the one authorized role mention.
-- Schema v7 uses normalized, guild-scoped tables and transactional state changes. Startup creates v7 only for a missing or empty database and refuses v1–v6, partial, malformed, and unknown layouts.
-- Schema v6, v5, v4, v3, and the exact supported v2 layout require an explicit validated backup and stopped-process migration to v7. The historical v4-to-v5 stage preserves ticket data, v5-to-v6 adds empty restricted-ping state, and v6-to-v7 adds empty bounded internal delivery-deduplication state.
-- Guild export format 5 includes restricted-ping configuration and audit history. Format 5 replaces the complete portable tenant product model transactionally while preserving internal delivery deduplication; legacy format 4 and format 3 retain their documented compatibility behavior, while legacy format 2 replaces settings and metrics without deleting current operational rows. Every imported authority or Discord-resource binding is left inactive and unverified for review.
-- Global guild re-enablement does not activate imported ticket-department, suggestion, or application bindings; each service or form must pass its own current Discord-resource verification and be explicitly enabled.
+- Schema v8 uses normalized, guild-scoped tables and transactional state changes. The supported v7-to-v8 migration preserves operational records and every posted-panel, message, channel, workflow, and component identifier while converting guild settings to the zero-onboarding v3 model.
+- Startup creates v8 only for a missing or empty database and refuses unmigrated, partial, malformed, and unknown layouts. Back up and stop the process before migration, and never run a 5.5.0 or other older executable after a database has migrated to v8.
+- Guild export format 6 contains the complete portable tenant product model. Imports leave the core bot active, preserve historical records, and keep imported delegated authority and external Discord-resource bindings dormant until their existing feature-specific verification paths succeed.
 
 Superior remains a single-process SQLite deployment. Database constraints and short transactions protect concurrent interactions inside that process, but a shared SQLite file must not be written by multiple bot processes.
 
@@ -64,7 +63,7 @@ Do not use `npm run dev` or `npm start` as a smoke test: both can log in to Disc
 
 - [Configuration, commands, and Discord permissions](docs/configuration.md)
 - [Windows portable guide](docs/windows.md)
-- [Development architecture and schema v7](docs/development.md)
+- [Development architecture and schema v8](docs/development.md)
 - [Operations, migration, backup, recovery, and rollback](docs/operations.md)
 - [Member and delegated capabilities](docs/reference/member-capabilities.md)
 - [Natural-chat trigger reference](docs/reference/trigger-patterns.md)

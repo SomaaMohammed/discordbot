@@ -45,6 +45,8 @@ windows/.work/
 *.db-wal
 *.db-shm
 *.db-journal
+*.bak
+*.backup
 backups/
 *.log
 ci_logs_extract/

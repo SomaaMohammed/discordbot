@@ -33,6 +33,7 @@ $EnvironmentNames = @(
     "ENV_FILE",
     "COMMAND_REGISTRATION_MODE",
     "DEV_GUILD_IDS",
+    "SUPERIOR_PORTABLE_EXPECT_ENV",
     "SUPERIOR_PORTABLE_EXPECT_ROOT",
     "SUPERIOR_PORTABLE_EXPECT_DB"
 )
@@ -76,6 +77,7 @@ try {
         "MANIFEST.sha256",
         "runtime\node.exe",
         "tools\check-portable.mjs",
+        "tools\diagnostics.mjs",
         "app\dist\src\index.js",
         "app\dist\src\storage\backup-cli.js",
         "app\dist\src\storage\check-cli.js",
@@ -102,7 +104,10 @@ try {
     $Forbidden = Get-ChildItem -LiteralPath $PortableRoot -Recurse -Force | Where-Object {
         $Relative = $_.FullName.Substring($PortableRoot.Length).TrimStart("\").Replace("\", "/")
         $_.Name -eq ".env" -or
-        $_.Extension -in @(".db", ".sqlite", ".sqlite3", ".backup", ".bak") -or
+        ($_.Name.StartsWith(".env") -and $_.Name -ne ".env.example") -or
+        $_.Name -eq "mudae-watch.private.json" -or
+        $_.Name.EndsWith(".private.json") -or
+        $_.Extension -in @(".db", ".sqlite", ".sqlite3", ".backup", ".bak", ".log") -or
         $Relative -match "(^|/)(data|backups)(/|$)" -or
         $Relative -match "^app/(dist/)?tests(/|$)"
     }
@@ -175,7 +180,8 @@ try {
         $BuildInfo.REFERENCE_ASSEMBLIES_VERSION -ne "1.0.3" -or
         $BuildInfo.REFERENCE_ASSEMBLIES_PACKAGE_SHA256 -ne "8a7e348538e7eb91351696911689f49e3d4f63f8bab517432bbe159b8b1104a2" -or
         $BuildInfo.BETTER_SQLITE3_BINARY_SHA256 -ne "8c041ef57dd1bb55b0032306594310625b7a7a374bc48956e0858645f56919c4" -or
-        $BuildInfo.BETTER_SQLITE3_BINARY_SHA256 -ne $NativeAddonHash
+        $BuildInfo.BETTER_SQLITE3_BINARY_SHA256 -ne $NativeAddonHash -or
+        $BuildInfo.SOURCE_SHA256 -notmatch "^[a-f0-9]{64}$"
     ) {
         throw "Portable build provenance is incomplete or inconsistent."
     }
@@ -183,12 +189,24 @@ try {
     if ($BuildInfo.PACKAGE_LOCK_SHA256 -ne $PackagedLockHash) {
         throw "Packaged lockfile does not match BUILD-INFO.txt."
     }
+    $SourceIdentityTool = Join-Path (Split-Path -Parent $PSScriptRoot) "windows\compute-source-identity.mjs"
+    $CurrentSourceIdentity = (& node $SourceIdentityTool).Trim()
+    if ($LASTEXITCODE -ne 0 -or $BuildInfo.SOURCE_SHA256 -ne $CurrentSourceIdentity) {
+        throw "Portable payload source identity is stale."
+    }
 
     $Launcher = Join-Path $PortableRoot "SuperiorBot.exe"
     $BatchLauncher = Join-Path $PortableRoot "Start Superior Bot.cmd"
     Invoke-AndRequireSuccess -Executable (Join-Path $PortableRoot "runtime\node.exe") -Arguments @("--version") -ExpectedText "v22.12.0"
     Invoke-AndRequireSuccess -Executable $Launcher -Arguments @("--version") -ExpectedText "Superior Bot $Version"
     Invoke-AndRequireSuccess -Executable $BatchLauncher -Arguments @("--version") -ExpectedText "Superior Bot $Version"
+    $VersionInfo = (Get-Item -LiteralPath $Launcher).VersionInfo
+    if ($VersionInfo.FileVersion -ne "$Version.0") {
+        throw "Portable launcher FileVersion is stale: $($VersionInfo.FileVersion)"
+    }
+    if ($VersionInfo.ProductVersion -ne $Version) {
+        throw "Portable launcher ProductVersion is stale: $($VersionInfo.ProductVersion)"
+    }
 
     $EnvironmentText = @"
 DISCORD_TOKEN=portable-smoke-test-token
@@ -211,8 +229,82 @@ DEV_GUILD_IDS=
 
     Invoke-AndRequireSuccess -Executable $Launcher -Arguments @("--check") -ExpectedText "no Discord login was attempted"
     Invoke-AndRequireSuccess -Executable $BatchLauncher -Arguments @("--check") -ExpectedText "no Discord login was attempted"
+    $AlternateEnvironment = Join-Path $PortableRoot ".env.validation"
+    [System.IO.File]::WriteAllText(
+        $AlternateEnvironment,
+        $EnvironmentText,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+    try {
+        $env:ENV_FILE = $AlternateEnvironment
+        Invoke-AndRequireSuccess -Executable $Launcher -Arguments @("--check") -ExpectedText "no Discord login was attempted"
+    }
+    finally {
+        Remove-Item Env:\ENV_FILE -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $AlternateEnvironment -Force -ErrorAction SilentlyContinue
+    }
+    $DiagnosticsOutput = & $Launcher --diagnostics 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "Portable diagnostics failed:`n$DiagnosticsOutput"
+    }
+    foreach ($ExpectedDiagnostic in @(
+        "executableVersion=$Version",
+        "payloadVersion=$Version",
+        "sourceSha256=$CurrentSourceIdentity",
+        "nodeVersion=v22.12.0",
+        "commandRegistrationMode=global",
+        "completed without Discord login"
+    )) {
+        if (-not $DiagnosticsOutput.Contains($ExpectedDiagnostic)) {
+            throw "Portable diagnostics omitted '$ExpectedDiagnostic':`n$DiagnosticsOutput"
+        }
+    }
+    if ($DiagnosticsOutput.Contains("portable-smoke-test-token")) {
+        throw "Portable diagnostics exposed the Discord token."
+    }
     if (Test-Path -LiteralPath (Join-Path $PortableRoot "superior.db")) {
         throw "Portable --check unexpectedly created a database file."
+    }
+
+    # The portable root is operator-writable. Runtime data must not invalidate
+    # the signed payload boundary, while undeclared executable payload files do.
+    foreach ($MutableRelative in @("superior.db", "superior.db-wal", "operator.log", "operator.backup")) {
+        [System.IO.File]::WriteAllText(
+            (Join-Path $PortableRoot $MutableRelative),
+            "portable mutable-data smoke test",
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+    }
+    Invoke-AndRequireSuccess -Executable $Launcher -Arguments @("--version") -ExpectedText "Superior Bot $Version"
+
+    $UndeclaredPayloadFile = Join-Path $PortableRoot "app\undeclared-runtime.js"
+    [System.IO.File]::WriteAllText(
+        $UndeclaredPayloadFile,
+        "// undeclared payload smoke test",
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+    try {
+        $PriorErrorActionPreference = $ErrorActionPreference
+        try {
+            # This invocation must fail and writes its recovery message to
+            # stderr. Capture that expected native failure without allowing
+            # the script-wide Stop preference to terminate the assertion.
+            $ErrorActionPreference = "Continue"
+            $UndeclaredOutput = & $Launcher --version 2>&1 | Out-String
+            $UndeclaredExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $PriorErrorActionPreference
+        }
+        if (
+            $UndeclaredExitCode -eq 0 -or
+            -not $UndeclaredOutput.Contains("application payload contains an undeclared file")
+        ) {
+            throw "Portable launcher accepted an undeclared executable payload file:`n$UndeclaredOutput"
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $UndeclaredPayloadFile -Force -ErrorAction SilentlyContinue
     }
 
     Write-Host "Portable launcher, configuration, manifest, and native SQLite smoke checks passed."

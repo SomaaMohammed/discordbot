@@ -2,33 +2,25 @@
 setlocal
 cd /d "%~dp0"
 
-if /I "%~1"=="--version" goto version
-if /I "%~1"=="--check" goto check
-if /I "%~1"=="--help" goto help
-if not "%~1"=="" goto unknown
-
-if not exist ".env" (
-  echo Missing .env beside this launcher.
-  echo Copy .env.example to .env and add your Discord token.
-  exit /b 2
+if not exist "%~dp0SuperiorBot.exe" (
+  echo The packaged SuperiorBot.exe launcher is missing. 1>&2
+  exit /b 1
 )
+if not "%~2"=="" goto unknown
+if "%~1"=="" goto start
+if /I "%~1"=="--version" goto option
+if /I "%~1"=="--check" goto option
+if /I "%~1"=="--diagnostics" goto option
+if /I "%~1"=="--help" goto option
+goto unknown
 
-"%~dp0runtime\node.exe" "%~dp0app\dist\src\index.js"
+:start
+"%~dp0SuperiorBot.exe"
 exit /b %ERRORLEVEL%
 
-:version
-set /p SUPERIOR_VERSION=<"%~dp0VERSION"
-echo Superior Bot %SUPERIOR_VERSION%
-exit /b 0
-
-:check
-"%~dp0runtime\node.exe" "%~dp0tools\check-portable.mjs"
+:option
+"%~dp0SuperiorBot.exe" "%~1"
 exit /b %ERRORLEVEL%
-
-:help
-echo Start Superior Bot.cmd [--check ^| --version ^| --help]
-echo Run without an option to start the Discord bot.
-exit /b 0
 
 :unknown
 echo Unknown option. Use --help for supported options. 1>&2

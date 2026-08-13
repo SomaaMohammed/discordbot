@@ -7,7 +7,7 @@ import type { DatabaseSchemaKind } from "./schema.js";
 export interface BackupOptions {
   dbFile: string;
   outputFile: string;
-  expect: 2 | 3 | 4 | 5 | 6 | 7;
+  expect: 2 | 3 | 4 | 5 | 6 | 7 | 8;
 }
 
 export interface BackupResult {

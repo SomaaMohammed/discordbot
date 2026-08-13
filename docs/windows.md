@@ -13,9 +13,12 @@ The repository-root `SuperiorBot.exe` is designed for a Windows x64 laptop or de
 ```powershell
 .\SuperiorBot.exe --version
 .\SuperiorBot.exe --check
+.\SuperiorBot.exe --diagnostics
 ```
 
 `--check` loads `.env`, resolves the database path, and opens the bundled native SQLite module against memory. It does not log in to Discord and does not create `superior.db`.
+
+`--diagnostics` also avoids Discord login. It reports the executable path/version, embedded payload version/hash, source identity, bundled Node version, payload-cache result, application root, configuration-file presence, database path and safe schema classification, and command-registration mode. It never prints the Discord token or private watcher values.
 
 Start the bot with:
 
@@ -35,43 +38,43 @@ By default these writable files sit beside the launcher:
 - `superior.db`: the active SQLite database created on first real startup.
 - SQLite sidecars such as `superior.db-wal` and `superior.db-shm` while running.
 
-A missing or empty database is initialized as schema v7 on the first real startup. Normal startup never upgrades an older database.
+A missing or empty database is initialized as schema v8 on the first real startup. Normal startup never upgrades an older database.
 
-Schema-v7 data can include Discord identifiers, delegated grants, ticket questions/answers and closure metadata, suggestion authors/content/votes/reviews, private staff-application answers/decisions, restricted-ping mappings/member cooldowns/audit actors, and bounded internal delivery identifiers. Protect the database, backups, exports, PowerShell history, and host account accordingly. Do not synchronize a live database through a consumer cloud-drive folder.
+Schema-v8 data can include Discord identifiers, delegated grants, persistent panel/message/channel/component bindings, ticket questions/answers and closure metadata, suggestion authors/content/votes/reviews, private staff-application answers/decisions, restricted-ping mappings/member cooldowns/audit actors, and bounded internal delivery identifiers. Protect the database, backups, exports, PowerShell history, and host account accordingly. Do not synchronize a live database through a consumer cloud-drive folder.
 
-Run exactly one Superior process for one database. Concurrent interactions inside that process are protected by SQLite constraints and transactions; two executables sharing the file are unsupported. The bot runs only while the process and computer are awake. Disable sleep or use a dedicated always-on host for continuous service.
+Run exactly one Superior process for one database. The Windows launcher holds named application-root and database locks for the child process lifetime, recovers locks abandoned by a crashed process, and refuses a second instance with the conflicting safe path. Its kill-on-close Job Object prevents a killed launcher from leaving an orphaned bundled Node writer after those locks release. The first Ctrl+C waits for Node's controlled drain; a second forces the launcher closed and terminates the child. Concurrent interactions inside that process are protected by SQLite constraints and transactions; two executables sharing the file are unsupported. The bot runs only while the process and computer are awake. Disable sleep or use a dedicated always-on host for continuous service.
 
 ## Portable ZIP and schema upgrades
 
-The versioned portable ZIP is available from CI for offline database maintenance. It exposes bundled `runtime`, `app`, and `tools` directories plus their manifest and checksums. The single-file launcher intentionally exposes only start, version, and configuration-check operations.
+The versioned portable ZIP is available from CI for offline database maintenance. It exposes bundled `runtime`, `app`, and `tools` directories plus their manifest and checksums. The single-file launcher exposes start, version, configuration check, safe diagnostics, and help operations.
 
-Superior 5.5.0 refuses schema v6, v5, v4, v3, and v2 during normal startup. Close every `SuperiorBot.exe`, bundled `node.exe`, SQLite browser, and other process that can write the selected database. Extract the 5.5.0 portable ZIP, copy the database into that folder as `superior.db`, and keep the original untouched.
+Superior 6.0.0 refuses schema v7, v6, v5, v4, v3, and v2 during normal startup. Close every old `SuperiorBot.exe`, bundled `node.exe`, SQLite browser, and other process that can write the selected database. Extract the 6.0.0 portable ZIP, copy the database into that folder as `superior.db`, and keep the original untouched.
 
-For the normal schema-v6 upgrade from Superior 5.4.0, run:
+For the normal schema-v7 upgrade from Superior 5.5.0, run:
 
 ```powershell
 New-Item -ItemType Directory -Path .\backups -Force
-.\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 6
-.\runtime\node.exe .\app\dist\src\storage\backup-cli.js --db .\superior.db --out .\backups\pre-v5.5-schema6.db --expect 6
+.\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 7
+.\runtime\node.exe .\app\dist\src\storage\backup-cli.js --db .\superior.db --out .\backups\pre-v6-schema7.db --expect 7
 .\runtime\node.exe .\app\dist\src\storage\migrate-cli.js --db .\superior.db --dry-run
 .\runtime\node.exe .\app\dist\src\storage\migrate-cli.js --db .\superior.db
-.\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 7
+.\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 8
 .\SuperiorBot.exe --check
 ```
 
-Do not continue if classification, backup, dry-run, migration, or final validation fails. The migration is one transaction; failure leaves the working copy at v6. It preserves every existing row and adds empty bounded internal delivery-deduplication state. Keep the validated v6 backup until the new executable and every guild's existing workflow has been reviewed.
+Do not continue if classification, backup, dry-run, migration, or final validation fails. The migration is one transaction; failure leaves the working copy at v7. It preserves every operational row and every stored panel, message, channel, workflow, and component identifier while converting guild settings to the active-by-default v3 model. Keep the validated v7 backup until the new executable and every guild's existing workflow has been reviewed.
 
-Exact schema v5, schema v4, schema v3, and the exact supported schema-v2 layout can migrate directly to v7 through the same CLI. Change the source checker and backup expectation to `--expect 5`, `--expect 4`, `--expect 3`, or `--expect 2`, use a generation-specific backup name, and keep the final checker at `--expect 7`. A failed transaction leaves the copy at its source generation. Historical conversion stages retain their documented behavior before the additive v6-to-v7 step.
+Exact schema v6, schema v5, schema v4, schema v3, and the exact supported schema-v2 layout can migrate directly to v8 through the same CLI. Change the source checker and backup expectation to `--expect 6`, `--expect 5`, `--expect 4`, `--expect 3`, or `--expect 2`, use a generation-specific backup name, and keep the final checker at `--expect 8`. A failed transaction leaves the copy at its source generation. Historical conversion stages retain their documented behavior before the final v7-to-v8 settings conversion.
 
 A schema-v1 database must first be upgraded to v2 with the final 4.0.0 source release. Renaming a database file never upgrades its contents. Never test migration against the only copy or against a database still selected by a running process.
 
 ## Post-upgrade review
 
-After starting 5.5.0:
+After starting 6.0.0:
 
-1. Check `/setup status`, `/setup validate`, and guild enablement.
+1. Check `/config status`; joined guilds should be active immediately unless an administrator intentionally used the emergency bot-state switch.
 2. Review `/access list`; legacy migration creates no delegated grants.
-3. Review `/panel status` and refresh missing launchers.
+3. Review `/panel status` and exercise one existing button for every posted panel type. A normal restart or migration never requires reposting.
 4. Check the migrated `General Support` department and recover a representative active ticket before accepting new tickets.
 5. Configure suggestions and application forms from current Discord resources; migration does not invent these bindings.
 6. Review `/restrictedping list`, verify every retained role/channel pair, and test one disposable `/pingrole` notification plus its user/role cooldowns.
@@ -81,21 +84,25 @@ After starting 5.5.0:
 ## Updating without a schema change
 
 1. Stop the existing bot and confirm no `SuperiorBot.exe` or bundled `node.exe` remains running.
-2. Create and validate a current schema-v7 backup with the portable backup/check tools.
+2. Create and validate a current schema-v8 backup with the portable backup/check tools.
 3. Place the new `SuperiorBot.exe` in a new writable folder.
 4. Copy only `.env` and the validated active database into the new folder.
 5. Run `--version` and `--check`, then start it.
-6. Keep the previous executable and backup until verification succeeds. Old private runtime caches can be removed after the new version is verified and stopped.
+6. Keep the validated backup and prior artifact hash until verification succeeds, but do not start an older executable after migration. Old private runtime caches can be removed after the new version is verified and stopped.
 
-For a 5.5.0 code rollback, stop the process and use a known-good 5.5.0 executable with a validated v7 backup. To return to 5.4.0 after the v6-to-v7 migration, preserve the v7 database separately, restore the validated pre-v5.5 schema-v6 backup through a controlled replacement, and use the exact 5.4.0 executable. Returning to an older generation likewise requires its original generation-matched backup. The 5.5.0 restore tooling accepts only v7 and cannot perform a release-level schema downgrade. Never mix application and schema generations.
+For a 6.0.0 code rollback that retains schema v8, stop the process and use only a known-good 6.0.0 executable with a validated v8 backup. After an installation migrates to v8, never start, deploy, test, or recommend 5.5.0 or another older executable for it, even as part of incident recovery. Preserve the v8 database and use current-version recovery tooling or a forward fix. The 6.0.0 restore tooling accepts only v8 and cannot perform a release-level schema downgrade.
+
+Before replacement, close the old console and confirm in Task Manager that neither the old `SuperiorBot.exe` nor its bundled `node.exe` remains. Keep the migrated database and its validated backups untouched until the replacement current-version build is verified.
 
 ## Troubleshooting
 
 - **Missing `.env`:** copy `.env.example` beside the launcher and provide the token.
 - **Configuration check fails:** read the single reported selector error; check guild registration mode and IDs without posting `.env` contents.
 - **Native SQLite check fails:** remove only the matching private payload directory under `%LOCALAPPDATA%\SuperiorBot\payloads` and rerun the trusted executable. Do not copy `node_modules` from another Node version or operating system.
-- **Startup refuses the database:** stop the executable, classify it with `check-cli.js`, and follow the explicit migration workflow. Never delete or rename it merely to make a fresh v7 database appear.
+- **Startup refuses the database:** stop the executable, classify it with `check-cli.js`, and follow the explicit migration workflow. Never delete or rename it merely to make a fresh v8 database appear.
 - **Commands look stale:** global Discord commands can take time to propagate. Confirm version and registration mode before changing configuration.
 - **A prior database exists under another name:** set `DB_FILE` explicitly and follow the schema workflow. Do not let a fresh database hide the existing one.
 - **A workflow binding is stale:** use the relevant health/status and recovery command after verifying current channel/role permissions; do not paste an ID from another guild into the database.
 - **Window closes immediately:** run the executable from an already-open PowerShell or Command Prompt window so the error remains visible.
+- **Another instance is already using the application root or database:** stop the old `SuperiorBot.exe` and bundled `node.exe`; an abandoned lock is recovered automatically after a crash, so do not delete database sidecars to bypass this message.
+- **Build identity is unclear:** run `--version` and `--diagnostics`, inspect PE `FileVersion`/`ProductVersion` in file Properties, and compare `Get-FileHash .\SuperiorBot.exe -Algorithm SHA256` with the trusted release output.

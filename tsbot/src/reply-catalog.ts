@@ -55,7 +55,7 @@ const helpReplies: readonly ReplyFactory[] = [
   (context) =>
     `I understand short requests such as \`${inline(context.invocation)} hru\`, \`${inline(context.invocation)} wyd\`, \`${inline(context.invocation)} time now\`, and \`${inline(context.invocation)} ver\`.`,
   (context) =>
-    `For chat help, try \`${inline(context.invocation)} commands\`. Slash commands are grouped under \`/setup\`, \`/superior\`, \`/utility\`, \`/fun\`, and \`/greetings\`.`,
+    `For chat help, try \`${inline(context.invocation)} commands\`. Slash commands are grouped under \`/config\`, \`/data\`, \`/superior\`, \`/utility\`, \`/fun\`, and \`/greetings\`.`,
   (context) =>
     `Useful examples: \`${inline(context.invocation)} uptime\`, \`${inline(context.invocation)} flip a coin\`, and \`${inline(context.invocation)} what time is it\`.`,
   (context) =>

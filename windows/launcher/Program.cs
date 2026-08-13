@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 
 internal static class Program
 {
@@ -8,59 +9,127 @@ internal static class Program
     {
         try
         {
-            string root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(
-                Path.DirectorySeparatorChar,
-                Path.AltDirectorySeparatorChar
-            );
-
-            if (args.Length == 1 && EqualsOption(args[0], "--version"))
+            if (args.Length == 1 && LauncherSupport.EqualsOption(args[0], "--help"))
             {
-                string version = File.ReadAllText(Path.Combine(root, "VERSION")).Trim();
-                Console.WriteLine("Superior Bot " + version);
-                return 0;
-            }
-
-            if (args.Length == 1 && EqualsOption(args[0], "--check"))
-            {
-                return RunNode(root, Path.Combine(root, "tools", "check-portable.mjs"));
-            }
-
-            if (args.Length == 1 && EqualsOption(args[0], "--help"))
-            {
-                Console.WriteLine("SuperiorBot.exe [--check | --version | --help]");
+                Console.WriteLine("SuperiorBot.exe [--check | --diagnostics | --version | --help]");
                 Console.WriteLine("Run without an option to start the Discord bot.");
                 return 0;
             }
 
-            if (args.Length != 0)
+            bool showVersion = args.Length == 1 && LauncherSupport.EqualsOption(args[0], "--version");
+            bool checkOnly = args.Length == 1 && LauncherSupport.EqualsOption(args[0], "--check");
+            bool diagnosticsOnly =
+                args.Length == 1 && LauncherSupport.EqualsOption(args[0], "--diagnostics");
+            if (args.Length != 0 && !showVersion && !checkOnly && !diagnosticsOnly)
             {
                 Console.Error.WriteLine("Unknown option. Use --help for supported options.");
                 return 2;
             }
 
-            if (!File.Exists(Path.Combine(root, ".env")))
+            string root = LauncherSupport.NormalizeRoot(AppDomain.CurrentDomain.BaseDirectory);
+            LauncherSupport.ValidatePortableManifest(root);
+            string version = LauncherSupport.VerifyPayloadVersion(root);
+            string sourceIdentity = LauncherSupport.ReadSourceIdentity(root);
+            string manifest = Path.Combine(root, "MANIFEST.sha256");
+            if (!File.Exists(manifest))
+            {
+                throw new InvalidDataException("The application payload manifest is missing.");
+            }
+            string payloadHash = LauncherSupport.ComputeSha256(manifest);
+
+            if (showVersion)
+            {
+                Console.WriteLine("Superior Bot " + version);
+                return 0;
+            }
+
+            string environmentFile = LauncherSupport.ResolveEnvironmentFile(root);
+            if (diagnosticsOnly)
+            {
+                return RunNode(
+                    root,
+                    environmentFile,
+                    Path.Combine(root, "tools", "diagnostics.mjs"),
+                    version,
+                    payloadHash,
+                    sourceIdentity,
+                    "portable-directory",
+                    true
+                );
+            }
+
+            if (!File.Exists(environmentFile))
             {
                 Console.Error.WriteLine(
-                    "Missing .env beside SuperiorBot.exe. Copy .env.example to .env and add your Discord token."
+                    "Missing environment file for SuperiorBot.exe. Copy .env.example to .env and add your Discord token."
                 );
                 return 2;
             }
 
-            return RunNode(root, Path.Combine(root, "app", "dist", "src", "index.js"));
+            string script = checkOnly
+                ? Path.Combine(root, "tools", "check-portable.mjs")
+                : Path.Combine(root, "app", "dist", "src", "index.js");
+            if (checkOnly)
+            {
+                return RunNode(
+                    root,
+                    environmentFile,
+                    script,
+                    version,
+                    payloadHash,
+                    sourceIdentity,
+                    "portable-directory",
+                    false
+                );
+            }
+
+            using (SuperiorInstanceGuard instance =
+                LauncherSupport.AcquireInstanceGuard(root, environmentFile))
+            {
+                LauncherSupport.Log("INFO", "Superior Bot " + version + " starting.");
+                LauncherSupport.Log(
+                    "INFO",
+                    "executablePath=" + Assembly.GetExecutingAssembly().Location
+                );
+                LauncherSupport.Log("INFO", "applicationRoot=" + root);
+                LauncherSupport.Log(
+                    "INFO",
+                    "payloadVersion=" + version + " payloadSha256=" + payloadHash + " cache=portable-directory"
+                );
+                int exitCode = RunNode(
+                    root,
+                    environmentFile,
+                    script,
+                    version,
+                    payloadHash,
+                    sourceIdentity,
+                    "portable-directory",
+                    false
+                );
+                LauncherSupport.Log(
+                    exitCode == 0 ? "INFO" : "ERROR",
+                    "Bundled Node process exited. exitCode=" + exitCode
+                );
+                return exitCode;
+            }
         }
         catch (Exception error)
         {
-            Console.Error.WriteLine("Superior Bot launcher failed: " + error.Message);
+            Console.Error.WriteLine("Superior Bot launcher failed: " + LauncherSupport.SafeField(error.Message, 2048));
             return 1;
         }
     }
 
-    private static bool EqualsOption(string value, string expected)
-    {
-        return string.Equals(value, expected, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static int RunNode(string root, string script)
+    private static int RunNode(
+        string root,
+        string environmentFile,
+        string script,
+        string version,
+        string payloadHash,
+        string sourceIdentity,
+        string cacheStatus,
+        bool diagnostics
+    )
     {
         string node = Path.Combine(root, "runtime", "node.exe");
         if (!File.Exists(node))
@@ -77,26 +146,26 @@ internal static class Program
         ProcessStartInfo start = new ProcessStartInfo
         {
             FileName = node,
-            Arguments = QuoteArgument(script),
+            Arguments = LauncherSupport.QuoteArgument(script),
             WorkingDirectory = root,
             UseShellExecute = false,
             CreateNoWindow = false
         };
-
-        using (Process process = Process.Start(start))
+        start.EnvironmentVariables["ENV_FILE"] = environmentFile;
+        start.EnvironmentVariables["SUPERIOR_APPLICATION_ROOT"] = root;
+        start.EnvironmentVariables["SUPERIOR_PAYLOAD_ROOT"] = root;
+        start.EnvironmentVariables["SUPERIOR_EXECUTABLE_VERSION"] = version;
+        start.EnvironmentVariables["SUPERIOR_EXECUTABLE_PATH"] = Assembly.GetExecutingAssembly().Location;
+        start.EnvironmentVariables["SUPERIOR_PAYLOAD_VERSION"] = version;
+        start.EnvironmentVariables["SUPERIOR_PAYLOAD_SHA256"] = payloadHash;
+        start.EnvironmentVariables["SUPERIOR_SOURCE_SHA256"] = sourceIdentity;
+        start.EnvironmentVariables["SUPERIOR_PAYLOAD_CACHE"] = cacheStatus;
+        if (!diagnostics)
         {
-            if (process == null)
-            {
-                Console.Error.WriteLine("Unable to start the bundled Node runtime.");
-                return 1;
-            }
-            process.WaitForExit();
-            return process.ExitCode;
+            start.EnvironmentVariables["SUPERIOR_PORTABLE_EXPECT_ROOT"] = root;
+            start.EnvironmentVariables["SUPERIOR_PORTABLE_EXPECT_ENV"] = environmentFile;
         }
-    }
 
-    private static string QuoteArgument(string value)
-    {
-        return "\"" + value.Replace("\"", "\\\"") + "\"";
+        return LauncherSupport.RunChild(start);
     }
 }

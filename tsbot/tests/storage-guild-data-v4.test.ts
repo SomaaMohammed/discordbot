@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { BotStorage } from "../src/storage/db.js";
+import { createDefaultLegacyGuildSettingsV2 } from "../src/storage/guild-settings-v2.js";
 
 const GUILD = "111111111111111111";
 const ADMIN = "222222222222222222";
@@ -15,7 +16,7 @@ afterEach(() => {
   for (const storage of storages.splice(0)) storage.close();
 });
 
-describe("guild data export format 5", () => {
+describe("guild data export format 6", () => {
   it("round-trips all Phase 2 collections with authority and bindings dormant", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
@@ -41,6 +42,13 @@ describe("guild data export format 5", () => {
       minLength: 1,
       maxLength: 500,
       sortOrder: 0,
+    });
+    guild.createPostedPanel({
+      panelId: "portable_panel",
+      preset: "tickets",
+      channelId: CHANNEL,
+      messageId: "909090909090909090",
+      configuration: { departmentId: department.departmentId },
     });
 
     guild.upsertSuggestionConfiguration({
@@ -106,10 +114,18 @@ describe("guild data export format 5", () => {
 
     const payload = storage.exportGuildData(GUILD);
     expect(payload).toMatchObject({
-      formatVersion: 5,
+      formatVersion: 6,
       delegatedCapabilityGrants: [{ active: true }],
       ticketDepartments: [{ departmentId: "department_a", enabled: true }],
       ticketDepartmentFields: [{ fieldId: "question_a" }],
+      postedPanels: [
+        {
+          panelId: "portable_panel",
+          channelId: CHANNEL,
+          messageId: "909090909090909090",
+          configuration: { departmentId: department.departmentId },
+        },
+      ],
       suggestions: [{ suggestionId: suggestion.suggestion.suggestionId }],
       suggestionVotes: [{ voterId: ADMIN, vote: 1 }],
       applicationForms: [{ formId: "staff_form", enabled: true }],
@@ -129,6 +145,7 @@ describe("guild data export format 5", () => {
         bindingsVerifiedAt: null,
       },
     ]);
+    expect(restored.postedPanels).toEqual(payload.postedPanels);
     expect(restored.suggestionConfiguration).toMatchObject({
       enabled: false,
       bindingsVerifiedAt: null,
@@ -141,8 +158,7 @@ describe("guild data export format 5", () => {
     expect(restored.applications).toHaveLength(1);
     expect(restored.applicationResponses).toHaveLength(1);
     expect(storage.getGuildSettings(GUILD)).toMatchObject({
-      enabled: false,
-      reviewRequired: true,
+      enabled: true,
     });
 
     const counts = storage.previewGuildPurge(GUILD);
@@ -161,7 +177,7 @@ describe("guild data export format 5", () => {
     expect(storage.getGuild(GUILD)).toBeNull();
   });
 
-  it("rejects user-principal capability grants in format 5 imports", () => {
+  it("rejects user-principal capability grants in format 6 imports", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
     storage.forGuild(GUILD).grantRoleCapability(ROLE, "panels.manage", ADMIN);
@@ -178,7 +194,7 @@ describe("guild data export format 5", () => {
     ]);
   });
 
-  it("rejects a malformed Unicode department emoji in format 5", () => {
+  it("rejects a malformed Unicode department emoji in format 6", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
     const guild = storage.forGuild(GUILD);
@@ -216,7 +232,7 @@ describe("guild data export format 5", () => {
       guildId: GUILD,
       exportedAt: current.exportedAt,
       metadata: current.metadata,
-      settings: current.settings,
+      settings: createDefaultLegacyGuildSettingsV2(),
       metrics: current.metrics,
       ticketConfiguration: {
         guildId: GUILD,
@@ -247,7 +263,7 @@ describe("guild data export format 5", () => {
     expect(restored.ticketDepartmentFields).toHaveLength(2);
   });
 
-  it("rejects more than 100 imported audit events for one format 5 ticket", () => {
+  it("rejects more than 100 imported audit events for one format 6 ticket", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
     const guild = storage.forGuild(GUILD);
@@ -300,7 +316,7 @@ describe("guild data export format 5", () => {
       guildId: GUILD,
       exportedAt: current.exportedAt,
       metadata: current.metadata,
-      settings: current.settings,
+      settings: createDefaultLegacyGuildSettingsV2(),
       metrics: current.metrics,
       ticketConfiguration: configuration,
       postedPanels: [],
@@ -360,7 +376,7 @@ describe("guild data export format 5", () => {
       guildId: GUILD,
       exportedAt: current.exportedAt,
       metadata: current.metadata,
-      settings: current.settings,
+      settings: createDefaultLegacyGuildSettingsV2(),
       metrics: current.metrics,
     };
 
@@ -389,7 +405,7 @@ describe("guild data export format 5", () => {
     );
   });
 
-  it("rejects format 5 audit histories above the per-record limit", () => {
+  it("rejects format 6 audit histories above the per-record limit", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
     const guild = storage.forGuild(GUILD);

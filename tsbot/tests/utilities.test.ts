@@ -1,6 +1,7 @@
 import {
   ApplicationCommandOptionType,
   ChannelType,
+  MessageFlags,
   type ChatInputCommandInteraction,
   type GuildMember,
   type User,
@@ -158,13 +159,13 @@ function createHarness(
 
 function getReplyPayload(reply: ReplyMock): {
   content?: string;
-  ephemeral?: boolean;
+  flags?: number;
   allowedMentions?: { parse?: string[] };
   embeds?: Array<{ toJSON: () => Record<string, unknown> }>;
 } {
   return (reply.mock.calls.at(-1)?.[0] ?? {}) as {
     content?: string;
-    ephemeral?: boolean;
+    flags?: number;
     allowedMentions?: { parse?: string[] };
     embeds?: Array<{ toJSON: () => Record<string, unknown> }>;
   };
@@ -189,9 +190,11 @@ function getEmbedJson(reply: ReplyMock): {
 function expectPrivateReply(harness: UtilityHarness): void {
   const payload = getReplyPayload(harness.reply);
   if (harness.deferReply.mock.calls.length > 0) {
-    expect(harness.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(harness.deferReply).toHaveBeenCalledWith({
+      flags: MessageFlags.Ephemeral,
+    });
   } else {
-    expect(payload.ephemeral).toBe(true);
+    expect(payload.flags).toBe(MessageFlags.Ephemeral);
   }
   expect(payload.allowedMentions).toEqual({ parse: [] });
 }

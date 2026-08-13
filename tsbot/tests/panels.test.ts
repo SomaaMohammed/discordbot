@@ -4,6 +4,7 @@ import type { GuildRuntime } from "../src/runtime.js";
 import {
   canSendPanelToChannel,
   getRolePanelSafetyError,
+  handlePanelButton,
   handlePanelCommand,
   handlePanelModal,
 } from "../src/discord/panels.js";
@@ -284,9 +285,168 @@ describe("panel delivery safety", () => {
     expect(interaction.deferReply).toHaveBeenCalledBefore(fetch);
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining("unavailable"),
+        content: expect.stringContaining("has left or was deleted"),
       }),
     );
+  });
+
+  it("reports a deleted role precisely without disrupting another panel router", async () => {
+    const userId = "523456789012345678";
+    const roleId = "623456789012345678";
+    const targetId = "723456789012345678";
+    const botId = "823456789012345678";
+    const messageId = "923456789012345678";
+    const guild: Record<string, any> = { id: GUILD_ID };
+    const member = {
+      id: userId,
+      guild,
+      roles: {
+        cache: new Map(),
+        add: vi.fn(),
+        remove: vi.fn(),
+      },
+    };
+    const botMember = { id: botId, guild };
+    guild.members = {
+      me: botMember,
+      fetch: vi.fn(async () => member),
+      fetchMe: vi.fn(async () => botMember),
+    };
+    guild.roles = { fetch: vi.fn(async () => null) };
+    const runtime = {
+      guildId: GUILD_ID,
+      isCurrent: vi.fn(() => true),
+      storage: { recordCommandMetric: vi.fn() },
+    } as unknown as GuildRuntime;
+    const deletedRole = {
+      customId: `superior:role:${roleId}`,
+      guild,
+      user: { id: userId },
+      client: { user: { id: botId } },
+      message: { id: messageId, author: { id: botId } },
+      deferred: false,
+      replied: false,
+      deferReply: vi.fn(async () => {
+        deletedRole.deferred = true;
+      }),
+      editReply: vi.fn(async () => undefined),
+      reply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+
+    expect(await handlePanelButton(deletedRole as never, runtime)).toBe(true);
+    expect(deletedRole.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining(
+          "role configured on this panel was deleted",
+        ),
+      }),
+    );
+    expect(member.roles.add).not.toHaveBeenCalled();
+    expect(member.roles.remove).not.toHaveBeenCalled();
+
+    const privateMessage = {
+      customId: `superior:dm:${targetId}`,
+      guild,
+      user: { id: userId },
+      client: { user: { id: botId } },
+      message: { id: messageId, author: { id: botId } },
+      showModal: vi.fn(async () => undefined),
+    };
+    expect(await handlePanelButton(privateMessage as never, runtime)).toBe(
+      true,
+    );
+    expect(privateMessage.showModal).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers precisely from Discord 50013 without disrupting the DM router", async () => {
+    const userId = "523456789012345678";
+    const roleId = "623456789012345678";
+    const targetId = "723456789012345678";
+    const botId = "823456789012345678";
+    const messageId = "923456789012345678";
+    const guild: Record<string, any> = {
+      id: GUILD_ID,
+      ownerId: "133456789012345678",
+      channels: { cache: new Map() },
+    };
+    const role = {
+      id: roleId,
+      name: "Member",
+      guild,
+      managed: false,
+      permissions: { bitfield: 0n },
+    };
+    const permissionError = Object.assign(new Error("Missing Permissions"), {
+      code: 50_013,
+    });
+    const member = {
+      id: userId,
+      guild,
+      roles: {
+        cache: new Map(),
+        add: vi.fn(async () => Promise.reject(permissionError)),
+        remove: vi.fn(async () => undefined),
+      },
+    };
+    const botMember = {
+      id: botId,
+      guild,
+      permissions: { has: vi.fn(() => true) },
+      roles: { highest: { comparePositionTo: vi.fn(() => 1) } },
+    };
+    guild.members = {
+      me: botMember,
+      fetch: vi.fn(async () => member),
+      fetchMe: vi.fn(async () => botMember),
+    };
+    guild.roles = { fetch: vi.fn(async () => role) };
+    const runtime = {
+      guildId: GUILD_ID,
+      isCurrent: vi.fn(() => true),
+      storage: { recordCommandMetric: vi.fn() },
+    } as unknown as GuildRuntime;
+    const roleInteraction = {
+      customId: `superior:role:${roleId}`,
+      guild,
+      user: { id: userId },
+      client: { user: { id: botId } },
+      message: { id: messageId, author: { id: botId } },
+      deferred: false,
+      replied: false,
+      deferReply: vi.fn(async () => {
+        roleInteraction.deferred = true;
+      }),
+      editReply: vi.fn(async () => undefined),
+      reply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+
+    expect(await handlePanelButton(roleInteraction as never, runtime)).toBe(
+      true,
+    );
+    expect(member.roles.add).toHaveBeenCalledWith(
+      role,
+      "Self-service role panel",
+    );
+    expect(roleInteraction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Manage Roles.*highest role/iu),
+      }),
+    );
+
+    const privateMessage = {
+      customId: `superior:dm:${targetId}`,
+      guild,
+      user: { id: userId },
+      client: { user: { id: botId } },
+      message: { id: messageId, author: { id: botId } },
+      showModal: vi.fn(async () => undefined),
+    };
+    expect(await handlePanelButton(privateMessage as never, runtime)).toBe(
+      true,
+    );
+    expect(privateMessage.showModal).toHaveBeenCalledTimes(1);
   });
 
   it("rate-limits repeated private messages per guild, panel, and sender", async () => {

@@ -1,6 +1,7 @@
 import {
   Client,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   type AutocompleteInteraction,
   type ButtonInteraction,
@@ -17,7 +18,7 @@ import {
   handleModalSubmitInteraction,
   handleStringSelectMenuInteraction,
 } from "./commands.js";
-import { logError, logInfo } from "../logging.js";
+import { logClassifiedError, logError, logInfo, logWarn } from "../logging.js";
 import { wireMessageRuntime } from "../message-runtime.js";
 import type { BotRuntime } from "../runtime.js";
 import { synchronizeCommands } from "./registration.js";
@@ -25,10 +26,22 @@ import { AsyncWorkTracker } from "./work-tracker.js";
 import { clearBackfillStatus } from "./activity.js";
 import { clearModerationProcessState } from "./moderation.js";
 import { clearPanelProcessState } from "./panels.js";
+import {
+  beginInteractionLifecycle,
+  EventLoopDiagnostics,
+  replyWithUnexpectedInteractionError,
+  runBoundedAutocomplete,
+  type InteractionLifecycle,
+} from "./interaction-lifecycle.js";
+import { startImmediateInteractionResponse } from "./immediate-interaction-response.js";
 
 export interface DiscordClientWorkLifecycle {
   stop: () => void;
   drain: (timeoutMs: number) => Promise<boolean>;
+}
+
+export interface DiscordClientOptions {
+  onFatalGatewayInvalidation?: () => void | Promise<void>;
 }
 
 const clientWorkLifecycles = new WeakMap<Client, DiscordClientWorkLifecycle>();
@@ -39,7 +52,10 @@ export function getDiscordClientWorkLifecycle(
   return clientWorkLifecycles.get(client) ?? null;
 }
 
-export function createDiscordClient(runtime: BotRuntime): Client {
+export function createDiscordClient(
+  runtime: BotRuntime,
+  options: DiscordClientOptions = {},
+): Client {
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -52,15 +68,76 @@ export function createDiscordClient(runtime: BotRuntime): Client {
     allowedMentions: { parse: [], repliedUser: false },
   });
   const workTracker = new AsyncWorkTracker();
+  const eventLoopDiagnostics = new EventLoopDiagnostics();
   const workLifecycle: DiscordClientWorkLifecycle = {
     stop(): void {
       workTracker.stopAccepting();
+      eventLoopDiagnostics.stop();
     },
     drain(timeoutMs: number): Promise<boolean> {
       return workTracker.drain(timeoutMs);
     },
   };
   clientWorkLifecycles.set(client, workLifecycle);
+
+  client.on("shardDisconnect", (event, shardId) => {
+    logWarn("discord-gateway", "Discord gateway shard disconnected", {
+      shardId,
+      closeCode: event.code,
+      clean: event.wasClean,
+      action: "Superior will wait for discord.js to reconnect the shard.",
+    });
+  });
+  client.on("shardReconnecting", (shardId) => {
+    logInfo("discord-gateway", "Discord gateway shard is reconnecting", {
+      shardId,
+    });
+  });
+  client.on("shardResume", (shardId, replayedEvents) => {
+    logInfo("discord-gateway", "Discord gateway shard resumed", {
+      shardId,
+      replayedEvents,
+    });
+  });
+  let invalidationHandled = false;
+  client.on("invalidated", () => {
+    logWarn(
+      "discord-gateway",
+      "Discord invalidated the gateway session; a fresh login is required.",
+      {
+        action:
+          "Superior is entering controlled shutdown. Restart only after the old process exits.",
+      },
+    );
+    if (invalidationHandled) return;
+    invalidationHandled = true;
+    try {
+      const request = options.onFatalGatewayInvalidation?.();
+      if (request) {
+        void Promise.resolve(request).catch((error: unknown) => {
+          logClassifiedError("discord-gateway", error, {
+            stage: "invalidated-shutdown",
+            outcome: "controlled-shutdown-failed",
+          });
+        });
+      }
+    } catch (error) {
+      logClassifiedError("discord-gateway", error, {
+        stage: "invalidated-shutdown",
+        outcome: "controlled-shutdown-failed",
+      });
+    }
+  });
+  client.on("error", (error) => {
+    logClassifiedError("discord-client", error, {
+      stage: "client-error-event",
+    });
+  });
+  client.on("warn", () => {
+    logWarn("discord-client", "discord.js emitted a client warning", {
+      action: "Review adjacent gateway and interaction diagnostics.",
+    });
+  });
 
   wireMessageRuntime(client, runtime, workTracker);
 
@@ -234,10 +311,11 @@ export function createDiscordClient(runtime: BotRuntime): Client {
           recordGuildRemoved(runtime, guild.id);
           logInfo(
             "discord-lifecycle",
-            "Confirmed guild removal purged stored tenant data",
+            "Guild departure retained tenant data for a future rejoin",
             {
               guildId: guild.id,
               guildName: guild.name,
+              outcome: "inactive-retained",
             },
           );
         } catch (error) {
@@ -327,37 +405,87 @@ export function createDiscordClient(runtime: BotRuntime): Client {
   });
 
   client.on("interactionCreate", (interaction: Interaction) => {
+    if (!workTracker.isAccepting) {
+      void acknowledgeInteractionDuringShutdown(interaction).catch((error) => {
+        logClassifiedError("interaction", error, {
+          stage: "shutdown-rejection-acknowledgement",
+          outcome: "acknowledgement-failed",
+        });
+      });
+      return;
+    }
+    const lifecycle = beginInteractionLifecycle(interaction, {
+      eventLoopDelay: () => eventLoopDiagnostics.snapshot(),
+    });
+    const immediateResponse = startImmediateInteractionResponse(
+      interaction,
+      runtime,
+      lifecycle,
+    );
     return workTracker
       .run(async () => {
+        if (!(await lifecycle.ready)) return;
+        if ((await immediateResponse) === "handled") {
+          lifecycle.complete("handled");
+          return;
+        }
         if (interaction.isAutocomplete()) {
-          await handleAutocompleteComponentInteraction(interaction, runtime);
+          await handleAutocompleteComponentInteraction(
+            interaction,
+            runtime,
+            lifecycle,
+          );
           return;
         }
         if (interaction.isChatInputCommand()) {
-          await handleChatCommandInteraction(interaction, runtime);
+          await handleChatCommandInteraction(interaction, runtime, lifecycle);
           return;
         }
         if (interaction.isButton()) {
-          await handleButtonComponentInteraction(interaction, runtime);
+          await handleButtonComponentInteraction(
+            interaction,
+            runtime,
+            lifecycle,
+          );
           return;
         }
         if (interaction.isModalSubmit()) {
-          await handleModalInteraction(interaction, runtime);
+          await handleModalInteraction(interaction, runtime, lifecycle);
           return;
         }
         if (interaction.isStringSelectMenu()) {
-          await handleStringSelectInteraction(interaction, runtime);
+          await handleStringSelectInteraction(interaction, runtime, lifecycle);
+          return;
         }
+        lifecycle.complete("ignored");
       })
       .catch((error) => {
-        logError("interaction", "Tracked interaction handler failed", {
-          guildId: interaction.guildId ?? "dm",
-          error,
-        });
+        lifecycle.fail(error, { stage: "tracked-handler" });
       });
   });
 
   return client;
+}
+
+async function acknowledgeInteractionDuringShutdown(
+  interaction: Interaction,
+): Promise<void> {
+  if (interaction.isAutocomplete()) {
+    if (!interaction.responded) await interaction.respond([]);
+    return;
+  }
+  if (
+    !interaction.isRepliable() ||
+    interaction.deferred ||
+    interaction.replied
+  ) {
+    return;
+  }
+  await interaction.reply({
+    content:
+      "Superior is restarting and cannot accept this operation. Please try again after it reconnects.",
+    flags: MessageFlags.Ephemeral,
+  });
 }
 
 export function recordGuildAvailable(
@@ -423,15 +551,13 @@ export function recordGuildUnavailable(
   runtime.invalidateGuild(guildId);
 }
 
-export function recordGuildRemoved(
-  runtime: BotRuntime,
-  guildId: string,
-): ReturnType<BotRuntime["storage"]["purgeGuildData"]> {
+export function recordGuildRemoved(runtime: BotRuntime, guildId: string): void {
   // Invalidate first so work that crossed an asynchronous boundary cannot
-  // persist more tenant data while the confirmed removal is being purged.
+  // persist more tenant data after departure. Tenant rows and persistent
+  // panel bindings remain available if the bot later rejoins.
   runtime.invalidateGuild(guildId);
   try {
-    return runtime.storage.purgeGuildData(guildId);
+    runtime.storage.markGuildLeft(guildId);
   } finally {
     clearBackfillStatus(guildId);
     clearModerationProcessState(guildId);
@@ -442,36 +568,33 @@ export function recordGuildRemoved(
 async function handleAutocompleteComponentInteraction(
   interaction: AutocompleteInteraction,
   runtime: BotRuntime,
+  lifecycle: InteractionLifecycle,
 ): Promise<void> {
   try {
-    await handleAutocompleteInteraction(interaction, runtime);
+    const outcome = await runBoundedAutocomplete(interaction, lifecycle, () =>
+      handleAutocompleteInteraction(interaction, runtime),
+    );
+    lifecycle.complete(
+      outcome === "fallback" ? "autocomplete-fallback" : "succeeded",
+    );
   } catch (error) {
-    logError("interaction", "Autocomplete interaction failed", {
-      guildId: interaction.guildId ?? "dm",
-      command: interaction.commandName,
-      error,
-    });
-    if (!interaction.responded) {
-      await interaction.respond([]).catch(() => undefined);
-    }
+    lifecycle.fail(error, { stage: "autocomplete-handler" });
   }
 }
 
 async function handleChatCommandInteraction(
   interaction: ChatInputCommandInteraction,
   runtime: BotRuntime,
+  lifecycle: InteractionLifecycle,
 ): Promise<void> {
   try {
     await handleChatInputCommand(interaction, runtime);
+    lifecycle.complete("handled");
   } catch (error) {
-    logError("interaction", "Command failed", {
-      guildId: interaction.guildId ?? "dm",
-      command: interaction.commandName,
-      subcommand: interaction.options.getSubcommand(false),
-      error,
-    });
-    await replyWithUnexpectedError(
+    const classified = lifecycle.fail(error, { stage: "command-handler" });
+    await replyWithUnexpectedInteractionError(
       interaction,
+      classified,
       "The command failed unexpectedly and was logged.",
     );
   }
@@ -480,17 +603,16 @@ async function handleChatCommandInteraction(
 async function handleButtonComponentInteraction(
   interaction: ButtonInteraction,
   runtime: BotRuntime,
+  lifecycle: InteractionLifecycle,
 ): Promise<void> {
   try {
     await handleButtonInteraction(interaction, runtime);
+    lifecycle.complete("handled");
   } catch (error) {
-    logError("interaction", "Button interaction failed", {
-      guildId: interaction.guildId ?? "dm",
-      customId: interaction.customId,
-      error,
-    });
-    await replyWithUnexpectedError(
+    const classified = lifecycle.fail(error, { stage: "button-handler" });
+    await replyWithUnexpectedInteractionError(
       interaction,
+      classified,
       "That interaction failed unexpectedly and was logged.",
     );
   }
@@ -499,17 +621,16 @@ async function handleButtonComponentInteraction(
 async function handleModalInteraction(
   interaction: ModalSubmitInteraction,
   runtime: BotRuntime,
+  lifecycle: InteractionLifecycle,
 ): Promise<void> {
   try {
     await handleModalSubmitInteraction(interaction, runtime);
+    lifecycle.complete("handled");
   } catch (error) {
-    logError("interaction", "Modal interaction failed", {
-      guildId: interaction.guildId ?? "dm",
-      customId: interaction.customId,
-      error,
-    });
-    await replyWithUnexpectedError(
+    const classified = lifecycle.fail(error, { stage: "modal-handler" });
+    await replyWithUnexpectedInteractionError(
       interaction,
+      classified,
       "That interaction failed unexpectedly and was logged.",
     );
   }
@@ -518,43 +639,17 @@ async function handleModalInteraction(
 async function handleStringSelectInteraction(
   interaction: StringSelectMenuInteraction,
   runtime: BotRuntime,
+  lifecycle: InteractionLifecycle,
 ): Promise<void> {
   try {
     await handleStringSelectMenuInteraction(interaction, runtime);
+    lifecycle.complete("handled");
   } catch (error) {
-    logError("interaction", "Select-menu interaction failed", {
-      guildId: interaction.guildId ?? "dm",
-      customId: interaction.customId,
-      error,
-    });
-    await replyWithUnexpectedError(
+    const classified = lifecycle.fail(error, { stage: "select-handler" });
+    await replyWithUnexpectedInteractionError(
       interaction,
+      classified,
       "That interaction failed unexpectedly and was logged.",
     );
   }
-}
-
-async function replyWithUnexpectedError(
-  interaction:
-    | ChatInputCommandInteraction
-    | ButtonInteraction
-    | ModalSubmitInteraction
-    | StringSelectMenuInteraction,
-  content: string,
-): Promise<void> {
-  if (interaction.deferred && !interaction.replied) {
-    await interaction
-      .editReply({ content, allowedMentions: { parse: [] } })
-      .catch(() => undefined);
-    return;
-  }
-  if (interaction.replied) {
-    await interaction
-      .followUp({ content, ephemeral: true, allowedMentions: { parse: [] } })
-      .catch(() => undefined);
-    return;
-  }
-  await interaction
-    .reply({ content, ephemeral: true, allowedMentions: { parse: [] } })
-    .catch(() => undefined);
 }

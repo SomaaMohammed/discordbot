@@ -6,25 +6,18 @@ import {
   sanitizeGuildSettings,
 } from "../src/guild-settings.js";
 
-describe("guild settings v2", () => {
-  it("uses active-only, disabled defaults with a finite moderation cap", () => {
+describe("guild settings v3", () => {
+  it("uses immediately active secure defaults with a finite moderation cap", () => {
     expect(createDefaultGuildSettings()).toEqual({
       version: GUILD_SETTINGS_VERSION,
-      enabled: false,
-      reviewRequired: true,
+      enabled: true,
       timezone: "UTC",
-      features: {
-        chat: false,
-        replyModeration: false,
-        greetings: false,
-        activityMetrics: false,
-      },
       channels: { log: null },
       invocation: { keyword: "superior", aliases: [] },
       limits: {
         bulkModerationTargetCap: DEFAULT_BULK_MODERATION_TARGET_CAP,
       },
-      greetings: [],
+      greetings: [{ name: "Welcome", message: "Welcome, {user}!" }],
     });
     expect(DEFAULT_BULK_MODERATION_TARGET_CAP).toBeGreaterThan(0);
   });
@@ -91,15 +84,20 @@ describe("guild settings v2", () => {
     }
   });
 
-  it("rejects unsafe enabled/review combinations and unbounded caps", () => {
+  it("has no obsolete review or feature gates and rejects unbounded caps", () => {
     const settings = createDefaultGuildSettings();
     expect(() =>
       sanitizeGuildSettings({
         ...settings,
-        enabled: true,
         reviewRequired: true,
       }),
-    ).toThrow(/requiring review/);
+    ).toThrow();
+    expect(() =>
+      sanitizeGuildSettings({
+        ...settings,
+        features: { chat: false },
+      }),
+    ).toThrow();
     expect(() =>
       sanitizeGuildSettings({
         ...settings,

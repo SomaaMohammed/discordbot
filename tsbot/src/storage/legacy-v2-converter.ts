@@ -6,16 +6,15 @@
  */
 import { z } from "zod";
 import {
-  createDefaultGuildSettings,
   DEFAULT_BULK_MODERATION_TARGET_CAP,
   DISCORD_SNOWFLAKE_PATTERN,
-  sanitizeGuildSettings,
 } from "../guild-settings.js";
+import { USER_ACTIVITY_METRICS, type UserActivityMetric } from "../types.js";
 import {
-  USER_ACTIVITY_METRICS,
-  type GuildSettings,
-  type UserActivityMetric,
-} from "../types.js";
+  createDefaultLegacyGuildSettingsV2,
+  sanitizeLegacyGuildSettingsV2,
+  type LegacyGuildSettingsV2,
+} from "./guild-settings-v2.js";
 
 export const LEGACY_SILENCE_RECOVERY_METRIC_KEY = "runtime.silence_leases.v1";
 
@@ -116,7 +115,7 @@ const LegacySettingsSchema = z
 type LegacySettings = z.infer<typeof LegacySettingsSchema>;
 
 export interface ConvertedSettings {
-  settings: GuildSettings;
+  settings: LegacyGuildSettingsV2;
   safelyTranslated: boolean;
   warnings: string[];
 }
@@ -180,7 +179,7 @@ export function convertLegacyV2Settings(
     lifecycle.guildEnabled &&
     lifecycle.guildActive &&
     !reviewRequired;
-  const settings: GuildSettings = {
+  const settings: LegacyGuildSettingsV2 = {
     version: 2,
     enabled,
     reviewRequired,
@@ -206,7 +205,7 @@ export function convertLegacyV2Settings(
 
   try {
     return {
-      settings: sanitizeGuildSettings(settings),
+      settings: sanitizeLegacyGuildSettingsV2(settings),
       safelyTranslated: !reviewRequired,
       warnings,
     };
@@ -264,7 +263,7 @@ export function isUserActivityMetric(
 }
 
 function settingsRequiringReview(reason: string): ConvertedSettings {
-  const settings = createDefaultGuildSettings();
+  const settings = createDefaultLegacyGuildSettingsV2();
   settings.reviewRequired = true;
   return {
     settings,
@@ -276,7 +275,7 @@ function settingsRequiringReview(reason: string): ConvertedSettings {
 function convertInvocation(
   legacy: LegacySettings,
   warnings: string[],
-): GuildSettings["invocation"] {
+): LegacyGuildSettingsV2["invocation"] {
   let keyword = normalizeInvocation(legacy.invocation.keyword);
   if (!keyword || HISTORICAL_TERMS.test(keyword)) {
     keyword = "superior";
@@ -302,8 +301,8 @@ function convertInvocation(
 function convertGreetings(
   legacy: LegacySettings,
   warnings: string[],
-): GuildSettings["greetings"] {
-  const converted: GuildSettings["greetings"] = [];
+): LegacyGuildSettingsV2["greetings"] {
+  const converted: LegacyGuildSettingsV2["greetings"] = [];
   const names = new Set<string>();
   for (const profile of legacy.greetings) {
     const name = profile.name.normalize("NFKC").trim();

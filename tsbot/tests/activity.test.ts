@@ -1,4 +1,4 @@
-import { Collection, PermissionFlagsBits } from "discord.js";
+import { Collection, MessageFlags, PermissionFlagsBits } from "discord.js";
 import { describe, expect, it, vi } from "vitest";
 import type { GuildRuntime } from "../src/runtime.js";
 import {
@@ -272,29 +272,70 @@ describe("activity backfill", () => {
   });
 });
 
-describe("fun feature gate", () => {
-  it("does not expose stored statistics when activity metrics are disabled", async () => {
+describe("fun secure defaults", () => {
+  it("exposes stored statistics immediately", async () => {
     const reply = vi.fn(async () => undefined);
-    const getUserMetrics = vi.fn();
+    const getUserMetrics = vi.fn(() => ({
+      messages_sent: 1,
+      reactions_sent: 2,
+      reactions_received: 3,
+      battles_played: 4,
+      battles_won: 5,
+    }));
     const interaction = {
       options: {
         getSubcommand: vi.fn(() => "stats"),
+        getUser: vi.fn(() => null),
       },
+      user: { id: USER_A, username: "Member", globalName: null },
+      deferred: false,
+      replied: false,
       reply,
     };
     const runtime = {
-      settings: { features: { activityMetrics: false } },
-      storage: { getUserMetrics },
+      storage: { getUserMetrics, recordCommandMetric: vi.fn() },
     } as unknown as GuildRuntime;
 
     await handleFunCommand(interaction as never, runtime);
 
     expect(reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining("disabled"),
-        ephemeral: true,
+        content: expect.stringContaining("Stats for"),
+        flags: MessageFlags.Ephemeral,
       }),
     );
-    expect(getUserMetrics).not.toHaveBeenCalled();
+    expect(getUserMetrics).toHaveBeenCalledWith(USER_A);
+  });
+
+  it("edits the receipt-time deferral for a leaderboard", async () => {
+    const editReply = vi.fn(async () => undefined);
+    const reply = vi.fn(async () => undefined);
+    const recordCommandMetric = vi.fn();
+    const interaction = {
+      options: {
+        getSubcommand: vi.fn(() => "leaderboard"),
+        getString: vi.fn(() => "messages_sent"),
+        getInteger: vi.fn(() => 10),
+      },
+      deferred: true,
+      replied: false,
+      editReply,
+      followUp: vi.fn(async () => undefined),
+      reply,
+    };
+    const runtime = {
+      storage: {
+        getUserLeaderboard: vi.fn(() => [{ userId: USER_A, value: 7 }]),
+        recordCommandMetric,
+      },
+    } as unknown as GuildRuntime;
+
+    await handleFunCommand(interaction as never, runtime);
+
+    expect(editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("**7**") }),
+    );
+    expect(reply).not.toHaveBeenCalled();
+    expect(recordCommandMetric).toHaveBeenCalledWith("fun.leaderboard");
   });
 });

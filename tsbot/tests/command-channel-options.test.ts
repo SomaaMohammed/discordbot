@@ -55,7 +55,8 @@ describe("public command surface", () => {
     );
 
     expect(commandNames).toEqual([
-      "setup",
+      "config",
+      "data",
       "superior",
       "panel",
       "ticket",
@@ -87,9 +88,8 @@ describe("public command surface", () => {
     ) as JsonCommand[];
 
     const persistentTextTargets: Array<[string, string, string]> = [
-      ["setup", "channel", "channel"],
+      ["config", "log", "channel"],
       ["panel", "post", "channel"],
-      ["ticket", "setup", "log_channel"],
       ["ticket", "panel", "channel"],
     ];
     for (const [
@@ -107,13 +107,6 @@ describe("public command surface", () => {
         ChannelType.GuildAnnouncement,
       ]);
     }
-
-    const ticketCategory = findOption(
-      findSubcommand(findCommand(commands, "ticket"), "setup"),
-      "category",
-    );
-    expect(ticketCategory.type).toBe(7);
-    expect(ticketCategory.channel_types).toEqual([ChannelType.GuildCategory]);
 
     const transientTargets: Array<[string, string, string]> = [
       ["superior", "dmpanel", "channel"],

@@ -504,7 +504,7 @@ describe("ticket department commands", () => {
 
     expect(harness.storage.createTicketDepartment).not.toHaveBeenCalled();
     expect(replyPayload(harness).content).toContain(
-      "after department setup was verified",
+      "after department configuration was verified",
     );
   });
 

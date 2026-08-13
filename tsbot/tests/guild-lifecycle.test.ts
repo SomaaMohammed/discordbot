@@ -30,8 +30,8 @@ function runtimeWith(existing: GuildRecord | null): {
   reactivateGuild: ReturnType<typeof vi.fn>;
   invalidateGuild: ReturnType<typeof vi.fn>;
 } {
-  const ensureGuild = vi.fn(() => existing ?? record(false, null));
-  const reactivateGuild = vi.fn(() => record(false, null));
+  const ensureGuild = vi.fn(() => existing ?? record(true, null));
+  const reactivateGuild = vi.fn(() => record(true, null));
   const invalidateGuild = vi.fn();
   return {
     runtime: {
@@ -84,7 +84,7 @@ describe("guild lifecycle", () => {
     expect(fixture.reactivateGuild).not.toHaveBeenCalled();
   });
 
-  it("treats an online guildCreate as a rejoin and leaves retained data disabled", () => {
+  it("treats an online guildCreate as a rejoin and restores core availability", () => {
     const fixture = runtimeWith(record(true, null));
 
     const result = recordGuildAvailable(fixture.runtime, GUILD_ID, "Guild", {
@@ -92,7 +92,7 @@ describe("guild lifecycle", () => {
     });
 
     expect(result.rejoined).toBe(true);
-    expect(result.record.enabled).toBe(false);
+    expect(result.record.enabled).toBe(true);
     expect(fixture.reactivateGuild).toHaveBeenCalledWith(
       GUILD_ID,
       "Guild",
@@ -110,7 +110,7 @@ describe("guild lifecycle", () => {
     });
 
     expect(result.rejoined).toBe(true);
-    expect(result.record.enabled).toBe(false);
+    expect(result.record.enabled).toBe(true);
     expect(fixture.reactivateGuild).toHaveBeenCalledWith(
       GUILD_ID,
       "Guild",
@@ -128,7 +128,7 @@ describe("guild lifecycle", () => {
     });
 
     expect(result.rejoined).toBe(true);
-    expect(result.record.enabled).toBe(false);
+    expect(result.record.enabled).toBe(true);
     expect(fixture.reactivateGuild).toHaveBeenCalledWith(
       GUILD_ID,
       "Guild",
@@ -177,7 +177,7 @@ describe("guild lifecycle", () => {
     expect(purgeGuildData).not.toHaveBeenCalled();
   });
 
-  it("purges tenant data for a confirmed guild removal", () => {
+  it("retains tenant data for a future rejoin after confirmed removal", () => {
     const markGuildLeft = vi.fn();
     const purgeGuildData = vi.fn(() => ({ guilds: 1 }));
     const invalidateGuild = vi.fn();
@@ -186,17 +186,18 @@ describe("guild lifecycle", () => {
       invalidateGuild,
     } as unknown as BotRuntime;
 
-    expect(recordGuildRemoved(runtime, GUILD_ID)).toEqual({ guilds: 1 });
+    expect(recordGuildRemoved(runtime, GUILD_ID)).toBeUndefined();
 
     expect(invalidateGuild).toHaveBeenCalledWith(GUILD_ID);
-    expect(purgeGuildData).toHaveBeenCalledWith(GUILD_ID);
-    expect(markGuildLeft).not.toHaveBeenCalled();
+    expect(markGuildLeft).toHaveBeenCalledWith(GUILD_ID);
+    expect(purgeGuildData).not.toHaveBeenCalled();
   });
 
-  it("routes guildDelete through permanent tenant purge", async () => {
-    const purgeGuildData = vi.fn(() => ({ guilds: 1 }));
+  it("routes guildDelete through inactive retention", async () => {
+    const markGuildLeft = vi.fn();
+    const purgeGuildData = vi.fn();
     const runtime = {
-      storage: { purgeGuildData },
+      storage: { markGuildLeft, purgeGuildData },
       invalidateGuild: vi.fn(),
     } as unknown as BotRuntime;
     const client = createDiscordClient(runtime);
@@ -208,7 +209,8 @@ describe("guild lifecycle", () => {
     const workLifecycle = getDiscordClientWorkLifecycle(client);
 
     await expect(workLifecycle?.drain(1_000)).resolves.toBe(true);
-    expect(purgeGuildData).toHaveBeenCalledWith(GUILD_ID);
+    expect(markGuildLeft).toHaveBeenCalledWith(GUILD_ID);
+    expect(purgeGuildData).not.toHaveBeenCalled();
 
     workLifecycle?.stop();
     client.removeAllListeners();

@@ -1,5 +1,6 @@
 import {
   ChannelType,
+  MessageFlags,
   type ButtonInteraction,
   type Guild,
   type GuildMember,
@@ -56,6 +57,7 @@ import {
   collectTicketTranscript,
   type TranscriptChannelLike,
 } from "./ticket-transcript.js";
+import { logDomainOutcome } from "./domain-outcomes.js";
 
 const TICKET_COMPONENT_NAMESPACE = "superior:ticket:";
 const TICKET_FORM_SUMMARY_INPUT_LIMIT =
@@ -209,6 +211,16 @@ export async function handleTicketButton(
         `Ticket #${currentTicket.ticketNumber} is no longer available to claim.`,
       );
     }
+    logDomainOutcome(
+      "ticket",
+      "claim",
+      runtime.guildId,
+      result.status === "conflict" ? "rejected-conflict" : result.status,
+      {
+        recordId: currentTicket.ticketId,
+        recordNumber: currentTicket.ticketNumber,
+      },
+    );
     return true;
   }
   const result = runtime.storage.releaseTicket(
@@ -230,6 +242,18 @@ export async function handleTicketButton(
       `Ticket #${currentTicket.ticketNumber} is no longer available to release.`,
     );
   }
+  logDomainOutcome(
+    "ticket",
+    "release-claim",
+    runtime.guildId,
+    result.status === "released" || result.status === "already-released"
+      ? result.status
+      : "rejected-unavailable",
+    {
+      recordId: currentTicket.ticketId,
+      recordNumber: currentTicket.ticketNumber,
+    },
+  );
   return true;
 }
 
@@ -346,7 +370,7 @@ async function handleOpenButton(
   await interaction.reply({
     content: "Choose the support department that best matches your request:",
     components: [buildTicketDepartmentSelect(panel.panelId, departments)],
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
   runtime.storage.recordCommandMetric("panel.tickets.use");
@@ -585,16 +609,37 @@ async function handleOpenModal(
     return;
   }
   if (reservation.status === "existing") {
+    logDomainOutcome(
+      "ticket",
+      "create",
+      runtime.guildId,
+      "rejected-existing-active-ticket",
+      {
+        recordId: reservation.ticket.ticketId,
+        recordNumber: reservation.ticket.ticketNumber,
+      },
+    );
     await replyPrivate(interaction, existingTicketMessage(reservation.ticket));
     return;
   }
   if (reservation.status === "limit") {
+    logDomainOutcome(
+      "ticket",
+      "create",
+      runtime.guildId,
+      "rejected-active-ticket-limit",
+      { totalCount: reservation.activeCount },
+    );
     await replyPrivate(
       interaction,
       `You already have ${reservation.activeCount} active tickets in this server. Close one before opening another.`,
     );
     return;
   }
+  logDomainOutcome("ticket", "create", runtime.guildId, "reserved", {
+    recordId: reservation.ticket.ticketId,
+    recordNumber: reservation.ticket.ticketNumber,
+  });
   let channel: TextChannel | null = null;
   let createdTicket: TicketRecord | null = null;
   let controlMessage: Awaited<ReturnType<TextChannel["send"]>> | null = null;
@@ -754,6 +799,18 @@ async function handleOpenModal(
     if (runtime.isCurrent()) {
       runtime.storage.recordCommandMetric("ticket.create", false);
     }
+    logDomainOutcome(
+      "ticket",
+      "create",
+      runtime.guildId,
+      durableChannel ? "completed-concurrently" : "failed-delivery",
+      {
+        recordId: reservation.ticket.ticketId,
+        recordNumber: latest?.ticketNumber ?? reservation.ticket.ticketNumber,
+        ...(channel ? { channelId: channel.id } : {}),
+        state: latest?.state ?? "untracked",
+      },
+    );
     return;
   }
   await replyPrivate(
@@ -761,6 +818,12 @@ async function handleOpenModal(
     `Ticket #${createdTicket.ticketNumber} is ready in <#${channel.id}>.`,
   );
   runtime.storage.recordCommandMetric("ticket.create");
+  logDomainOutcome("ticket", "create", runtime.guildId, "completed", {
+    recordId: createdTicket.ticketId,
+    recordNumber: createdTicket.ticketNumber,
+    channelId: channel.id,
+    state: createdTicket.state,
+  });
 }
 
 async function handleCloseModal(
@@ -891,6 +954,11 @@ async function handleCloseModal(
     return;
   }
   const closingTicket = closeStart.ticket;
+  logDomainOutcome("ticket", "close", runtime.guildId, "started", {
+    recordId: closingTicket.ticketId,
+    recordNumber: closingTicket.ticketNumber,
+    state: closingTicket.state,
+  });
   let logDelivered = false;
   let logCheckpointed = false;
   try {
@@ -950,6 +1018,17 @@ async function handleCloseModal(
       throw new Error("The closure log checkpoint could not be persisted.");
     }
     logCheckpointed = true;
+    logDomainOutcome(
+      "ticket",
+      "closure-log-delivery",
+      runtime.guildId,
+      "checkpointed",
+      {
+        recordId: checkpoint.ticket.ticketId,
+        recordNumber: checkpoint.ticket.ticketNumber,
+        channelId: resources.logChannel.id,
+      },
+    );
     if (!runtime.isCurrent()) {
       throw new Error(
         "Server configuration changed after the closure log was checkpointed.",
@@ -992,6 +1071,12 @@ async function handleCloseModal(
         : `Ticket #${ticket.ticketNumber} was logged and closed, but Discord did not remove the channel. Use \`/ticket recover\` to reconcile it.`,
     );
     runtime.storage.recordCommandMetric("ticket.close");
+    logDomainOutcome("ticket", "close", runtime.guildId, "completed", {
+      recordId: finished.ticket.ticketId,
+      recordNumber: finished.ticket.ticketNumber,
+      channelId: channel.id,
+      state: deleted ? "channel-removed" : "channel-recovery-required",
+    });
   } catch (error) {
     if (!runtime.isCurrent()) {
       await replyPrivate(
@@ -1017,6 +1102,25 @@ async function handleCloseModal(
     if (runtime.isCurrent()) {
       runtime.storage.recordCommandMetric("ticket.close", false);
     }
+    logDomainOutcome(
+      "ticket",
+      "close",
+      runtime.guildId,
+      logCheckpointed
+        ? "failed-after-checkpoint"
+        : logDelivered
+          ? "failed-checkpoint"
+          : "failed-log-delivery",
+      {
+        recordId: closingTicket.ticketId,
+        recordNumber: closingTicket.ticketNumber,
+        state: logCheckpointed
+          ? "logged"
+          : logDelivered
+            ? "delivered-uncheckpointed"
+            : "reopened",
+      },
+    );
   }
 }
 
@@ -1091,6 +1195,14 @@ async function finishLoggedTicketClose(
       : `Ticket #${ticket.ticketNumber} was already logged and is now closed, but Discord did not remove the channel. Use \`/ticket recover\` to reconcile it.`,
   );
   runtime.storage.recordCommandMetric("ticket.close");
+  logDomainOutcome("ticket", "close-recovery", runtime.guildId, "completed", {
+    recordId: finished.ticket.ticketId,
+    recordNumber: finished.ticket.ticketNumber,
+    ...(finished.ticket.channelId
+      ? { channelId: finished.ticket.channelId }
+      : {}),
+    state: deleted ? "channel-removed" : "channel-recovery-required",
+  });
 }
 
 async function fetchCloseTicketChannel(
@@ -1543,7 +1655,7 @@ function existingTicketMessage(ticket: TicketRecord): string {
 
 async function deferPrivate(interaction: TicketInteraction): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -1562,14 +1674,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       ...payload,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     ...payload,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }

@@ -5,9 +5,11 @@ import { AsyncWorkTracker } from "../src/discord/work-tracker.js";
 import type { BotRuntime } from "../src/runtime.js";
 import {
   createShutdownCoordinator,
+  installProcessFailureHandlers,
   installShutdownSignalHandlers,
   loginWithShutdown,
   type ShutdownCoordinator,
+  type ProcessFailureSource,
   type ShutdownSignal,
   type ShutdownSignalSource,
 } from "../src/shutdown.js";
@@ -175,5 +177,38 @@ describe("graceful shutdown", () => {
     expect(client.login).toHaveBeenCalledWith("test-token");
     expect(removeSignalHandlers).toHaveBeenCalledTimes(1);
     expect(shutdown).toHaveBeenCalledWith("startup-login-failure");
+  });
+
+  it("routes process-level fatal errors through one controlled shutdown", async () => {
+    const shutdown = vi.fn(async () => ({ drained: true }));
+    const coordinator = { shutdown } as ShutdownCoordinator;
+    const listeners = new Map<string, (...args: unknown[]) => void>();
+    const source: ProcessFailureSource = {
+      exitCode: null,
+      on: vi.fn((event, listener) => {
+        listeners.set(event, listener);
+      }),
+      off: vi.fn((event, listener) => {
+        if (listeners.get(event) === listener) listeners.delete(event);
+      }),
+    };
+    const uninstall = installProcessFailureHandlers(coordinator, source);
+
+    listeners.get("unhandledRejection")?.(
+      Object.assign(new Error("synthetic rejection"), {
+        code: "SQLITE_BUSY",
+      }),
+    );
+    listeners.get("uncaughtException")?.(
+      new Error("secondary fatal error"),
+      "uncaughtException",
+    );
+    await vi.waitFor(() => expect(shutdown).toHaveBeenCalledTimes(1));
+
+    expect(shutdown).toHaveBeenCalledWith("fatal-unhandled-rejection");
+    expect(source.exitCode).toBe(1);
+    uninstall();
+    expect(source.off).toHaveBeenCalledTimes(3);
+    expect(listeners.size).toBe(0);
   });
 });

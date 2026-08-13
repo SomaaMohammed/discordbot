@@ -28,6 +28,7 @@ windows/.work/
 *.env.*
 !.env.example
 AGENTS.md
+mudae-watch.private.json
 *.db
 *.db-*
 *.sqlite
@@ -37,3 +38,5 @@ AGENTS.md
 *.db-journal
 *.db-shm
 *.db-wal
+*.bak
+*.backup

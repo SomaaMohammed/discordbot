@@ -36,13 +36,14 @@ async function main() {
       "The configured database path did not resolve beside the launcher.",
     );
   }
+  const expectedEnvironment = process.env.SUPERIOR_PORTABLE_EXPECT_ENV;
   if (
-    expectedRoot &&
-    resolveEnvironmentFile(applicationRoot) !==
-      path.join(applicationRoot, ".env")
+    expectedEnvironment &&
+    path.resolve(expectedEnvironment) !==
+      path.resolve(resolveEnvironmentFile(applicationRoot))
   ) {
     throw new Error(
-      "The environment file did not resolve beside the launcher.",
+      "The selected environment file did not reach the packaged configuration loader.",
     );
   }
 

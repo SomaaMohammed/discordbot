@@ -3,9 +3,15 @@ import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import {
   DISCORD_SNOWFLAKE_PATTERN,
+  GUILD_SETTINGS_VERSION,
   serializeGuildSettings,
 } from "../guild-settings.js";
 import type { GuildSettings } from "../types.js";
+import {
+  parseLegacyGuildSettingsV2Json,
+  serializeLegacyGuildSettingsV2,
+  type LegacyGuildSettingsV2,
+} from "./guild-settings-v2.js";
 import {
   convertLegacyMetric,
   convertLegacyV2Settings,
@@ -17,6 +23,7 @@ import {
   createV5OperationalObjects,
   createV6OperationalObjects,
   createV7OperationalObjects,
+  createV8GuildSettingsObject,
   databaseIntegrityCheck,
   detectDatabaseSchema,
   type DatabaseSchemaKind,
@@ -25,6 +32,8 @@ import {
   recordV4SchemaVersion,
   recordV5SchemaVersion,
   recordV6SchemaVersion,
+  recordV7SchemaVersion,
+  V7_TABLE_NAMES,
   V2_TABLE_NAMES,
   V4_EXPLICIT_INDEX_NAMES,
   validateV2Schema,
@@ -33,6 +42,7 @@ import {
   validateV5Schema,
   validateV6Schema,
   validateV7Schema,
+  validateV8Schema,
 } from "./schema.js";
 
 export type MigrationFailurePoint =
@@ -62,8 +72,9 @@ export interface MigrationResult {
     | "legacy-v4"
     | "legacy-v5"
     | "legacy-v6"
-    | "current-v7";
-  toSchema: "current-v7";
+    | "legacy-v7"
+    | "current-v8";
+  toSchema: "current-v8";
   guilds: number;
   settingsRequiringReview: number;
   metricsPreserved: number;
@@ -157,7 +168,7 @@ interface LegacyMetricRow {
 
 interface PreparedSettingsRow {
   guildId: string;
-  settings: GuildSettings;
+  settings: LegacyGuildSettingsV2;
   json: string;
   updatedAt: string;
 }
@@ -200,21 +211,45 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       options.onLockAcquired?.();
       assertIntegrity(db);
       const schema = detectDatabaseSchema(db);
-      if (schema === "current-v7") {
-        const issues = validateV7Schema(db);
+      if (schema === "current-v8") {
+        const issues = validateV8Schema(db);
         if (issues.length > 0) {
-          throw new Error(`Schema v7 validation failed: ${issues.join("; ")}`);
+          throw new Error(`Schema v8 validation failed: ${issues.join("; ")}`);
         }
         return {
           status: "already-current",
-          fromSchema: "current-v7",
-          toSchema: "current-v7",
+          fromSchema: "current-v8",
+          toSchema: "current-v8",
           guilds: countRows(db, "guilds"),
-          settingsRequiringReview: countReviewRequiredSettings(db),
+          settingsRequiringReview: 0,
           metricsPreserved: countRows(db, "metrics"),
           metricsDropped: 0,
           warnings: 0,
         };
+      }
+      if (schema === "legacy-v7") {
+        const issues = validateV7Schema(db);
+        if (issues.length > 0) {
+          throw new Error(`Schema v7 validation failed: ${issues.join("; ")}`);
+        }
+        const now = (options.now ?? utcNow)();
+        const result: MigrationResult = {
+          status: options.dryRun ? "dry-run" : "migrated",
+          fromSchema: "legacy-v7",
+          toSchema: "current-v8",
+          guilds: countRows(db, "guilds"),
+          settingsRequiringReview: 0,
+          metricsPreserved: countRows(db, "metrics"),
+          metricsDropped: 0,
+          warnings: 0,
+        };
+        upgradeV7ToV8(db, options, now, true);
+        injectFailure(options, "before-commit");
+        if (options.dryRun) {
+          dryRunResult = result;
+          throw new DryRunRollback("validated dry run");
+        }
+        return result;
       }
       if (schema === "legacy-v6") {
         const v6Issues = validateV6Schema(db);
@@ -227,7 +262,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         const result: MigrationResult = {
           status: options.dryRun ? "dry-run" : "migrated",
           fromSchema: "legacy-v6",
-          toSchema: "current-v7",
+          toSchema: "current-v8",
           guilds: countRows(db, "guilds"),
           settingsRequiringReview: countReviewRequiredSettings(db),
           metricsPreserved: countRows(db, "metrics"),
@@ -236,14 +271,14 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         };
         createV7OperationalObjects(db);
         injectFailure(options, "after-create");
-        recordCurrentSchemaVersion(db, now);
-        injectFailure(options, "after-version");
-        const finalIssues = validateV7Schema(db);
-        if (finalIssues.length > 0) {
+        recordV7SchemaVersion(db, now);
+        const v7FinalIssues = validateV7Schema(db);
+        if (v7FinalIssues.length > 0) {
           throw new Error(
-            `Migrated schema validation failed: ${finalIssues.join("; ")}`,
+            `Intermediate schema-v7 validation failed: ${v7FinalIssues.join("; ")}`,
           );
         }
+        upgradeV7ToV8(db, options, now, false);
         injectFailure(options, "before-commit");
         if (options.dryRun) {
           dryRunResult = result;
@@ -262,7 +297,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         const result: MigrationResult = {
           status: options.dryRun ? "dry-run" : "migrated",
           fromSchema: "legacy-v5",
-          toSchema: "current-v7",
+          toSchema: "current-v8",
           guilds: countRows(db, "guilds"),
           settingsRequiringReview: countReviewRequiredSettings(db),
           metricsPreserved: countRows(db, "metrics"),
@@ -279,14 +314,14 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         }
         createV7OperationalObjects(db);
         injectFailure(options, "after-create");
-        recordCurrentSchemaVersion(db, now);
-        injectFailure(options, "after-version");
-        const finalIssues = validateV7Schema(db);
-        if (finalIssues.length > 0) {
+        recordV7SchemaVersion(db, now);
+        const v7FinalIssues = validateV7Schema(db);
+        if (v7FinalIssues.length > 0) {
           throw new Error(
-            `Migrated schema validation failed: ${finalIssues.join("; ")}`,
+            `Intermediate schema-v7 validation failed: ${v7FinalIssues.join("; ")}`,
           );
         }
+        upgradeV7ToV8(db, options, now, false);
         injectFailure(options, "before-commit");
         if (options.dryRun) {
           dryRunResult = result;
@@ -305,7 +340,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         const result: MigrationResult = {
           status: options.dryRun ? "dry-run" : "migrated",
           fromSchema: "legacy-v4",
-          toSchema: "current-v7",
+          toSchema: "current-v8",
           guilds: countRows(db, "guilds"),
           settingsRequiringReview: countReviewRequiredSettings(db),
           metricsPreserved: countRows(db, "metrics"),
@@ -329,14 +364,14 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
           );
         }
         createV7OperationalObjects(db);
-        recordCurrentSchemaVersion(db, now);
-        injectFailure(options, "after-version");
-        const finalIssues = validateV7Schema(db);
-        if (finalIssues.length > 0) {
+        recordV7SchemaVersion(db, now);
+        const v7FinalIssues = validateV7Schema(db);
+        if (v7FinalIssues.length > 0) {
           throw new Error(
-            `Migrated schema validation failed: ${finalIssues.join("; ")}`,
+            `Intermediate schema-v7 validation failed: ${v7FinalIssues.join("; ")}`,
           );
         }
+        upgradeV7ToV8(db, options, now, false);
         injectFailure(options, "before-commit");
         if (options.dryRun) {
           dryRunResult = result;
@@ -356,7 +391,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         const result: MigrationResult = {
           status: options.dryRun ? "dry-run" : "migrated",
           fromSchema: "legacy-v3",
-          toSchema: "current-v7",
+          toSchema: "current-v8",
           guilds: snapshot.guilds.length,
           settingsRequiringReview: countReviewRequiredSettings(db),
           metricsPreserved: snapshot.metrics.length,
@@ -395,14 +430,14 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
           );
         }
         createV7OperationalObjects(db);
-        recordCurrentSchemaVersion(db, now);
-        injectFailure(options, "after-version");
-        const finalIssues = validateV7Schema(db);
-        if (finalIssues.length > 0) {
+        recordV7SchemaVersion(db, now);
+        const v7FinalIssues = validateV7Schema(db);
+        if (v7FinalIssues.length > 0) {
           throw new Error(
-            `Migrated schema validation failed: ${finalIssues.join("; ")}`,
+            `Intermediate schema-v7 validation failed: ${v7FinalIssues.join("; ")}`,
           );
         }
+        upgradeV7ToV8(db, options, now, false);
         injectFailure(options, "before-commit");
         if (options.dryRun) {
           dryRunResult = result;
@@ -412,7 +447,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       }
       if (schema === "legacy-v1") {
         throw new Error(
-          "Schema v1 cannot be migrated by v7. Upgrade with the final v4 release to schema v2, stop the bot, create an offline backup, then run the v7 migration.",
+          "Schema v1 cannot be migrated directly by v8. Upgrade with the final v4 release to schema v2, stop every older executable, create an offline backup, then run the current migration.",
         );
       }
       if (schema !== "legacy-v2") {
@@ -480,17 +515,14 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
         );
       }
       createV7OperationalObjects(db);
-      // The v7 marker remains the final data write after every intermediate
-      // schema has been built and validated.
-      recordCurrentSchemaVersion(db, now);
-      injectFailure(options, "after-version");
-
-      const finalIssues = validateV7Schema(db);
-      if (finalIssues.length > 0) {
+      recordV7SchemaVersion(db, now);
+      const v7FinalIssues = validateV7Schema(db);
+      if (v7FinalIssues.length > 0) {
         throw new Error(
-          `Migrated schema validation failed: ${finalIssues.join("; ")}`,
+          `Intermediate schema-v7 validation failed: ${v7FinalIssues.join("; ")}`,
         );
       }
+      upgradeV7ToV8(db, options, now, false);
 
       const result: MigrationResult = {
         status: options.dryRun ? "dry-run" : "migrated",
@@ -519,7 +551,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
 
 export function validateDatabaseFile(
   dbFile: string,
-  options: { expect: 2 | 3 | 4 | 5 | 6 | 7 },
+  options: { expect: 2 | 3 | 4 | 5 | 6 | 7 | 8 },
 ): DatabaseValidationResult {
   const db = new Database(dbFile, {
     readonly: true,
@@ -547,7 +579,8 @@ export function validateDatabaseFile(
       (expected === 4 && schema !== "legacy-v4") ||
       (expected === 5 && schema !== "legacy-v5") ||
       (expected === 6 && schema !== "legacy-v6") ||
-      (expected === 7 && schema !== "current-v7")
+      (expected === 7 && schema !== "legacy-v7") ||
+      (expected === 8 && schema !== "current-v8")
     ) {
       throw new Error(
         `Database schema is ${schema}; expected exact schema v${expected}`,
@@ -556,6 +589,193 @@ export function validateDatabaseFile(
     return { schema, schemaVersion, integrity, foreignKeyViolations };
   } finally {
     db.close();
+  }
+}
+
+interface V8SettingsMigrationRow {
+  guildId: string;
+  enabled: boolean;
+  json: string;
+  updatedAt: string;
+}
+
+type V7OperationalSnapshot = Map<string, unknown[]>;
+
+/**
+ * Rebuilds only guild_settings. Every panel/workflow/audit table is snapshotted
+ * and compared before the v8 marker is written, so a partial or lossy upgrade
+ * rolls the entire IMMEDIATE transaction back.
+ */
+function upgradeV7ToV8(
+  db: Database.Database,
+  options: MigrationOptions,
+  now: string,
+  injectStages: boolean,
+): void {
+  const operationalSnapshot = readV7OperationalSnapshot(db);
+  const settings = prepareV8SettingsRows(db);
+  if (injectStages) injectFailure(options, "after-source-read");
+
+  db.exec(
+    `ALTER TABLE guild_settings RENAME TO ${quoteIdentifier(v7SettingsLegacyTableName())}`,
+  );
+  if (injectStages) injectFailure(options, "after-rename");
+
+  createV8GuildSettingsObject(db);
+  if (injectStages) injectFailure(options, "after-create");
+
+  db.exec(
+    "UPDATE guilds SET enabled = CASE WHEN left_at IS NULL THEN 1 ELSE 0 END",
+  );
+  const insert = db.prepare(
+    `INSERT INTO guild_settings (
+       guild_id, settings_version, settings_json, updated_at
+     ) VALUES (?, ?, ?, ?)`,
+  );
+  for (const row of settings) {
+    insert.run(row.guildId, GUILD_SETTINGS_VERSION, row.json, row.updatedAt);
+  }
+  if (injectStages) injectFailure(options, "after-copy");
+
+  verifyV8SettingsRows(db, settings);
+  verifyV7OperationalSnapshot(db, operationalSnapshot);
+  if (injectStages) injectFailure(options, "after-verify");
+
+  db.exec(`DROP TABLE ${quoteIdentifier(v7SettingsLegacyTableName())}`);
+  if (injectStages) injectFailure(options, "after-drop");
+
+  recordCurrentSchemaVersion(db, now);
+  injectFailure(options, "after-version");
+  const finalIssues = validateV8Schema(db);
+  if (finalIssues.length > 0) {
+    throw new Error(
+      `Migrated schema validation failed: ${finalIssues.join("; ")}`,
+    );
+  }
+  verifyV7OperationalSnapshot(db, operationalSnapshot);
+}
+
+function prepareV8SettingsRows(
+  db: Database.Database,
+): V8SettingsMigrationRow[] {
+  const guilds = db
+    .prepare("SELECT guild_id, left_at FROM guilds ORDER BY guild_id")
+    .all() as Array<{ guild_id: string; left_at: string | null }>;
+  const settingsByGuild = new Map(
+    (
+      db
+        .prepare(
+          `SELECT guild_id, settings_version, settings_json, updated_at
+           FROM guild_settings ORDER BY guild_id`,
+        )
+        .all() as LegacySettingsRow[]
+    ).map((row) => [row.guild_id, row]),
+  );
+  if (settingsByGuild.size !== guilds.length) {
+    throw new Error("Schema-v7 settings count changed during migration");
+  }
+
+  return guilds.map((guild) => {
+    const source = settingsByGuild.get(guild.guild_id);
+    if (!source || source.settings_version !== 2) {
+      throw new Error(
+        `Schema-v7 guild ${guild.guild_id} has no valid settings row`,
+      );
+    }
+    const legacy = parseLegacyGuildSettingsV2Json(source.settings_json);
+    const enabled = guild.left_at === null;
+    const migrated: GuildSettings = {
+      version: GUILD_SETTINGS_VERSION,
+      enabled,
+      timezone: legacy.timezone,
+      channels: { log: legacy.channels.log },
+      invocation: {
+        keyword: legacy.invocation.keyword,
+        aliases: [...legacy.invocation.aliases],
+      },
+      limits: {
+        bulkModerationTargetCap: legacy.limits.bulkModerationTargetCap,
+      },
+      greetings:
+        legacy.greetings.length > 0
+          ? legacy.greetings.map((profile) => ({ ...profile }))
+          : [{ name: "Welcome", message: "Welcome, {user}!" }],
+    };
+    return {
+      guildId: guild.guild_id,
+      enabled,
+      json: serializeGuildSettings(migrated),
+      updatedAt: source.updated_at,
+    };
+  });
+}
+
+function verifyV8SettingsRows(
+  db: Database.Database,
+  expected: readonly V8SettingsMigrationRow[],
+): void {
+  const actual = db
+    .prepare(
+      `SELECT guild_id, settings_version, settings_json, updated_at
+       FROM guild_settings ORDER BY guild_id`,
+    )
+    .all() as LegacySettingsRow[];
+  const expectedRows = expected.map((row) => ({
+    guild_id: row.guildId,
+    settings_version: GUILD_SETTINGS_VERSION,
+    settings_json: row.json,
+    updated_at: row.updatedAt,
+  }));
+  if (!isDeepStrictEqual(actual, expectedRows)) {
+    throw new Error("Schema-v8 settings do not match the prepared migration");
+  }
+  const guildStates = db
+    .prepare("SELECT guild_id, enabled FROM guilds ORDER BY guild_id")
+    .all() as Array<{ guild_id: string; enabled: number }>;
+  const expectedStates = expected.map((row) => ({
+    guild_id: row.guildId,
+    enabled: row.enabled ? 1 : 0,
+  }));
+  if (!isDeepStrictEqual(guildStates, expectedStates)) {
+    throw new Error("Schema-v8 guild lifecycle state is inconsistent");
+  }
+}
+
+function readV7OperationalSnapshot(
+  db: Database.Database,
+): V7OperationalSnapshot {
+  const snapshot: V7OperationalSnapshot = new Map();
+  for (const table of V7_TABLE_NAMES) {
+    if (
+      table === "schema_migrations" ||
+      table === "guilds" ||
+      table === "guild_settings"
+    ) {
+      continue;
+    }
+    snapshot.set(
+      table,
+      db
+        .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY rowid`)
+        .all(),
+    );
+  }
+  return snapshot;
+}
+
+function verifyV7OperationalSnapshot(
+  db: Database.Database,
+  expected: V7OperationalSnapshot,
+): void {
+  for (const [table, rows] of expected) {
+    const actual = db
+      .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY rowid`)
+      .all();
+    if (!isDeepStrictEqual(actual, rows)) {
+      throw new Error(
+        `Schema-v7 ${table} records changed during schema-v8 migration`,
+      );
+    }
   }
 }
 
@@ -871,7 +1091,6 @@ function prepareMigration(
     settingsRows.map((row) => [row.guild_id, row]),
   );
   const settings: PreparedSettingsRow[] = [];
-  let settingsRequiringReview = 0;
   let warnings = 0;
 
   for (const guild of guilds) {
@@ -900,15 +1119,12 @@ function prepareMigration(
       guildEnabled: Boolean(guild.enabled),
       guildActive: guild.left_at === null,
     });
-    if (converted.settings.reviewRequired) {
-      settingsRequiringReview += 1;
-    }
     warnings += converted.warnings.length;
     guild.enabled = converted.settings.enabled ? 1 : 0;
     settings.push({
       guildId: guild.guild_id,
       settings: converted.settings,
-      json: serializeGuildSettings(converted.settings),
+      json: serializeLegacyGuildSettingsV2(converted.settings),
       updatedAt: now,
     });
   }
@@ -962,9 +1178,9 @@ function prepareMigration(
     ),
     result: {
       fromSchema: "legacy-v2",
-      toSchema: "current-v7",
+      toSchema: "current-v8",
       guilds: guilds.length,
-      settingsRequiringReview,
+      settingsRequiringReview: 0,
       metricsPreserved: preparedMetrics.size,
       metricsDropped: dropped,
       warnings,
@@ -1196,7 +1412,8 @@ function readSchemaVersion(
     schema !== "legacy-v4" &&
     schema !== "legacy-v5" &&
     schema !== "legacy-v6" &&
-    schema !== "current-v7"
+    schema !== "legacy-v7" &&
+    schema !== "current-v8"
   ) {
     return null;
   }
@@ -1212,6 +1429,10 @@ function legacyTableName(table: string): string {
 
 function v4LegacyTableName(table: string): string {
   return `${table}_v4_legacy`;
+}
+
+function v7SettingsLegacyTableName(): string {
+  return "guild_settings_v7_legacy";
 }
 
 function allocateOpaqueId(allocated: Set<string>): string {

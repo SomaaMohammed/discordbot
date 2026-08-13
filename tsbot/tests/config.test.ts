@@ -8,6 +8,7 @@ import {
   resolveDatabaseFile,
   resolveEnvironmentFile,
 } from "../src/config.js";
+import { PACKAGE_VERSION } from "../src/constants.js";
 
 const ENV_KEYS = [
   "BOT_VERSION",
@@ -17,6 +18,7 @@ const ENV_KEYS = [
   "DISCORD_TOKEN",
   "ENV_FILE",
   "SUPERIOR_APPLICATION_ROOT",
+  "npm_package_version",
 ] as const;
 
 let environmentSnapshot: Record<string, string | undefined>;
@@ -98,6 +100,18 @@ describe("configuration", () => {
     });
     expect(config).not.toHaveProperty("schedulerConcurrency");
     expect(config).not.toHaveProperty("botOperatorUserIds");
+  });
+
+  it("does not allow environment variables to falsify build identity", () => {
+    const root = makeRoot();
+    fs.writeFileSync(
+      path.join(root, ".env"),
+      "DISCORD_TOKEN=synthetic-token\nBOT_VERSION=99.0.0\n",
+    );
+    process.env.npm_package_version = "98.0.0";
+
+    const config = loadProcessConfig(root);
+    expect(config.botVersion).toBe(PACKAGE_VERSION);
   });
 });
 

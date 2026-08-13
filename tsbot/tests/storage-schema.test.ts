@@ -11,10 +11,11 @@ import {
   initializeV4Schema,
   initializeV5Schema,
   initializeV6Schema,
+  initializeV7Schema,
   validateV2Schema,
-  validateV7Schema,
-  V7_EXPLICIT_INDEX_NAMES,
-  V7_TABLE_NAMES,
+  validateV8Schema,
+  V8_EXPLICIT_INDEX_NAMES,
+  V8_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import { createV2FixtureDatabase } from "./helpers/v2-fixture.js";
 
@@ -26,13 +27,13 @@ afterEach(() => {
   }
 });
 
-describe("schema v7", () => {
+describe("schema v8", () => {
   it("creates only the exact active tables and required index", () => {
     const dbFile = freshDatabase();
-    const validation = validateDatabaseFile(dbFile, { expect: 7 });
+    const validation = validateDatabaseFile(dbFile, { expect: 8 });
     expect(validation).toEqual({
-      schema: "current-v7",
-      schemaVersion: 7,
+      schema: "current-v8",
+      schemaVersion: 8,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -47,19 +48,19 @@ describe("schema v7", () => {
         .all() as Array<{ type: string; name: string }>;
       expect(
         objects.filter((row) => row.type === "table").map(rowName),
-      ).toEqual([...V7_TABLE_NAMES].sort());
+      ).toEqual([...V8_TABLE_NAMES].sort());
       expect(
         objects.filter((row) => row.type === "index").map(rowName),
-      ).toEqual([...V7_EXPLICIT_INDEX_NAMES].sort());
+      ).toEqual([...V8_EXPLICIT_INDEX_NAMES].sort());
       expect(objects.some((row) => row.type === "view")).toBe(false);
       expect(objects.some((row) => row.type === "trigger")).toBe(false);
-      expect(validateV7Schema(db)).toEqual([]);
+      expect(validateV8Schema(db)).toEqual([]);
     } finally {
       db.close();
     }
   });
 
-  it("rejects user-principal capability grants in a fresh v7 schema", () => {
+  it("rejects user-principal capability grants in a fresh v8 schema", () => {
     const dbFile = freshDatabase();
     const storage = new BotStorage({ dbFile });
     storage.initStorage();
@@ -122,7 +123,7 @@ describe("schema v7", () => {
         "UPDATE guild_settings SET settings_json = '{malformed' WHERE guild_id = ?",
       ).run("111111111111111111");
       expect(detectDatabaseSchema(db)).toBe("unknown");
-      expect(validateV7Schema(db).join(" ")).toMatch(/settings are invalid/);
+      expect(validateV8Schema(db).join(" ")).toMatch(/settings are invalid/);
     } finally {
       db.close();
     }
@@ -152,7 +153,7 @@ describe("schema v7", () => {
       );
       db.pragma("ignore_check_constraints = OFF");
 
-      expect(validateV7Schema(db).join(" ")).toMatch(
+      expect(validateV8Schema(db).join(" ")).toMatch(
         /invalid timestamps|invalid delivery state/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -190,7 +191,7 @@ describe("schema v7", () => {
         "2026-01-01T00:00:00.000Z",
       );
 
-      expect(validateV7Schema(db).join(" ")).toMatch(
+      expect(validateV8Schema(db).join(" ")).toMatch(
         /exceeds the per-guild record limit/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -218,7 +219,7 @@ describe("schema v7", () => {
       db.exec("DROP TABLE ticket_events");
       db.exec(table.sql.replace("'creation_reserved'", "'CREATION_RESERVED'"));
       db.exec(index.sql);
-      expect(validateV7Schema(db).join(" ")).toMatch(
+      expect(validateV8Schema(db).join(" ")).toMatch(
         /ticket_events SQL does not match/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -251,7 +252,7 @@ describe("schema v7", () => {
         "2026-01-01T00:00:00.000Z",
       );
       db.pragma("ignore_check_constraints = OFF");
-      expect(validateV7Schema(db).join(" ")).toMatch(
+      expect(validateV8Schema(db).join(" ")).toMatch(
         /invalid or oversized JSON/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -292,7 +293,7 @@ describe("schema v7", () => {
         );
         db.pragma("ignore_check_constraints = OFF");
 
-        expect(validateV7Schema(db).join(" ")).toMatch(/non-text data/);
+        expect(validateV8Schema(db).join(" ")).toMatch(/non-text data/);
         expect(detectDatabaseSchema(db)).toBe("unknown");
       } finally {
         db.close();
@@ -324,7 +325,7 @@ describe("schema v7", () => {
         "2026-01-01T00:00:00.000Z",
       );
 
-      expect(validateV7Schema(db).join(" ")).toMatch(
+      expect(validateV8Schema(db).join(" ")).toMatch(
         /enabled application form does not have 1-5 fields/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -552,6 +553,26 @@ describe("schema v7", () => {
     expect(fs.readFileSync(dbFile)).toEqual(before);
     expect(validateDatabaseFile(dbFile, { expect: 6 }).schema).toBe(
       "legacy-v6",
+    );
+  });
+
+  it("refuses schema v7 until the explicit v8 migration runs", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "v7.db");
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV7Schema(db, "2026-01-01T00:00:00.000Z");
+    db.close();
+    const before = fs.readFileSync(dbFile);
+
+    const storage = new BotStorage({ dbFile });
+    expect(() => storage.initStorage()).toThrow(
+      /schema v7 requires an explicit migration to v8/i,
+    );
+    storage.close();
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 7 }).schema).toBe(
+      "legacy-v7",
     );
   });
 

@@ -25,7 +25,7 @@ describe("command guide", () => {
       expect(guide).toContain(`\`${command}\``);
     }
     expect(guide).toContain("delegated");
-    expect(guide).toContain("format-5");
+    expect(guide).toContain("format-6");
     expect(guide.length).toBeLessThanOrEqual(2_000);
   });
 
@@ -37,6 +37,18 @@ describe("command guide", () => {
 
     expect(serialized).not.toMatch(/mudae/i);
     expect(buildSuperiorCommandGuide()).not.toMatch(/mudae/i);
+  });
+
+  it("publishes immediate configuration without onboarding commands", () => {
+    const definitions = buildCommandDefinitions().map((definition) =>
+      definition.toJSON(),
+    );
+    const names = definitions.map(({ name }) => name);
+    expect(names).toContain("config");
+    expect(names).toContain("data");
+    expect(names).not.toContain("setup");
+    const serialized = JSON.stringify(definitions);
+    expect(serialized).not.toMatch(/"name":"(?:validate|enable-all)"/);
   });
 });
 

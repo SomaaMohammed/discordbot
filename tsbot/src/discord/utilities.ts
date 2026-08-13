@@ -1,6 +1,7 @@
 import {
   ChannelType,
   EmbedBuilder,
+  MessageFlags,
   SlashCommandBuilder,
   escapeMarkdown,
   type ChatInputCommandInteraction,
@@ -113,7 +114,9 @@ export async function handleUtilityCommand(
   if (!(await validateUtilityContext(interaction, runtime))) {
     return;
   }
-  await interaction.deferReply({ ephemeral: true });
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  }
 
   switch (interaction.options.getSubcommand()) {
     case "ping":
@@ -509,14 +512,14 @@ async function replyPrivately(
   if (interaction.replied) {
     await interaction.followUp({
       ...options,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     ...options,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }

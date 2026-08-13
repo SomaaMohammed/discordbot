@@ -47,7 +47,7 @@ describe("operations safeguards", () => {
       "git merge --ff-only --no-overwrite-ignore FETCH_HEAD",
     );
     expect(source).not.toContain("git pull");
-    expect(source).toContain('validate_database "$candidate" 7');
+    expect(source).toContain('validate_database "$candidate" 8');
     expect(source).toContain("Database restored atomically");
     expect(source).toContain('rollback_dir="$db_dir/.superior-rollback.$$.d"');
     expect(source).toContain('"$rollback_dir/original.db"');
@@ -56,11 +56,12 @@ describe("operations safeguards", () => {
     expect(source).toContain('"$source" -ef "$DB_FILE"');
     expect(source).toContain("backup-cli.js");
     expect(source).toContain("automatic recovery was incomplete");
-    expect(source).toContain("migrate-v7) migrate_database_to_v7 6");
-    expect(source).toContain("migrate-v6) migrate_database_to_v7 5");
-    expect(source).toContain("migrate-v4) migrate_database_to_v7 4");
-    expect(source).toContain("migrate-v3) migrate_database_to_v7 3");
-    expect(source).toContain("migrate-v2) migrate_database_to_v7 2");
+    expect(source).toContain("migrate-v8) migrate_database_to_v8 7");
+    expect(source).toContain("migrate-v7) migrate_database_to_v8 6");
+    expect(source).toContain("migrate-v6) migrate_database_to_v8 5");
+    expect(source).toContain("migrate-v4) migrate_database_to_v8 4");
+    expect(source).toContain("migrate-v3) migrate_database_to_v8 3");
+    expect(source).toContain("migrate-v2) migrate_database_to_v8 2");
     expect(source).toContain("migrate-cli.js");
     expect(source).toContain(
       "validated schema-v${source_schema} backup was retained and the service remains stopped",
@@ -303,7 +304,7 @@ describe("operations safeguards", () => {
           stop_service() { :; }
           start_service() { : > "$test_root/restarted"; }
           node() { return 1; }
-          if migrate_database_to_v7 2; then
+          if migrate_database_to_v8 2; then
             exit 91
           fi
           [[ ! -e "$test_root/restarted" ]]

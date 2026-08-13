@@ -3,7 +3,7 @@ import {
   getDiscordClientWorkLifecycle,
   type DiscordClientWorkLifecycle,
 } from "./discord/bot.js";
-import { logError, logInfo, logWarn } from "./logging.js";
+import { logClassifiedError, logError, logInfo, logWarn } from "./logging.js";
 import type { BotRuntime } from "./runtime.js";
 
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 15_000;
@@ -33,6 +33,12 @@ export interface ShutdownSignalSource {
 
 export interface DiscordLoginClient {
   login: (token: string) => Promise<string>;
+}
+
+export interface ProcessFailureSource {
+  exitCode?: string | number | null;
+  on: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  off: (event: string, listener: (...args: unknown[]) => void) => unknown;
 }
 
 const noWorkLifecycle: DiscordClientWorkLifecycle = {
@@ -161,6 +167,69 @@ export function installShutdownSignalHandlers(
     for (const [signal, listener] of listeners) {
       signalSource.off(signal, listener);
     }
+  };
+}
+
+export function installProcessFailureHandlers(
+  coordinator: ShutdownCoordinator,
+  source: ProcessFailureSource = process as unknown as ProcessFailureSource,
+): () => void {
+  let fatalShutdown: Promise<ShutdownResult> | null = null;
+
+  const requestFatalShutdown = (kind: string, error: unknown): void => {
+    logClassifiedError("process", error, {
+      fatal: true,
+      event: kind,
+      outcome: "controlled-shutdown-requested",
+    });
+    source.exitCode = 1;
+    fatalShutdown ??= coordinator.shutdown(`fatal-${kind}`);
+    void fatalShutdown.catch((shutdownError: unknown) => {
+      logClassifiedError("shutdown", shutdownError, {
+        fatal: true,
+        event: kind,
+        stage: "fatal-shutdown",
+      });
+      source.exitCode = 1;
+    });
+  };
+
+  const unhandledRejection = (reason: unknown): void => {
+    requestFatalShutdown("unhandled-rejection", reason);
+  };
+  const uncaughtException = (error: unknown, origin: unknown): void => {
+    requestFatalShutdown(
+      typeof origin === "string"
+        ? `uncaught-exception-${origin}`
+        : "uncaught-exception",
+      error,
+    );
+  };
+  const warning = (value: unknown): void => {
+    const nodeWarning =
+      value instanceof Error ? value : new Error(String(value));
+    logWarn("process", "Node.js emitted a runtime warning", {
+      warningName: nodeWarning.name,
+      warningCode:
+        "code" in nodeWarning
+          ? String(
+              (nodeWarning as Error & { code?: unknown }).code ?? "unknown",
+            )
+          : "unknown",
+      stack: nodeWarning.stack,
+      action:
+        "Remove deprecated calls or inspect adjacent runtime diagnostics; warnings do not expose configuration values.",
+    });
+  };
+
+  source.on("unhandledRejection", unhandledRejection);
+  source.on("uncaughtException", uncaughtException);
+  source.on("warning", warning);
+
+  return (): void => {
+    source.off("unhandledRejection", unhandledRejection);
+    source.off("uncaughtException", uncaughtException);
+    source.off("warning", warning);
   };
 }
 

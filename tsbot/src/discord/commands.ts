@@ -1,4 +1,5 @@
 import {
+  MessageFlags,
   SlashCommandBuilder,
   type AutocompleteInteraction,
   type ButtonInteraction,
@@ -10,6 +11,7 @@ import {
   type SlashCommandSubcommandBuilder,
   type SlashCommandSubcommandsOnlyBuilder,
 } from "discord.js";
+import { logInfo } from "../logging.js";
 import type { BotRuntime, GuildRuntime } from "../runtime.js";
 import type { UserMetrics } from "../types.js";
 import {
@@ -34,9 +36,11 @@ import {
 import { buildPanelCommandDefinition } from "./panel-command.js";
 import { handlePresetPanelCommand } from "./preset-panels.js";
 import {
-  buildSetupCommandDefinition,
-  handleSetupCommand,
-  requireSetupAdmin,
+  buildConfigCommandDefinition,
+  buildDataCommandDefinition,
+  handleConfigCommand,
+  handleDataCommand,
+  requireConfigurationAdmin,
 } from "./setup.js";
 import {
   buildUtilityCommandDefinition,
@@ -62,6 +66,7 @@ import {
 } from "./application-interactions.js";
 import { authorizeCapability } from "./authorization.js";
 import type { GuildCapability } from "./capabilities.js";
+import { getInteractionLifecycle } from "./interaction-lifecycle.js";
 import { evaluateGuildManagement } from "./ticket-authorization.js";
 import { buildTicketCommandDefinition } from "./ticket-command.js";
 import {
@@ -217,7 +222,8 @@ export function buildCommandDefinitions(): Array<
     );
 
   return [
-    buildSetupCommandDefinition(),
+    buildConfigCommandDefinition(),
+    buildDataCommandDefinition(),
     superior,
     buildPanelCommandDefinition(),
     buildTicketCommandDefinition(),
@@ -546,9 +552,9 @@ export async function handleChatInputCommand(
     return;
   }
   let guildRuntime = await runtime.forGuild(interaction.guildId);
-  if (command === "setup") {
+  if (command === "config" || command === "data") {
     await deferPrivate(interaction);
-    const actor = await requireSetupAdmin(interaction);
+    const actor = await requireConfigurationAdmin(interaction);
     if (!actor) return;
     if (!guildRuntime) {
       runtime.storage.ensureGuild(interaction.guildId, interaction.guild.name);
@@ -557,21 +563,27 @@ export async function handleChatInputCommand(
     if (!guildRuntime) {
       await replyPrivate(
         interaction,
-        "Could not initialize setup for this server.",
+        "Could not initialize Superior for this server.",
       );
       return;
     }
-    await handleSetupCommand(interaction, runtime, guildRuntime, actor);
+    if (command === "config") {
+      await handleConfigCommand(interaction, runtime, guildRuntime, actor);
+    } else {
+      await handleDataCommand(interaction, runtime, guildRuntime, actor);
+    }
     return;
   }
-  if (!guildRuntime?.settings.enabled || guildRuntime.settings.reviewRequired) {
+  if (!guildRuntime?.settings.enabled) {
+    logInteractionRejection(interaction, "guild-state", "explicitly-disabled");
     await replyPrivate(
       interaction,
-      "Superior is disabled or awaiting administrator review. Begin with `/setup status`.",
+      "Superior is disabled by the server's emergency bot-state switch. An owner or Administrator can restore it with `/config bot-state enabled:true`.",
     );
     return;
   }
   if (!guildRuntime.isCurrent()) {
+    logInteractionRejection(interaction, "guild-state", "stale-runtime");
     await replyPrivate(
       interaction,
       "This server was disabled or reconfigured. Please try again.",
@@ -607,10 +619,6 @@ export async function handleChatInputCommand(
     return;
   }
   if (command === "greetings") {
-    if (!guildRuntime.settings.features.greetings) {
-      await replyPrivate(interaction, "Greetings are disabled in this server.");
-      return;
-    }
     await handleGreetingCommand(interaction, guildRuntime);
     return;
   }
@@ -661,13 +669,6 @@ export async function handleChatInputCommand(
     return;
   }
   if (ACTIVITY_SUBCOMMANDS.has(subcommand)) {
-    if (!guildRuntime.settings.features.activityMetrics) {
-      await replyPrivate(
-        interaction,
-        "Activity metrics are disabled in this server.",
-      );
-      return;
-    }
     await handleActivityCommand(interaction, guildRuntime);
     return;
   }
@@ -688,6 +689,11 @@ async function requireCapability(
     grants: runtime.storage,
   });
   if (!decision.allowed) {
+    logInteractionRejection(
+      interaction,
+      `capability:${capability}`,
+      decision.reason,
+    );
     await replyPrivate(
       interaction,
       decision.reason === "member-unavailable" ||
@@ -764,6 +770,7 @@ async function getCurrentComponentRuntime(
     !interaction.guildId ||
     interaction.guild.id !== interaction.guildId
   ) {
+    logInteractionRejection(interaction, "component-context", "guild-mismatch");
     await replyPrivate(
       interaction,
       "Use this interaction inside its original server.",
@@ -771,14 +778,15 @@ async function getCurrentComponentRuntime(
     return null;
   }
   const guildRuntime = await runtime.forGuild(interaction.guildId);
-  if (
-    !guildRuntime?.settings.enabled ||
-    guildRuntime.settings.reviewRequired ||
-    !guildRuntime.isCurrent()
-  ) {
+  if (!guildRuntime?.settings.enabled || !guildRuntime.isCurrent()) {
+    logInteractionRejection(
+      interaction,
+      "component-context",
+      "inactive-or-disabled",
+    );
     await replyPrivate(
       interaction,
-      "This server is disabled or awaiting configuration review.",
+      "This server is currently inactive or disabled.",
     );
     return null;
   }
@@ -795,6 +803,7 @@ async function requireAdministrator(
     .fetch(interaction.user.id)
     .catch(() => null);
   if (!actor || actor.guild.id !== runtime.guildId) {
+    logInteractionRejection(interaction, "administrator", "member-unavailable");
     await replyPrivate(interaction, "Could not verify your server membership.");
     return null;
   }
@@ -805,6 +814,7 @@ async function requireAdministrator(
       member: actor,
     }).allowed
   ) {
+    logInteractionRejection(interaction, "administrator", "permission-denied");
     await replyPrivate(
       interaction,
       "Only the server owner or an Administrator can use that command.",
@@ -812,6 +822,27 @@ async function requireAdministrator(
     return null;
   }
   return actor;
+}
+
+function logInteractionRejection(
+  interaction:
+    | ButtonInteraction
+    | ChatInputCommandInteraction
+    | ModalSubmitInteraction
+    | StringSelectMenuInteraction,
+  boundary: string,
+  reason: string,
+): void {
+  const lifecycle = getInteractionLifecycle(interaction);
+  if (!lifecycle) return;
+  logInfo("authorization", "Interaction was rejected by a current boundary", {
+    correlationId: lifecycle.correlationId,
+    operation: lifecycle.operation,
+    guildId: interaction.guildId ?? "dm",
+    boundary,
+    reason,
+    outcome: "rejected",
+  });
 }
 
 async function handleHelp(
@@ -825,13 +856,14 @@ export function buildSuperiorCommandGuide(): string {
     "**Superior command guide**",
     "`/pingrole role:@Role` - safely notify a configured role in its allowed channel",
     "`/restrictedping` - owner/Administrator restricted-role mapping and cooldown configuration",
-    "`/setup` — Administrator configuration, validation, format-5 export/import, and purge",
+    "`/config` — optional Administrator settings and explicit emergency bot-state control",
+    "`/data` — owner-controlled format-6 export, import, and purge",
     "`/access` — owner/Administrator grants and status for delegated role capabilities",
     "`/panel` — fixed help, server, resource, ticket, suggestion, and application panels",
     "`/ticket` — delegated department, form, routing, launcher, health, and recovery tools",
-    "`/suggestion` — member submissions, status, and withdrawal plus delegated setup, review, panels, and recovery",
+    "`/suggestion` — member submissions, status, withdrawal, configuration, review, panels, and recovery",
     "`/application` — private submissions, status, and withdrawal plus delegated forms, review, panels, and recovery",
-    "`/superior` — announcements, legacy safe panels, moderation, backfill, and this help",
+    "`/superior` — announcements, safe panels, moderation, backfill, and this help",
     "`/utility` — private member/server/role/channel/ID/time information",
     "`/fun` — battles and aggregate activity statistics",
     "`/greetings send` — greet the person invoking the command",
@@ -854,14 +886,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }
@@ -870,6 +902,6 @@ async function deferPrivate(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
 }

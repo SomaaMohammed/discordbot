@@ -45,6 +45,7 @@ export interface PrivateMudaeWatchSafeLogMetadata {
 }
 
 export interface PrivateMudaeWatchLogger {
+  info?: (message: string, metadata: PrivateMudaeWatchSafeLogMetadata) => void;
   warn: (message: string, metadata: PrivateMudaeWatchSafeLogMetadata) => void;
   error: (message: string, metadata: PrivateMudaeWatchSafeLogMetadata) => void;
 }
@@ -224,16 +225,27 @@ export class PrivateMudaeWatcher {
 
     if (delivery.status === "native-forwarded") {
       this.completeReservation(message.guildId!, reservationId, "delivered");
+      this.logger.info?.("Private watcher notification delivered", {
+        outcome: "native-forwarded",
+        stage: "native-forward",
+      });
       return "native-forwarded";
     }
     if (delivery.status === "fallback-sent") {
       this.completeReservation(message.guildId!, reservationId, "delivered");
-      this.logFailure(
-        "warn",
-        "Private Mudae watcher used safe fallback delivery",
-        "fallback-sent",
-        "native-forward",
-        delivery.nativeFailure,
+      this.logger.warn(
+        "Native Discord forwarding failed, but Superior sent the safe fallback successfully.",
+        {
+          outcome: "fallback-sent",
+          stage: "native-forward",
+          failureName: delivery.nativeFailure.name,
+          ...(delivery.nativeFailure.code === null
+            ? {}
+            : {
+                code: delivery.nativeFailure.code,
+                failureCode: delivery.nativeFailure.code,
+              }),
+        },
       );
       return "fallback-sent";
     }

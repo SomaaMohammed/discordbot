@@ -16,10 +16,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.12.0"
           cache: "npm"
@@ -38,9 +38,25 @@ jobs:
           fi
           shellcheck ops.sh
 
+      - name: Validate PowerShell syntax
+        working-directory: tsbot
+        run: npm run powershell:check
+
+      - name: Check local documentation links
+        working-directory: tsbot
+        run: npm run docs:links
+
       - name: Check formatting
         working-directory: tsbot
         run: npm run format:check
+
+      - name: Verify authoritative version identity
+        working-directory: tsbot
+        run: npm run version:verify
+
+      - name: Security checks
+        working-directory: tsbot
+        run: npm run security:check
 
       - name: Typecheck
         working-directory: tsbot
@@ -70,10 +86,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.12.0"
           cache: "npm"
@@ -82,6 +98,10 @@ jobs:
       - name: Install build dependencies
         working-directory: tsbot
         run: npm ci
+
+      - name: Reject a stale committed executable before rebuilding
+        working-directory: tsbot
+        run: npm run artifact:verify
 
       - name: Build portable Windows x64 ZIP twice reproducibly
         working-directory: tsbot
@@ -102,7 +122,7 @@ jobs:
         run: git diff --exit-code -- SuperiorBot.exe
 
       - name: Upload portable artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: SuperiorBot-win-x64
           path: |

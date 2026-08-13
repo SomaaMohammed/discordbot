@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BotStorage } from "../src/storage/db.js";
+import { createDefaultLegacyGuildSettingsV2 } from "../src/storage/guild-settings-v2.js";
 import { MAX_RESTRICTED_PING_SUCCESS_EVENTS_PER_GUILD } from "../src/storage/restricted-ping-repository.js";
 import type { GuildDataExport } from "../src/types.js";
 
@@ -25,7 +26,7 @@ afterEach(() => {
   }
 });
 
-describe("restricted ping guild data format 5", () => {
+describe("restricted ping guild data format 6", () => {
   it("round-trips history fail-closed without exporting a live reservation", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD);
@@ -55,7 +56,7 @@ describe("restricted ping guild data format 5", () => {
 
     const payload = storage.exportGuildData(GUILD);
     expect(payload).toMatchObject({
-      formatVersion: 5,
+      formatVersion: 6,
       restrictedPingRoles: [
         {
           guildId: GUILD,
@@ -132,6 +133,29 @@ describe("restricted ping guild data format 5", () => {
     expect(storage.getGuild(GUILD)).toBeNull();
   });
 
+  it("imports the frozen format-5 generation with bindings dormant", () => {
+    const storage = makeStorage();
+    storage.ensureGuild(GUILD);
+    seedMapping(storage.forGuild(GUILD));
+    const current = storage.exportGuildData(GUILD);
+    const legacyV5 = {
+      ...current,
+      formatVersion: 5,
+      settings: createDefaultLegacyGuildSettingsV2(),
+    };
+
+    storage.importGuildData(GUILD, legacyV5, storage.getGuildSettings(GUILD)!);
+
+    expect(storage.getGuildSettings(GUILD)).toMatchObject({
+      version: 3,
+      enabled: true,
+    });
+    expect(storage.forGuild(GUILD).getRestrictedPingRole(ROLE)).toMatchObject({
+      enabled: false,
+      bindingsVerifiedAt: null,
+    });
+  });
+
   it.each([3, 4] as const)(
     "clears restricted ping data when importing legacy format %s",
     (formatVersion) => {
@@ -147,7 +171,7 @@ describe("restricted ping guild data format 5", () => {
               guildId: current.guildId,
               exportedAt: current.exportedAt,
               metadata: current.metadata,
-              settings: current.settings,
+              settings: createDefaultLegacyGuildSettingsV2(),
               metrics: current.metrics,
               ticketConfiguration: null,
               postedPanels: [],
@@ -186,7 +210,7 @@ describe("restricted ping guild data format 5", () => {
         guildId: current.guildId,
         exportedAt: current.exportedAt,
         metadata: current.metadata,
-        settings: current.settings,
+        settings: createDefaultLegacyGuildSettingsV2(),
         metrics: current.metrics,
       },
       storage.getGuildSettings(GUILD)!,
@@ -385,7 +409,11 @@ function toLegacyV4(payload: GuildDataExport): Record<string, unknown> {
     formatVersion: _formatVersion,
     ...legacy
   } = payload;
-  return { ...legacy, formatVersion: 4 };
+  return {
+    ...legacy,
+    formatVersion: 4,
+    settings: createDefaultLegacyGuildSettingsV2(),
+  };
 }
 
 function expectInvalid(

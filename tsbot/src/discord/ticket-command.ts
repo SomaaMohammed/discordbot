@@ -11,38 +11,6 @@ export function buildTicketCommandDefinition(): SlashCommandSubcommandsOnlyBuild
     .setDMPermission(false)
     .addSubcommand((subcommand) =>
       subcommand
-        .setName("setup")
-        .setDescription("Configure the ticket category, log, and support role")
-        .addChannelOption((option) =>
-          option
-            .setName("category")
-            .setDescription(
-              "Category where private ticket channels are created",
-            )
-            .setRequired(true)
-            .addChannelTypes(ChannelType.GuildCategory),
-        )
-        .addChannelOption((option) =>
-          option
-            .setName("log_channel")
-            .setDescription(
-              "Channel that receives closure records and transcripts",
-            )
-            .setRequired(true)
-            .addChannelTypes(
-              ChannelType.GuildText,
-              ChannelType.GuildAnnouncement,
-            ),
-        )
-        .addRoleOption((option) =>
-          option
-            .setName("support_role")
-            .setDescription("Role authorized to view and manage tickets")
-            .setRequired(true),
-        ),
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
         .setName("status")
         .setDescription(
           "Inspect ticket configuration and required permissions",

@@ -1,13 +1,22 @@
-import { ApplicationCommandOptionType, PermissionFlagsBits } from "discord.js";
+import {
+  ApplicationCommandOptionType,
+  MessageFlags,
+  PermissionFlagsBits,
+  type ChatInputCommandInteraction,
+  type GuildMember,
+} from "discord.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDefaultGuildSettings } from "../src/guild-settings.js";
+import { handleChatInputCommand } from "../src/discord/commands.js";
 import type { BotRuntime, GuildRuntime } from "../src/runtime.js";
 import type { GuildSettings } from "../src/types.js";
 import {
-  buildSetupCommandDefinition,
-  handleSetupCommand,
-  requireSetupAdmin,
-  validateGuildSetup,
+  buildConfigCommandDefinition,
+  buildDataCommandDefinition,
+  handleConfigCommand,
+  handleDataCommand,
+  requireConfigurationAdmin,
+  validateGuildConfiguration,
 } from "../src/discord/setup.js";
 
 const GUILD_ID = "123456789012345678";
@@ -28,36 +37,57 @@ interface JsonOption {
 }
 
 function findSubcommand(name: string): JsonOption | undefined {
-  const json = buildSetupCommandDefinition().toJSON();
+  const json = buildConfigCommandDefinition().toJSON();
   return (json.options as JsonOption[] | undefined)?.find(
     (option) => option.name === name,
   );
 }
 
-describe("setup command definition", () => {
-  it("registers only the active setup surface including safe import", () => {
-    const json = buildSetupCommandDefinition().toJSON();
+async function handleManagementCommand(
+  interaction: ChatInputCommandInteraction,
+  runtime: BotRuntime,
+  guildRuntime: GuildRuntime,
+  actor: GuildMember,
+): Promise<void> {
+  const subcommand = interaction.options.getSubcommand();
+  if (["export", "import", "purge"].includes(subcommand)) {
+    await handleDataCommand(interaction, runtime, guildRuntime, actor);
+    return;
+  }
+  await handleConfigCommand(interaction, runtime, guildRuntime, actor);
+}
+
+const handleSetupCommand = handleManagementCommand;
+
+describe("configuration and data command definitions", () => {
+  it("registers optional configuration without onboarding gates", () => {
+    const json = buildConfigCommandDefinition().toJSON();
     expect(json.dm_permission).toBe(false);
     expect(json.options?.map(({ name }) => name)).toEqual([
       "status",
-      "enable",
-      "enable-all",
-      "disable",
-      "channel",
-      "feature",
+      "bot-state",
+      "log",
       "timezone",
       "limits",
       "trigger",
       "greeting",
-      "validate",
+    ]);
+    expect(JSON.stringify(json)).not.toMatch(/setup|validate|enable-all/);
+  });
+
+  it("registers owner data management separately", () => {
+    const json = buildDataCommandDefinition().toJSON();
+    expect(json.options?.map(({ name }) => name)).toEqual([
       "export",
       "import",
       "purge",
     ]);
-    expect(findSubcommand("import")).toMatchObject({
+    const imported = (json.options as JsonOption[] | undefined)?.find(
+      ({ name }) => name === "import",
+    );
+    expect(imported).toMatchObject({
       description: expect.stringContaining("Owner-only replacement"),
     });
-    expect(findSubcommand("import")?.description).toContain("v4");
   });
 
   it("makes greetings universal by exposing no target-user option", () => {
@@ -90,7 +120,63 @@ describe("setup command definition", () => {
   });
 });
 
-describe("setup authorization", () => {
+describe("configuration authorization", () => {
+  it("routes an Administrator command on a fresh active guild without a setup gate", async () => {
+    const settings = createDefaultGuildSettings();
+    const actor = {
+      id: USER_ID,
+      guild: null as unknown,
+      permissions: {
+        has: vi.fn(
+          (permission: bigint) =>
+            permission === PermissionFlagsBits.Administrator,
+        ),
+      },
+      roles: { cache: new Map() },
+    };
+    const guild = {
+      id: GUILD_ID,
+      name: "Fresh active guild",
+      ownerId: "999999999999999999",
+      members: { fetch: vi.fn(async () => actor) },
+    };
+    actor.guild = guild;
+    const guildRuntime = {
+      guildId: GUILD_ID,
+      settings,
+      isCurrent: vi.fn(() => true),
+    } as unknown as GuildRuntime;
+    const runtime = {
+      forGuild: vi.fn(async () => guildRuntime),
+      storage: { ensureGuild: vi.fn() },
+    } as unknown as BotRuntime;
+    const interaction: Record<string, any> = {
+      commandName: "config",
+      guild,
+      guildId: GUILD_ID,
+      user: { id: USER_ID },
+      options: { getSubcommand: vi.fn(() => "status") },
+      deferred: false,
+      replied: false,
+      deferReply: vi.fn(async () => {
+        interaction.deferred = true;
+      }),
+      editReply: vi.fn(async () => undefined),
+      reply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+
+    await handleChatInputCommand(interaction as never, runtime);
+
+    expect(runtime.forGuild).toHaveBeenCalledWith(GUILD_ID);
+    expect(runtime.storage.ensureGuild).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("Enabled: **yes**"),
+      }),
+    );
+  });
+
   it("rejects a non-administrator without exposing configuration", async () => {
     const reply = vi.fn(async () => undefined);
     const member = {
@@ -111,168 +197,17 @@ describe("setup authorization", () => {
       reply,
     } as never;
 
-    await expect(requireSetupAdmin(interaction)).resolves.toBeNull();
+    await expect(requireConfigurationAdmin(interaction)).resolves.toBeNull();
     expect(reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
         allowedMentions: { parse: [] },
       }),
     );
   });
 });
 
-describe("active-only setup behavior", () => {
-  it("adds a default greeting and enables every feature and the server", async () => {
-    const settings = createDefaultGuildSettings();
-    let persisted = structuredClone(settings);
-    const saveSettings = vi.fn(async (next: GuildSettings) => {
-      persisted = structuredClone(next);
-      return persisted;
-    });
-    const setEnabled = vi.fn(async (enabled: boolean) => {
-      persisted.enabled = enabled;
-      persisted.reviewRequired = !enabled;
-      return structuredClone(persisted);
-    });
-    const editReply = vi.fn(async (_payload: unknown) => undefined);
-    const guildRuntime = {
-      guildId: GUILD_ID,
-      settings,
-      saveSettings,
-      setEnabled,
-    } as unknown as GuildRuntime;
-    const interaction = {
-      guild: { id: GUILD_ID },
-      guildId: GUILD_ID,
-      options: { getSubcommand: vi.fn(() => "enable-all") },
-      deferred: true,
-      replied: false,
-      editReply,
-    } as never;
-
-    await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime, {
-      id: USER_ID,
-      guild: { id: GUILD_ID },
-    } as never);
-
-    expect(saveSettings).toHaveBeenCalledWith(
-      expect.objectContaining({
-        greetings: [{ name: "Welcome", message: "Welcome, {user}!" }],
-        features: {
-          chat: true,
-          replyModeration: true,
-          greetings: true,
-          activityMetrics: true,
-        },
-      }),
-    );
-    expect(setEnabled).toHaveBeenCalledWith(true);
-    expect(saveSettings.mock.invocationCallOrder[0]).toBeLessThan(
-      setEnabled.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
-    );
-    expect(persisted).toMatchObject({
-      enabled: true,
-      reviewRequired: false,
-      greetings: [{ name: "Welcome", message: "Welcome, {user}!" }],
-      features: {
-        chat: true,
-        replyModeration: true,
-        greetings: true,
-        activityMetrics: true,
-      },
-    });
-    expect(editReply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringContaining("default **Welcome**"),
-      }),
-    );
-  });
-
-  it("preserves existing greetings without adding a default", async () => {
-    const settings = createDefaultGuildSettings();
-    const existingGreetings = [
-      { name: "Custom", message: "Hello there, {user}." },
-      { name: "Brief", message: "Welcome aboard." },
-    ];
-    settings.greetings = structuredClone(existingGreetings);
-    let saved: GuildSettings | null = null;
-    const saveSettings = vi.fn(async (next: GuildSettings) => {
-      saved = structuredClone(next);
-      return next;
-    });
-    const setEnabled = vi.fn(async () => settings);
-    const guildRuntime = {
-      guildId: GUILD_ID,
-      settings,
-      saveSettings,
-      setEnabled,
-    } as unknown as GuildRuntime;
-    const interaction = {
-      guild: { id: GUILD_ID },
-      guildId: GUILD_ID,
-      options: { getSubcommand: vi.fn(() => "enable-all") },
-      deferred: true,
-      replied: false,
-      editReply: vi.fn(async () => undefined),
-    } as never;
-
-    await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime, {
-      id: USER_ID,
-      guild: { id: GUILD_ID },
-    } as never);
-
-    expect(saved).not.toBeNull();
-    expect(saved!.greetings).toEqual(existingGreetings);
-    expect(saved!.greetings).toHaveLength(existingGreetings.length);
-    expect(setEnabled).toHaveBeenCalledWith(true);
-  });
-
-  it("leaves settings unchanged when enable-all preflight validation fails", async () => {
-    const settings = createDefaultGuildSettings();
-    settings.timezone = "Mars/Olympus_Mons";
-    settings.limits.bulkModerationTargetCap = 0;
-    settings.channels.log = "323456789012345678";
-    const original = structuredClone(settings);
-    const saveSettings = vi.fn();
-    const setEnabled = vi.fn();
-    const editReply = vi.fn(async (_payload: unknown) => undefined);
-    const guildRuntime = {
-      guildId: GUILD_ID,
-      settings,
-      saveSettings,
-      setEnabled,
-    } as unknown as GuildRuntime;
-    const interaction = {
-      guild: {
-        id: GUILD_ID,
-        channels: { fetch: vi.fn(async () => null) },
-      },
-      guildId: GUILD_ID,
-      options: { getSubcommand: vi.fn(() => "enable-all") },
-      deferred: true,
-      replied: false,
-      editReply,
-    } as never;
-
-    await handleSetupCommand(interaction, {} as BotRuntime, guildRuntime, {
-      id: USER_ID,
-      guild: { id: GUILD_ID },
-    } as never);
-
-    expect(saveSettings).not.toHaveBeenCalled();
-    expect(setEnabled).not.toHaveBeenCalled();
-    expect(settings).toEqual(original);
-    const failure = editReply.mock.calls[0]?.[0] as { content: string };
-    expect(failure.content).toContain("Timezone is invalid.");
-    expect(failure.content).toContain(
-      "Bulk moderation target cap must be between 1 and 1000.",
-    );
-    expect(failure.content).toContain(
-      "The configured log channel is unavailable.",
-    );
-    expect(failure.content).toContain("Nothing changed");
-  });
-
+describe("immediate configuration behavior", () => {
   it("stores greeting profiles without a fixed user and explains dynamic {user}", async () => {
     const settings = createDefaultGuildSettings();
     const reply = vi.fn(async () => undefined);
@@ -292,7 +227,7 @@ describe("active-only setup behavior", () => {
       options: {
         getSubcommand: vi.fn(() => "greeting"),
         getString: vi.fn((name: string) => {
-          if (name === "action") return "add";
+          if (name === "action") return "update";
           if (name === "name") return "Welcome";
           if (name === "message") return "Hello {user}!";
           return null;
@@ -371,7 +306,7 @@ describe("active-only setup behavior", () => {
     } as GuildRuntime;
     const actor = { id: USER_ID, guild: { id: GUILD_ID } } as never;
 
-    const runSetup = async (subcommand: "status" | "greeting") => {
+    const runConfiguration = async (subcommand: "status" | "greeting") => {
       const reply = vi.fn<(payload: unknown) => Promise<void>>(
         async () => undefined,
       );
@@ -395,18 +330,18 @@ describe("active-only setup behavior", () => {
       return (reply.mock.calls[0]?.[0] as { content: string }).content;
     };
 
-    const status = await runSetup("status");
-    const list = await runSetup("greeting");
+    const status = await runConfiguration("status");
+    const list = await runConfiguration("greeting");
     expect(status.length).toBeLessThanOrEqual(2_000);
     expect(status).toContain("(+95 more)");
     expect(list.length).toBeLessThanOrEqual(2_000);
     expect(list).toContain("94** more omitted");
-    expect(list).toContain("/setup export");
+    expect(list).toContain("/data export");
   });
 
-  it("requires greeting profiles only when the feature is enabled", async () => {
+  it("requires a neutral greeting profile", async () => {
     const settings = createDefaultGuildSettings();
-    settings.features.greetings = true;
+    settings.greetings = [];
     const permissions = {
       has: vi.fn((permission: bigint) =>
         [
@@ -425,14 +360,14 @@ describe("active-only setup behavior", () => {
     } as never;
     void permissions;
 
-    const missing = await validateGuildSetup(interaction, settings);
+    const missing = await validateGuildConfiguration(interaction, settings);
     expect(missing.valid).toBe(false);
     expect(missing.errors).toContain(
-      "Greetings are enabled but no greeting profile exists.",
+      "At least one greeting profile is required.",
     );
 
     settings.greetings.push({ name: "Welcome", message: "Hello {user}!" });
-    const valid = await validateGuildSetup(interaction, settings);
+    const valid = await validateGuildConfiguration(interaction, settings);
     expect(valid).toEqual({ valid: true, errors: [] });
   });
 
@@ -808,7 +743,7 @@ describe("active-only setup behavior", () => {
   it("refuses an oversized complete export instead of sending partial data", async () => {
     const settings = createDefaultGuildSettings();
     const exportGuildData = vi.fn(() => ({
-      formatVersion: 5,
+      formatVersion: 6,
       guildId: GUILD_ID,
       oversized: "x".repeat(2 * 1024 * 1024),
     }));
@@ -866,7 +801,7 @@ describe("active-only setup behavior", () => {
     const runtime = {
       storage: {
         exportGuildData: vi.fn(() => ({
-          formatVersion: 5,
+          formatVersion: 6,
           guildId: GUILD_ID,
         })),
       },
@@ -883,7 +818,7 @@ describe("active-only setup behavior", () => {
 
     const response = interaction.editReply.mock.calls[0]?.[0];
     expect(response).toMatchObject({
-      content: expect.stringContaining("Format-5"),
+      content: expect.stringContaining("Format-6"),
       files: [expect.anything()],
       allowedMentions: { parse: [] },
     });

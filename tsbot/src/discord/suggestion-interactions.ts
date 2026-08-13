@@ -1,5 +1,6 @@
 import {
   ChannelType,
+  MessageFlags,
   type ButtonInteraction,
   type GuildMember,
   type ModalSubmitInteraction,
@@ -31,6 +32,7 @@ import type { SuggestionStorage } from "./suggestion-commands-handler.js";
 import { normalizeMultilineText } from "./forms.js";
 import { parseSuggestionOpenCustomId } from "./panel-theme.js";
 import { inspectSuggestionResources } from "./phase2-permissions.js";
+import { logDomainOutcome } from "./domain-outcomes.js";
 
 const NAMESPACE = "superior:suggestion:";
 
@@ -144,6 +146,19 @@ export async function handleSuggestionButton(
     ).catch(() => "unavailable" as const);
   }
   runtime.storage.recordCommandMetric("suggestion.vote");
+  logDomainOutcome(
+    "suggestion",
+    "vote",
+    runtime.guildId,
+    result.status === "self-vote" || result.status === "unavailable"
+      ? `rejected-${result.status}`
+      : result.status,
+    {
+      recordId: verifiedSuggestion.suggestionId,
+      recordNumber: verifiedSuggestion.suggestionNumber,
+      state: parsed.direction,
+    },
+  );
   return true;
 }
 
@@ -314,6 +329,12 @@ async function submitSuggestion(
     details,
   });
   if (reservation.status === "cooldown") {
+    logDomainOutcome(
+      "suggestion",
+      "submit",
+      runtime.guildId,
+      "rejected-cooldown",
+    );
     await replyPrivate(
       interaction,
       `You reached the suggestion limit. Try again <t:${Math.floor(Date.parse(reservation.retryAt) / 1_000)}:R>.`,
@@ -321,12 +342,22 @@ async function submitSuggestion(
     return;
   }
   if (reservation.status === "disabled") {
+    logDomainOutcome(
+      "suggestion",
+      "submit",
+      runtime.guildId,
+      "rejected-disabled",
+    );
     await replyPrivate(
       interaction,
       "Suggestions were disabled before submission.",
     );
     return;
   }
+  logDomainOutcome("suggestion", "submit", runtime.guildId, "reserved", {
+    recordId: reservation.suggestion.suggestionId,
+    recordNumber: reservation.suggestion.suggestionNumber,
+  });
   const deliveryConfiguration = storage.getSuggestionConfiguration();
   if (
     !runtime.isCurrent() ||
@@ -342,6 +373,16 @@ async function submitSuggestion(
       "Suggestion settings changed during submission. The reserved suggestion was not posted and is available for staff recovery.",
     );
     runtime.storage.recordCommandMetric("suggestion.submit", false);
+    logDomainOutcome(
+      "suggestion",
+      "submit",
+      runtime.guildId,
+      "failed-configuration-changed",
+      {
+        recordId: reservation.suggestion.suggestionId,
+        recordNumber: reservation.suggestion.suggestionNumber,
+      },
+    );
     return;
   }
   try {
@@ -366,12 +407,28 @@ async function submitSuggestion(
       `Suggestion #${published.suggestion.suggestionNumber} was posted in <#${published.message.channelId}>.`,
     );
     runtime.storage.recordCommandMetric("suggestion.submit");
+    logDomainOutcome("suggestion", "submit", runtime.guildId, "delivered", {
+      recordId: published.suggestion.suggestionId,
+      recordNumber: published.suggestion.suggestionNumber,
+      channelId: published.message.channelId,
+      state: published.suggestion.state,
+    });
   } catch {
     await replyPrivate(
       interaction,
       "Superior could not post the suggestion safely. The failed reservation was recorded; try again later.",
     );
     runtime.storage.recordCommandMetric("suggestion.submit", false);
+    logDomainOutcome(
+      "suggestion",
+      "submit",
+      runtime.guildId,
+      "failed-delivery",
+      {
+        recordId: reservation.suggestion.suggestionId,
+        recordNumber: reservation.suggestion.suggestionNumber,
+      },
+    );
   }
 }
 
@@ -435,6 +492,11 @@ async function submitSuggestionReview(
       : `Suggestion #${result.suggestion.suggestionNumber} is now **${state}**.`,
   );
   runtime.storage.recordCommandMetric("suggestion.review");
+  logDomainOutcome("suggestion", "review", runtime.guildId, result.status, {
+    recordId: result.suggestion.suggestionId,
+    recordNumber: result.suggestion.suggestionNumber,
+    state: result.suggestion.state,
+  });
 }
 
 async function authorizeReviewer(
@@ -529,7 +591,7 @@ async function respondToVote(
 
 async function deferPrivate(interaction: SuggestionInteraction): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -544,14 +606,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }

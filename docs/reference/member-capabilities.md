@@ -1,14 +1,14 @@
 # Member capabilities
 
-All authority is guild-scoped. Superior ignores DMs and refuses work when the guild is disabled, inactive, unconfigured, purged, cross-guild, or invalidated during asynchronous work. Privileged interactions re-fetch the current member and relevant role/resource; slash-command visibility alone grants nothing.
+All authority is guild-scoped. Superior ignores unsupported DMs and refuses work when the guild is explicitly disabled, inactive, purged, cross-guild, or invalidated during asynchronous work. A missing external binding blocks only its resource-bound workflow. Privileged interactions re-fetch the current member and relevant role/resource; slash-command visibility alone grants nothing.
 
 ## Guild members
 
-All members of an enabled guild may:
+All members of an active guild may:
 
 - deliberately address the bot through the configured invocation, a bot mention, or a reply for natural chat, status, bounded dice, and bounded choices;
 - use `/utility ping`, `avatar`, `userinfo`, `serverinfo`, `roleinfo`, `channelinfo`, `snowflake`, and `timestamp`;
-- use `/fun battle`, `/fun stats`, and `/fun leaderboard` when activity metrics are enabled;
+- use `/fun battle`, `/fun stats`, and `/fun leaderboard`;
 - use `/greetings send` with a configured profile;
 - interact with a current role panel when the target role remains safe and manageable;
 - open a ticket in an enabled department, subject to one active ticket per department and three across the guild, and inspect the state of their own ticket;
@@ -52,7 +52,7 @@ The owner or an Administrator may grant one narrow capability to a safe guild ro
 
 Discord cannot dynamically hide command subcommands for a guild's grants, so a delegate may see operations they cannot use. Runtime authorization returns a private denial. Deleting, managing, or moving a delegated role out of the guild makes its grant unusable after fresh verification.
 
-Delegates cannot grant, revoke, list, or inspect `/access` merely because they hold another capability. They also do not inherit `/setup` or `/superior` administrative moderation authority.
+Delegates cannot grant, revoke, list, or inspect `/access` merely because they hold another capability. They also do not inherit `/config`, `/data`, or `/superior` administrative moderation authority.
 
 Configuration and content authority cannot be combined by self-assignment: a configure-only delegate cannot select a new ticket support or suggestion/application reviewer role that they currently hold. An unchanged workflow role is allowed for unrelated edits; the owner or a current Administrator can intentionally make a new overlapping assignment.
 
@@ -62,16 +62,16 @@ Configuration and content authority cannot be combined by self-assignment: a con
 
 The guild owner and freshly verified members with Administrator permission retain ultimate authority for every delegated capability and every workflow-specific support/reviewer action. They can also:
 
-- configure and validate the guild with `/setup`, feature flags, limits, triggers, and greeting profiles;
+- inspect or change optional guild settings with `/config`, including the explicit bot-state switch, limits, triggers, and greeting profiles;
 - grant/revoke/list/status delegated role capabilities with `/access`;
 - use `/superior` announcements, panels, message/channel/member moderation, bounded bulk actions, activity backfill, and help;
 - configure all six fixed panel presets and all ticket/suggestion/application workflows;
 - add, remove, inspect, enable, disable, and tune restricted-ping role/channel mappings; and
 - export current same-guild data.
 
-Only the guild owner can replace live data with `/setup import` or permanently purge the guild's live database rows; both require exact confirmation. Owner/Administrator evaluation happens before delegated storage, so broken delegation cannot lock out recovery.
+Only the guild owner can replace live data with `/data import` or permanently purge the guild's live database rows; both require exact confirmation. Owner/Administrator evaluation happens before delegated storage, so broken delegation cannot lock out recovery.
 
-Format-5, legacy format-4, and legacy format-3 imports replace portable operational data for their supported era while internal delivery deduplication is preserved; legacy format 2 replaces settings/metrics and preserves current operational rows. Every import disables the guild and makes imported authority/resource bindings, including restricted-ping mappings, dormant until current Discord resources are reviewed. See [Configuration](../configuration.md#export-import-purge-and-recovery-review).
+Format-6 and supported legacy imports replace portable data for their supported era while internal delivery deduplication is preserved. Every import leaves core behavior active and makes imported authority/external-resource bindings, including restricted-ping mappings, dormant until current Discord resources are reviewed. See [Configuration](../configuration.md#export-import-purge-and-recovery-review).
 
 Administrator status does not bypass Discord's permissions for the bot itself. Cleanup, channel changes, roles, timeouts, ticket categories/logs, suggestion threads, and private application channels all require the bot's current effective permissions and safe hierarchy.
 

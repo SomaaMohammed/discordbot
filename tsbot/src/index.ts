@@ -2,12 +2,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadProcessConfig, resolveApplicationRoot } from "./config.js";
 import { createDiscordClient } from "./discord/bot.js";
-import { logError, logInfo } from "./logging.js";
+import { logClassifiedError, logInfo } from "./logging.js";
 import { createRuntime } from "./runtime.js";
 import {
   createShutdownCoordinator,
+  installProcessFailureHandlers,
   installShutdownSignalHandlers,
   loginWithShutdown,
+  type ShutdownCoordinator,
 } from "./shutdown.js";
 
 const currentFile = fileURLToPath(import.meta.url);
@@ -22,15 +24,40 @@ if (path.basename(tsbotRoot) === "dist") {
 const repoRoot = resolveApplicationRoot(path.resolve(tsbotRoot, ".."));
 
 async function main(): Promise<void> {
+  logInfo("bootstrap", "Selected Superior application root", {
+    applicationRoot: repoRoot,
+  });
   const config = loadProcessConfig(repoRoot);
+  logInfo("bootstrap", "Process configuration validated", {
+    tokenConfigured: Boolean(config.discordToken),
+    databaseMode: config.dbFile === ":memory:" ? "memory" : "file",
+    commandRegistrationMode: config.commandRegistrationMode,
+    developmentGuildCount: config.devGuildIds.length,
+  });
   const runtime = createRuntime(config, repoRoot);
-  const client = createDiscordClient(runtime);
-  const shutdownCoordinator = createShutdownCoordinator(client, runtime);
+  let shutdownCoordinator: ShutdownCoordinator | null = null;
+  const client = createDiscordClient(runtime, {
+    onFatalGatewayInvalidation: async () => {
+      process.exitCode = 1;
+      if (!shutdownCoordinator) {
+        throw new Error(
+          "Discord invalidated the gateway before shutdown coordination was ready",
+        );
+      }
+      await shutdownCoordinator.shutdown("fatal-discord-session-invalidated");
+    },
+  });
+  shutdownCoordinator = createShutdownCoordinator(client, runtime);
   const removeShutdownSignalHandlers =
     installShutdownSignalHandlers(shutdownCoordinator);
+  installProcessFailureHandlers(shutdownCoordinator);
 
   logInfo("bootstrap", "Starting TypeScript bot runtime", {
     version: runtime.processConfig.botVersion,
+    commandRegistrationMode: runtime.processConfig.commandRegistrationMode,
+  });
+
+  logInfo("discord", "Starting Discord login", {
     commandRegistrationMode: runtime.processConfig.commandRegistrationMode,
   });
 
@@ -45,6 +72,9 @@ async function main(): Promise<void> {
 try {
   await main();
 } catch (error) {
-  logError("bootstrap", "Failed to start TypeScript bot", { error });
+  logClassifiedError("bootstrap", error, {
+    stage: "startup",
+    outcome: "startup-failed",
+  });
   process.exitCode = 1;
 }

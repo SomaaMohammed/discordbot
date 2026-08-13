@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import {
   assertDiscordSnowflake,
+  GUILD_SETTINGS_VERSION,
   sanitizeGuildSettings,
 } from "../guild-settings.js";
 import {
@@ -10,6 +11,7 @@ import {
   type GuildDataExport,
   type GuildMetricExport,
   type GuildRecord,
+  type GuildSettings,
   type PanelPreset,
   type PostedPanel,
   type TicketConfiguration,
@@ -17,6 +19,10 @@ import {
   type TicketRecord,
   type TicketState,
 } from "../types.js";
+import {
+  sanitizeLegacyGuildSettingsV2,
+  type LegacyGuildSettingsV2,
+} from "./guild-settings-v2.js";
 import { assertActiveMetricKey } from "./metric-keys.js";
 import {
   emptyPhase2OperationalData,
@@ -47,7 +53,7 @@ export const GUILD_DATA_COLLECTION_LIMITS = Object.freeze({
 });
 
 export interface ParsedGuildDataImport extends GuildDataExport {
-  sourceFormatVersion: 2 | 3 | 4 | 5;
+  sourceFormatVersion: 2 | 3 | 4 | 5 | 6;
 }
 
 type LegacyTicketRecord = Omit<TicketRecord, "departmentId">;
@@ -75,9 +81,10 @@ export function parseGuildDataExport(
     candidate.formatVersion !== 2 &&
     candidate.formatVersion !== 3 &&
     candidate.formatVersion !== 4 &&
-    candidate.formatVersion !== 5
+    candidate.formatVersion !== 5 &&
+    candidate.formatVersion !== 6
   ) {
-    throw new TypeError("Guild import formatVersion must be 2, 3, 4, or 5");
+    throw new TypeError("Guild import formatVersion must be 2, 3, 4, 5, or 6");
   }
   if (
     candidate.guildId !== guildId ||
@@ -85,7 +92,10 @@ export function parseGuildDataExport(
   ) {
     throw new TypeError("Guild import must belong to the current guild");
   }
-  const settings = sanitizeGuildSettings(candidate.settings);
+  const settings =
+    candidate.formatVersion === 6
+      ? sanitizeGuildSettings(candidate.settings)
+      : upgradeLegacyExportSettings(candidate.settings);
   if (!Array.isArray(candidate.metrics)) {
     throw new TypeError("Guild import metrics must be an array");
   }
@@ -143,7 +153,9 @@ export function parseGuildDataExport(
   }
   const exportedAt = normalizeImportedTimestamp(candidate.exportedAt);
   const operational =
-    candidate.formatVersion === 4 || candidate.formatVersion === 5
+    candidate.formatVersion === 4 ||
+    candidate.formatVersion === 5 ||
+    candidate.formatVersion === 6
       ? parsePhase2OperationalData(candidate, guildId)
       : candidate.formatVersion === 3
         ? upgradeLegacyV3OperationalData({
@@ -155,12 +167,12 @@ export function parseGuildDataExport(
           })
         : emptyPhase2OperationalData();
   const restrictedPings =
-    candidate.formatVersion === 5
+    candidate.formatVersion === 5 || candidate.formatVersion === 6
       ? parseRestrictedPingGuildData(candidate, guildId)
       : emptyRestrictedPingGuildData();
   return {
     sourceFormatVersion: candidate.formatVersion,
-    formatVersion: 5,
+    formatVersion: 6,
     guildId,
     exportedAt,
     metadata: candidate.metadata as GuildRecord,
@@ -169,6 +181,33 @@ export function parseGuildDataExport(
     ...operational,
     ...restrictedPings,
   };
+}
+
+function upgradeLegacyExportSettings(input: unknown): GuildSettings {
+  const legacy = sanitizeLegacyGuildSettingsV2(input);
+  return sanitizeGuildSettings({
+    version: GUILD_SETTINGS_VERSION,
+    enabled: true,
+    timezone: legacy.timezone,
+    channels: { log: legacy.channels.log },
+    invocation: {
+      keyword: legacy.invocation.keyword,
+      aliases: [...legacy.invocation.aliases],
+    },
+    limits: {
+      bulkModerationTargetCap: legacy.limits.bulkModerationTargetCap,
+    },
+    greetings:
+      legacy.greetings.length > 0
+        ? legacy.greetings.map(copyLegacyGreeting)
+        : [{ name: "Welcome", message: "Welcome, {user}!" }],
+  });
+}
+
+function copyLegacyGreeting(
+  profile: LegacyGuildSettingsV2["greetings"][number],
+): { name: string; message: string } {
+  return { name: profile.name, message: profile.message };
 }
 
 function parseImportedTicketConfiguration(

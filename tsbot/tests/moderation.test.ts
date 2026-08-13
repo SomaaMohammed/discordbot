@@ -1,4 +1,4 @@
-import { Collection, PermissionFlagsBits } from "discord.js";
+import { Collection, MessageFlags, PermissionFlagsBits } from "discord.js";
 import { describe, expect, it, vi } from "vitest";
 import type { GuildRuntime } from "../src/runtime.js";
 import {
@@ -204,7 +204,9 @@ describe("purge accounting", () => {
       {} as never,
     );
 
-    expect(harness.deferReply).toHaveBeenCalledWith({ ephemeral: true });
+    expect(harness.deferReply).toHaveBeenCalledWith({
+      flags: MessageFlags.Ephemeral,
+    });
     expect(harness.bulkDelete).toHaveBeenCalledTimes(1);
     const deletionInput = harness.bulkDelete.mock.calls[0]?.[0] as Collection<
       string,

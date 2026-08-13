@@ -1,5 +1,6 @@
 import {
   ChannelType,
+  MessageFlags,
   escapeMarkdown,
   type ChatInputCommandInteraction,
   type Guild,
@@ -34,6 +35,7 @@ import {
   inspectTicketConfigurationResources,
 } from "./ticket-permissions.js";
 import { KeyedSerialQueue } from "./keyed-serial-queue.js";
+import { logDomainOutcome } from "./domain-outcomes.js";
 import {
   inspectApplicationResources,
   inspectSuggestionResources,
@@ -198,7 +200,7 @@ async function postSuperiorPanelSerial(
     if (enabledDepartments.length === 0 && !ticketConfiguration?.enabled) {
       await replyPrivate(
         interaction,
-        "Configure and enable a ticket department with `/ticket setup` or `/ticket department create` before posting this panel.",
+        "Create, configure, and enable a ticket department with `/ticket department create`, then verify it with `/ticket department health` before posting this panel.",
       );
       return;
     }
@@ -340,6 +342,13 @@ async function postSuperiorPanelSerial(
     });
   } catch (error) {
     const cleanup = await cleanUpPanelMutation(postedMessage, restorePrior);
+    logDomainOutcome(
+      "panel",
+      `preset-${options.preset}-post`,
+      runtime.guildId,
+      "persistence-failed",
+      { recordId: panelId, channelId: options.channel.id },
+    );
     await replyPrivate(
       interaction,
       `Superior could not persist the panel binding. ${cleanup.warning ?? "The Discord change was rolled back safely."}`,
@@ -350,6 +359,13 @@ async function postSuperiorPanelSerial(
   await replyPrivate(
     interaction,
     `${replaced ? "Refreshed" : "Posted"} the **${escapeMarkdown(options.preset)}** panel in <#${options.channel.id}>.`,
+  );
+  logDomainOutcome(
+    "panel",
+    `preset-${options.preset}-post`,
+    runtime.guildId,
+    replaced ? "refreshed" : "delivered",
+    { recordId: panelId, channelId: options.channel.id },
   );
   runtime.storage.recordCommandMetric(`panel.${options.preset}.post`);
 }
@@ -431,10 +447,10 @@ function buildFeatureState(
   tickets: boolean,
 ): PanelFeatureState {
   return {
-    chat: runtime.settings.features.chat,
-    replyModeration: runtime.settings.features.replyModeration,
-    greetings: runtime.settings.features.greetings,
-    activityMetrics: runtime.settings.features.activityMetrics,
+    chat: true,
+    replyModeration: true,
+    greetings: true,
+    activityMetrics: true,
     tickets,
     suggestions: Boolean(getSuggestionConfigurationSafely(runtime)?.enabled),
     applications:
@@ -659,14 +675,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }

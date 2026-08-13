@@ -2,7 +2,7 @@ import { z } from "zod";
 import { isGreetingTemplateWithinDiscordLimit } from "./greeting-message.js";
 import type { GuildSettings } from "./types.js";
 
-export const GUILD_SETTINGS_VERSION = 2 as const;
+export const GUILD_SETTINGS_VERSION = 3 as const;
 export const DISCORD_SNOWFLAKE_PATTERN = /^\d{17,20}$/;
 export const DEFAULT_BULK_MODERATION_TARGET_CAP = 100;
 export const MAX_BULK_MODERATION_TARGET_CAP = 1_000;
@@ -74,21 +74,12 @@ export const GuildSettingsSchema: z.ZodType<GuildSettings> = z
   .object({
     version: z.literal(GUILD_SETTINGS_VERSION),
     enabled: z.boolean(),
-    reviewRequired: z.boolean(),
     timezone: z
       .string()
       .trim()
       .min(1)
       .max(100)
       .refine(isValidTimezone, "must be a valid IANA timezone"),
-    features: z
-      .object({
-        chat: z.boolean(),
-        replyModeration: z.boolean(),
-        greetings: z.boolean(),
-        activityMetrics: z.boolean(),
-      })
-      .strict(),
     channels: z
       .object({
         log: snowflake.nullable(),
@@ -116,14 +107,6 @@ export const GuildSettingsSchema: z.ZodType<GuildSettings> = z
   })
   .strict()
   .superRefine((settings, context) => {
-    if (settings.enabled && settings.reviewRequired) {
-      context.addIssue({
-        code: "custom",
-        message: "a guild requiring review cannot be enabled",
-        path: ["enabled"],
-      });
-    }
-
     const names = new Set<string>();
     for (const [index, profile] of settings.greetings.entries()) {
       const name = profile.name.normalize("NFKC").toLocaleLowerCase("en-US");
@@ -149,15 +132,8 @@ export const GuildSettingsSchema: z.ZodType<GuildSettings> = z
 export function createDefaultGuildSettings(): GuildSettings {
   return {
     version: GUILD_SETTINGS_VERSION,
-    enabled: false,
-    reviewRequired: true,
+    enabled: true,
     timezone: "UTC",
-    features: {
-      chat: false,
-      replyModeration: false,
-      greetings: false,
-      activityMetrics: false,
-    },
     channels: {
       log: null,
     },
@@ -168,7 +144,7 @@ export function createDefaultGuildSettings(): GuildSettings {
     limits: {
       bulkModerationTargetCap: DEFAULT_BULK_MODERATION_TARGET_CAP,
     },
-    greetings: [],
+    greetings: [{ name: "Welcome", message: "Welcome, {user}!" }],
   };
 }
 

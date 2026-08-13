@@ -1,7 +1,7 @@
 # Superior terms of service
 
 **Effective date:** NOT YET EFFECTIVE<br>
-**Last updated:** August 10, 2026
+**Last updated:** August 11, 2026
 
 > **Unpublished draft. Do not link this document from the Discord Developer Portal or present it as binding terms.** Replace the operator/contact placeholders, complete the [Privacy Policy](privacy-policy.md) publication prerequisites, verify the hosted service, and obtain appropriate legal review for the operator's jurisdictions.
 
@@ -34,7 +34,7 @@ You must not use the Bot in a way that causes the Operator to violate Discord's 
 An installer or administrator is responsible for:
 
 - granting only the permissions needed for enabled features and maintaining safe role hierarchy and channel visibility;
-- configuring feature flags, logging, invocation terms, timezone, moderation limits, panels, ticket departments/forms/routing, suggestion channels/rates/review roles, private application forms/review channels, restricted-ping roles/channels/cooldowns/thread policy, and greetings appropriately;
+- configuring the explicit bot-state switch, logging, invocation terms, timezone, moderation limits, panels, ticket departments/forms/routing, suggestion channels/rates/review roles, private application forms/review channels, restricted-ping roles/channels/cooldowns/thread policy, and greetings appropriately;
 - granting each delegated role only the narrow capability needed, reviewing stale roles, and understanding that configuration authority does not automatically include private-content review authority;
 - telling members how the Bot is used and making the effective privacy notice and terms available;
 - supervising message cleanup, bulk actions, timeouts, panels, tickets, closure transcripts, suggestions/voting/reviews, staff applications/decisions, restricted role notifications, announcements, exports, activity backfill, statistics, and leaderboards;
@@ -78,13 +78,13 @@ A staff-application submission persists the applicant's Discord ID and normalize
 
 A restricted role ping is a real Discord notification sent by the Bot for one safe, normally non-mentionable role. The requesting member must currently hold that role and use `/pingrole` in its mapped channel or an exact allowed child thread/post. The Bot never makes the role globally mentionable and does not grant the requester Mention Everyone. The payload contains no member-authored text and allows only the authorized role mention. Configuration and successful use persist actor/member, guild, role, channel, cooldown, result/source, and timestamp data for security, anti-spam, and audit purposes. The default limits are 60 seconds per member/role and 30 seconds per role guild-wide, with no administrator bypass; administrators may change the configured values within product bounds.
 
-Optional member-activity metrics and backfill can produce member-specific statistics and leaderboards from Discord events and eligible history. Administrators must enable and operate those features only with an appropriate, disclosed basis.
+Member-activity metrics and optional history backfill can produce member-specific statistics and leaderboards from Discord events and eligible history. Administrators must operate those features only with an appropriate, disclosed basis.
 
 ## 8. Privacy and deletion
 
-The effective [Privacy Policy](privacy-policy.md) will explain processing, disclosure, retention, and requests. A confirmed removal of the Bot from a guild purges that guild's live SQLite rows; temporary or startup unavailability only marks it inactive. Disabling a department, suggestions, an application form, or a restricted-ping role stops new work and preserves applicable existing records.
+The effective [Privacy Policy](privacy-policy.md) will explain processing, disclosure, retention, and requests. Removing the Bot from a guild marks that tenant inactive and retains its live SQLite rows for restart-safe panels and a possible rejoin; owner-confirmed purge or operator deletion removes the live tenant rows. Disabling a department, suggestions, an application form, or a restricted-ping role stops new work and preserves applicable existing records.
 
-Only the guild owner can use `/setup import` to replace validated same-guild live data or `/setup purge` to remove the guild's live database rows. Format 5 replaces the complete portable tenant product model while preserving internal delivery deduplication; legacy format 4 replaces its schema-v5 model without restricted-ping collections; legacy format 3 replaces its panel/ticket-era operational model and converts tickets to `General Support`; legacy format 2 replaces settings/metrics while preserving current operational rows. Every import disables the guild, and imported delegated/resource bindings remain inactive or unverified pending review. Neither import nor purge deletes Discord-hosted panels, ticket channels/transcripts/logs, suggestion messages/threads, application review messages, prior restricted-role notifications, direct messages, host logs, backups, exports, or SQLite free pages.
+Only the guild owner can use `/data import` to replace validated same-guild live data or `/data purge` to remove the guild's live database rows. Format 6 replaces the complete portable tenant product model while preserving internal delivery deduplication; legacy formats retain their documented compatibility behavior. Every import leaves the core bot active, while imported delegated authority and external resource bindings remain inactive or unverified pending review. Neither import nor purge deletes Discord-hosted panels, ticket channels/transcripts/logs, suggestion messages/threads, application review messages, prior restricted-role notifications, direct messages, host logs, backups, exports, or SQLite free pages.
 
 This behavior is a publication blocker, not a promise of indefinite retention. Before public operation, the Operator must implement and document appropriate guild-removal, individual-request, log, backup, vendor, and shutdown deletion procedures.
 
@@ -94,7 +94,7 @@ The Bot software, name, documentation, and other materials remain owned by their
 
 ## 10. Suspension and termination
 
-Users may stop interacting at any time. A guild owner may disable features, disable the guild, remove the Bot, or use the confirmed purge flow.
+Users may stop interacting at any time. A guild owner may use the explicit bot-state switch, disable configured external-resource workflows, remove the Bot, or use the confirmed purge flow.
 
 The Operator may restrict, suspend, or end access to protect people or the service, investigate abuse, comply with law or Discord, enforce effective terms, or discontinue the Bot. Urgent safety, legal, platform, or technical action may occur without advance notice. If the hosted Bot permanently stops, the Operator must stop API access and delete API data as required.
 

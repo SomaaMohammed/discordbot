@@ -49,12 +49,13 @@ describe("Windows portable packaging", () => {
       packages: Record<string, { name?: string; version?: string }>;
     };
     const constants = read("tsbot/src/constants.ts");
+    const generatedVersion = read("tsbot/src/generated-version.ts");
 
     expect(packageJson).toMatchObject({
       name: "superior-discord-bot",
-      version: "5.5.0",
       private: true,
     });
+    expect(packageJson.version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(packageLock).toMatchObject({
       name: packageJson.name,
       version: packageJson.version,
@@ -63,9 +64,60 @@ describe("Windows portable packaging", () => {
       name: packageJson.name,
       version: packageJson.version,
     });
-    expect(constants).toContain(
+    expect(generatedVersion).toContain(
       `export const PACKAGE_VERSION = "${packageJson.version}"`,
     );
+    expect(constants).toContain(
+      'export { PACKAGE_VERSION } from "./generated-version.js"',
+    );
+
+    const verification = spawnSync(
+      process.execPath,
+      [path.join(repoRoot, "scripts", "version.mjs"), "verify"],
+      { encoding: "utf8" },
+    );
+    expect(verification.status, verification.stderr).toBe(0);
+    expect(verification.stdout).toContain(
+      `[version] verified ${packageJson.version}`,
+    );
+  });
+
+  it("provides resumable version and release workflows", () => {
+    const packageJson = JSON.parse(read("tsbot/package.json")) as {
+      scripts: Record<string, string>;
+    };
+    const versionTool = read("scripts/version.mjs");
+    const releaseBuilder = read("windows/release-build.ps1");
+    const releaseVerifier = read("windows/verify-release.ps1");
+
+    expect(packageJson.scripts["version:verify"]).toContain(
+      "version.mjs verify",
+    );
+    expect(packageJson.scripts["docs:links"]).toContain(
+      "check-markdown-links.mjs",
+    );
+    expect(packageJson.scripts["powershell:check"]).toContain(
+      "check-powershell.mjs",
+    );
+    expect(packageJson.scripts.check).toContain("docs:links");
+    expect(packageJson.scripts.check).toContain("powershell:check");
+    expect(packageJson.scripts["version:patch"]).toContain("patch");
+    expect(packageJson.scripts["version:minor"]).toContain("minor");
+    expect(packageJson.scripts["version:major"]).toContain("major");
+    expect(packageJson.scripts["release:build"]).toContain("release-build.ps1");
+    expect(packageJson.scripts["release:patch"]).toContain("release:build");
+    expect(packageJson.scripts["release:minor"]).toContain("release:build");
+    expect(packageJson.scripts["release:major"]).toContain("release:build");
+    expect(versionTool).toContain("packageJson.version = version");
+    expect(releaseBuilder).toContain("format:check");
+    expect(releaseBuilder).toContain("docs:links");
+    expect(releaseBuilder).toContain("powershell:check");
+    expect(releaseBuilder).toContain("security:check");
+    expect(releaseBuilder).toContain("package:win:verify");
+    expect(releaseBuilder).toContain("test-portable.ps1");
+    expect(releaseBuilder).toContain("test-standalone.ps1");
+    expect(releaseVerifier).toContain("sourceSha256");
+    expect(releaseVerifier).toContain("--diagnostics");
   });
 
   it("builds only production source into a freshly cleaned dist directory", () => {
@@ -83,7 +135,7 @@ describe("Windows portable packaging", () => {
       "tsx src/storage/backup-cli.ts",
     );
     expect(packageJson.scripts.build).toBe(
-      "npm run clean && tsc -p tsconfig.build.json",
+      "npm run version:generate && npm run clean && tsc -p tsconfig.build.json",
     );
     expect(buildConfig.include).toEqual(["src/**/*.ts"]);
     expect(buildConfig.exclude).toContain("tests");
@@ -101,6 +153,9 @@ describe("Windows portable packaging", () => {
     const standaloneLauncher = read("windows/standalone/Program.cs");
     const standaloneSmokeTest = read("windows/test-standalone.ps1");
     const fallback = read("windows/templates/Start Superior Bot.cmd");
+    const launcherSupport = read("windows/launcher/LauncherSupport.cs");
+    const diagnostics = read("windows/diagnostics.mjs");
+    const releaseVerifier = read("windows/verify-release.ps1");
 
     expect(builder).toContain('$NodeVersion = "22.12.0"');
     expect(builder).toContain(
@@ -130,6 +185,12 @@ describe("Windows portable packaging", () => {
     expect(builder).toContain("MANIFEST.sha256");
     expect(builder).toContain("SuperiorBot.Payload.zip");
     expect(builder).toContain("$StandaloneOutput");
+    expect(builder).toContain("AssemblyFileVersion");
+    expect(builder).toContain("AssemblyInformationalVersion");
+    expect(builder).toContain("SOURCE_SHA256");
+    expect(builder).toContain("diagnostics.mjs");
+    expect(builder).toContain("Archive entry escapes its extraction directory");
+    expect(builder).toContain("Portable staging contains reparse points");
     expect(reproducibilityTest).toContain(
       "Portable rebuild was not byte-for-byte reproducible",
     );
@@ -137,20 +198,46 @@ describe("Windows portable packaging", () => {
       "Standalone rebuild was not byte-for-byte reproducible",
     );
 
-    for (const source of [launcher, fallback]) {
+    for (const source of [launcher, standaloneLauncher]) {
       expect(source).toContain("--version");
       expect(source).toContain("--check");
-      expect(source).toContain("runtime");
+      expect(source).toContain("--diagnostics");
     }
+    expect(fallback).toContain('"%~dp0SuperiorBot.exe" "%~1"');
+    expect(fallback).toContain("--diagnostics");
+    expect(launcherSupport).toContain("SuperiorInstanceGuard");
+    expect(launcherSupport).toContain("AbandonedMutexException");
+    expect(launcherSupport).toContain('return @"Global\\SuperiorBot-"');
+    expect(launcherSupport).toContain("ValidatePortableManifest");
+    expect(launcherSupport).toContain("ValidateTreeHasNoReparsePoints");
+    expect(diagnostics).toContain("completed without Discord login");
+    expect(diagnostics).not.toContain("fileEnvironment.DISCORD_TOKEN");
     expect(smokeTest).toContain("no Discord login was attempted");
     expect(smokeTest).toContain("better_sqlite3.node");
     expect(smokeTest).toContain("MANIFEST.sha256");
+    expect(smokeTest).toContain("undeclared executable payload file");
+    for (const identityCheck of [
+      smokeTest,
+      standaloneSmokeTest,
+      releaseVerifier,
+    ]) {
+      expect(identityCheck).toContain("ProductVersion -ne");
+      expect(identityCheck).not.toContain("ProductVersion.StartsWith");
+    }
     expect(standaloneLauncher).toContain("SUPERIOR_APPLICATION_ROOT");
     expect(standaloneLauncher).toContain("ExtractArchiveSafely");
     expect(standaloneLauncher).toContain("LocalApplicationData");
     expect(standaloneSmokeTest).toContain(
-      "Standalone executable, application-root, and native SQLite smoke checks passed.",
+      "Standalone executable, application-root, database-lock, orphan-child job, and native SQLite smoke checks passed.",
     );
+    expect(standaloneSmokeTest).toContain("Another Superior Bot instance");
+    expect(standaloneSmokeTest).toContain("JobSmokeHarness.cs");
+    expect(standaloneSmokeTest).toContain(
+      "Stop-Process -Id $JobParent.Id -Force",
+    );
+    expect(launcherSupport).toContain("JobObjectLimitKillOnJobClose");
+    expect(launcherSupport).toContain("Console.CancelKeyPress");
+    expect(standaloneSmokeTest).toContain("already using this database");
   });
 
   it("writes identical ZIP bytes across source paths, mtimes, and creation order", () => {
@@ -213,10 +300,46 @@ describe("Windows portable packaging", () => {
     expect(workflow).toContain("Validate on Linux");
     expect(workflow).toContain("bash -n ops.sh");
     expect(workflow).toContain("git diff --check");
+    expect(workflow).toContain("npm run security:check");
+    expect(workflow).toContain("npm run docs:links");
+    expect(workflow).toContain("npm run powershell:check");
+    expect(workflow).toContain("npm run artifact:verify");
     expect(workflow).toContain("Build Windows portable artifact");
     expect(workflow).toContain("npm run package:win:verify");
     expect(workflow).toContain("windows/test-portable.ps1");
     expect(workflow).toContain("windows/test-standalone.ps1");
-    expect(workflow).toContain("actions/upload-artifact@v4");
+    expect(workflow).toContain(
+      "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    );
+
+    const codeql = read(".github/workflows/codeql.yml");
+    expect(codeql).toContain("security-events: write");
+    expect(codeql).toContain("javascript-typescript");
+    expect(codeql).toContain(
+      "github/codeql-action/init@24c7eb380a2dc368f2d129e4c65e51d172983a1e",
+    );
+  });
+
+  it("keeps private operator files outside formatting, Git, and release tooling", () => {
+    expect(read(".gitignore")).toContain("/mudae-watch.private.json");
+    expect(read(".gitignore")).toMatch(/^\*\.bak$/mu);
+    expect(read(".gitignore")).toMatch(/^\*\.backup$/mu);
+    expect(read(".prettierignore")).toContain("mudae-watch.private.json");
+    expect(read("windows/build-portable.ps1")).toContain(
+      '"mudae-watch.private.json"',
+    );
+    expect(read("tsbot/package.json")).toContain('"security:check"');
+    expect(read("scripts/security-check.mjs")).toContain(
+      "tracked secret scan passed",
+    );
+    expect(read("scripts/security-check.mjs")).toContain('"operator.bak"');
+    expect(read("scripts/security-check.mjs")).toContain('"operator.backup"');
+    expect(read("scripts/security-check.mjs")).toContain(
+      "versionIdentitySources",
+    );
+    expect(read("tsbot/src/config.ts")).not.toMatch(
+      /process\.env\.(?:BOT_VERSION|npm_package_version)/,
+    );
+    expect(read(".env.example")).not.toContain("BOT_VERSION=");
   });
 });

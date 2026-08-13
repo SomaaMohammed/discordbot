@@ -1043,13 +1043,13 @@ describe("suggestion member withdrawal generation", () => {
 });
 
 describe("suggestion configuration authority boundaries", () => {
-  function setupInteraction(harness: ReturnType<typeof guildHarness>) {
+  function configureInteraction(harness: ReturnType<typeof guildHarness>) {
     const interaction: Record<string, any> = {
       guild: harness.guild,
       guildId: GUILD_ID,
       user: { id: REVIEWER_ID },
       options: {
-        getSubcommand: vi.fn(() => "setup"),
+        getSubcommand: vi.fn(() => "configure"),
         getChannel: vi.fn((name: string) =>
           name === "channel" ? harness.publicChannel : null,
         ),
@@ -1083,7 +1083,7 @@ describe("suggestion configuration authority boundaries", () => {
     } as const;
   }
 
-  it("denies setup without suggestion configuration authority", async () => {
+  it("denies configuration without suggestion configuration authority", async () => {
     const harness = guildHarness();
     harness.member.roles.cache.delete(CONFIGURE_ROLE_ID);
     const storage = {
@@ -1092,7 +1092,7 @@ describe("suggestion configuration authority boundaries", () => {
       listCapabilitiesForRoles: vi.fn(() => []),
       recordCommandMetric: vi.fn(),
     };
-    const interaction = setupInteraction(harness);
+    const interaction = configureInteraction(harness);
 
     await handleSuggestionCommand(
       interaction as never,
@@ -1115,7 +1115,7 @@ describe("suggestion configuration authority boundaries", () => {
       listCapabilitiesForRoles: vi.fn(() => [configureGrant()]),
       recordCommandMetric: vi.fn(),
     };
-    const interaction = setupInteraction(harness);
+    const interaction = configureInteraction(harness);
 
     await handleSuggestionCommand(
       interaction as never,
@@ -1139,7 +1139,7 @@ describe("suggestion configuration authority boundaries", () => {
       listCapabilitiesForRoles: vi.fn(() => [configureGrant()]),
       recordCommandMetric: vi.fn(),
     };
-    const interaction = setupInteraction(harness);
+    const interaction = configureInteraction(harness);
     const guildRuntime = runtime(storage, harness.guild);
 
     await handleSuggestionCommand(interaction as never, guildRuntime);
@@ -1160,7 +1160,7 @@ describe("suggestion configuration authority boundaries", () => {
       listCapabilitiesForRoles: vi.fn(() => [configureGrant()]),
       recordCommandMetric: vi.fn(),
     };
-    const interaction = setupInteraction(harness);
+    const interaction = configureInteraction(harness);
 
     await handleSuggestionCommand(
       interaction as never,
@@ -1183,7 +1183,7 @@ describe("suggestion configuration authority boundaries", () => {
       listCapabilitiesForRoles: vi.fn(() => []),
       recordCommandMetric: vi.fn(),
     };
-    const interaction = setupInteraction(harness);
+    const interaction = configureInteraction(harness);
 
     await handleSuggestionCommand(
       interaction as never,
@@ -1193,7 +1193,7 @@ describe("suggestion configuration authority boundaries", () => {
     expect(storage.upsertSuggestionConfiguration).toHaveBeenCalledTimes(1);
   });
 
-  it("does not save setup when the runtime changes after awaited verification", async () => {
+  it("does not save configuration when the runtime changes after awaited verification", async () => {
     const harness = guildHarness({ owner: true });
     const storage = {
       getSuggestionConfiguration: vi.fn(() => null),
@@ -1201,7 +1201,7 @@ describe("suggestion configuration authority boundaries", () => {
       listCapabilitiesForRoles: vi.fn(() => []),
       recordCommandMetric: vi.fn(),
     };
-    const interaction = setupInteraction(harness);
+    const interaction = configureInteraction(harness);
     const guildRuntime = runtime(storage, harness.guild);
     vi.mocked(guildRuntime.isCurrent)
       .mockReturnValueOnce(true)
@@ -1215,7 +1215,9 @@ describe("suggestion configuration authority boundaries", () => {
     expect(storage.upsertSuggestionConfiguration).not.toHaveBeenCalled();
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining("after suggestion setup was verified"),
+        content: expect.stringContaining(
+          "after suggestion configuration was verified",
+        ),
       }),
     );
   });
@@ -1231,7 +1233,7 @@ describe("suggestion configuration authority boundaries", () => {
       recordCommandMetric: vi.fn(),
     };
     const interaction: Record<string, any> = {
-      ...setupInteraction(harness),
+      ...configureInteraction(harness),
       options: {
         getSubcommand: vi.fn(() => "list"),
         getInteger: vi.fn(() => 1),
@@ -1273,7 +1275,7 @@ describe("suggestion configuration authority boundaries", () => {
       listCapabilitiesForRoles: vi.fn(() => []),
       recordCommandMetric: vi.fn(),
     };
-    const interaction = setupInteraction(harness);
+    const interaction = configureInteraction(harness);
     interaction.options = {
       getSubcommand: vi.fn(() => "review"),
       getInteger: vi.fn(() => 4),

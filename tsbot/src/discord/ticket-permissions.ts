@@ -106,57 +106,6 @@ export async function inspectTicketConfigurationResources(
   };
 }
 
-export function validateTicketSetupResources(
-  guild: Guild,
-  category: CategoryChannel,
-  logChannel: GuildTextBasedChannel,
-  supportRole: Role,
-  actor: GuildMember,
-  botMember: GuildMember,
-  managerRoles: readonly Role[] = [],
-): string[] {
-  const issues: string[] = [];
-  if (
-    category.guild.id !== guild.id ||
-    category.type !== ChannelType.GuildCategory
-  ) {
-    issues.push("Choose a category from this server.");
-  }
-  if (!isTicketLogChannel(logChannel, guild.id)) {
-    issues.push("Choose a text or announcement log channel from this server.");
-  }
-  const supportValidation = validateSupportRole(
-    guild.id,
-    supportRole.id,
-    supportRole,
-  );
-  if (!supportValidation.valid) {
-    issues.push(supportRoleIssue(supportValidation.reason));
-  }
-  if (actor.guild.id !== guild.id) {
-    issues.push("Your current server membership could not be verified.");
-  } else if (
-    actor.id !== guild.ownerId &&
-    actor.roles.highest.comparePositionTo(supportRole) <= 0
-  ) {
-    issues.push("Your highest role must be above the selected support role.");
-  }
-  if (botMember.guild.id !== guild.id) {
-    issues.push("Superior's current server membership could not be verified.");
-  } else {
-    issues.push(
-      ...getTicketPermissionIssues(
-        category,
-        logChannel,
-        supportValidation.valid ? supportRole : null,
-        managerRoles,
-        botMember,
-      ),
-    );
-  }
-  return [...new Set(issues)];
-}
-
 export async function inspectTicketManagerRoles(
   guild: Guild,
   grants?: TicketManagementGrantReader,

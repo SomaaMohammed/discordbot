@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PACKAGE_VERSION } from "../src/constants.js";
 import { PRIVATE_MUDAE_WATCH_FILENAME } from "../src/mudae-watch-config.js";
 import { createRuntime, type BotRuntime } from "../src/runtime.js";
 
@@ -34,7 +35,7 @@ function startRuntime(root: string): BotRuntime {
   const runtime = createRuntime(
     {
       discordToken: "synthetic-token",
-      botVersion: "5.5.0-test",
+      botVersion: `${PACKAGE_VERSION}-test`,
       dbFile: path.join(root, "superior.db"),
       commandRegistrationMode: "global",
       devGuildIds: [],
@@ -66,11 +67,15 @@ describe("private watcher runtime loading", () => {
     const runtime = startRuntime(temporaryRoot());
 
     expect(runtime.privateMudaeWatcher).toBeNull();
-    expect([
+    const watcherLines = [
       ...log.mock.calls,
       ...warn.mock.calls,
       ...error.mock.calls,
-    ]).toEqual([]);
+    ]
+      .flat()
+      .map(String)
+      .filter((line) => line.includes("[private-mudae-watch]"));
+    expect(watcherLines).toEqual([]);
   });
 
   it("loads a valid private file and logs only bounded counts", () => {
@@ -90,9 +95,9 @@ describe("private watcher runtime loading", () => {
     ).toBe(true);
     const output = JSON.stringify(log.mock.calls);
     expect(output).toContain("Private watcher configuration loaded");
-    expect(output).toContain('\\"guildCount\\":1');
-    expect(output).toContain('\\"channelCount\\":1');
-    expect(output).toContain('\\"seriesCount\\":1');
+    expect(output).toContain("guildCount=1");
+    expect(output).toContain("channelCount=1");
+    expect(output).toContain("seriesCount=1");
     expect(output).not.toMatch(
       new RegExp(
         `${RECIPIENT_ID}|${MUDAE_BOT_ID}|${GUILD_ID}|${CHANNEL_ID}`,
@@ -120,7 +125,7 @@ describe("private watcher runtime loading", () => {
     expect(output).toContain(
       "Private watcher configuration is invalid; watcher disabled",
     );
-    expect(output).toContain('\\"issueCount\\"');
+    expect(output).toContain("issueCount=1");
     expect(output).not.toContain(RECIPIENT_ID);
     expect(output).not.toContain(SERIES);
   });

@@ -1,4 +1,5 @@
 import {
+  MessageFlags,
   PermissionFlagsBits,
   escapeMarkdown,
   type ChatInputCommandInteraction,
@@ -8,6 +9,7 @@ import {
 } from "discord.js";
 import type { GuildRuntime } from "../runtime.js";
 import type { UserMetrics } from "../types.js";
+import { logDomainOutcome } from "./domain-outcomes.js";
 
 const MAX_BACKFILL_MESSAGES = 50_000;
 const METRIC_LABELS: Record<keyof UserMetrics, string> = {
@@ -62,14 +64,6 @@ export async function handleFunCommand(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
 ): Promise<void> {
-  if (!runtime.settings.features.activityMetrics) {
-    await reply(
-      interaction,
-      "Activity and fun metrics are disabled in this server.",
-      true,
-    );
-    return;
-  }
   switch (interaction.options.getSubcommand()) {
     case "battle":
       await handleBattle(interaction, runtime);
@@ -91,6 +85,12 @@ async function handleBackfill(
 ): Promise<void> {
   const existing = backfillStatuses.get(runtime.guildId);
   if (existing?.running) {
+    logDomainOutcome(
+      "activity",
+      "backfill",
+      runtime.guildId,
+      "rejected-already-running",
+    );
     await reply(
       interaction,
       "An activity backfill is already running for this server.",
@@ -111,13 +111,22 @@ async function handleBackfill(
     error: null,
   };
   backfillStatuses.set(runtime.guildId, status);
+  logDomainOutcome("activity", "backfill", runtime.guildId, "started", {
+    totalCount: MAX_BACKFILL_MESSAGES,
+  });
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
   const guild = interaction.guild;
   if (!guild || guild.id !== runtime.guildId) {
     status.running = false;
     status.error = "Guild context changed";
+    logDomainOutcome(
+      "activity",
+      "backfill",
+      runtime.guildId,
+      "rejected-guild-context",
+    );
     await interaction.editReply(
       "This backfill does not belong to this server.",
     );
@@ -128,10 +137,17 @@ async function handleBackfill(
   if (!botMember) {
     status.running = false;
     status.error = "Bot member unavailable";
+    logDomainOutcome(
+      "activity",
+      "backfill",
+      runtime.guildId,
+      "rejected-permission-verification-unavailable",
+    );
     await interaction.editReply("Could not verify Superior's permissions.");
     return;
   }
   const totals = new Map<string, UserMetrics>();
+  let nextProgressLog = 5_000;
   try {
     try {
       for (const channel of guild.channels.cache.values()) {
@@ -159,6 +175,21 @@ async function handleBackfill(
             }
             await tallyMessage(message, totals, runtime);
             status.messagesScanned += 1;
+            if (status.messagesScanned >= nextProgressLog) {
+              logDomainOutcome(
+                "activity",
+                "backfill",
+                runtime.guildId,
+                "progress",
+                {
+                  attemptedCount: status.channelsScanned,
+                  processedCount: status.messagesScanned,
+                  succeededCount: totals.size,
+                  totalCount: MAX_BACKFILL_MESSAGES,
+                },
+              );
+              nextProgressLog += 5_000;
+            }
             if (status.messagesScanned >= MAX_BACKFILL_MESSAGES) break;
           }
           before = page.last()?.id;
@@ -168,6 +199,16 @@ async function handleBackfill(
     } catch (error) {
       if (error instanceof BackfillCancelledError) {
         status.error = error.message;
+        logDomainOutcome(
+          "activity",
+          "backfill",
+          runtime.guildId,
+          "cancelled-runtime-changed",
+          {
+            attemptedCount: status.channelsScanned,
+            processedCount: status.messagesScanned,
+          },
+        );
         await interaction.editReply(
           "Backfill cancelled because this server was disabled, removed, purged, or reconfigured. No metrics were changed.",
         );
@@ -175,6 +216,10 @@ async function handleBackfill(
       }
       status.error =
         error instanceof Error ? error.message.slice(0, 200) : "Unknown error";
+      logDomainOutcome("activity", "backfill", runtime.guildId, "failed-scan", {
+        attemptedCount: status.channelsScanned,
+        processedCount: status.messagesScanned,
+      });
       await interaction.editReply(
         `Backfill stopped after scanning **${status.messagesScanned}** messages. No partial replacement was written.`,
       );
@@ -189,6 +234,16 @@ async function handleBackfill(
     } catch (error) {
       if (error instanceof BackfillCancelledError) {
         status.error = error.message;
+        logDomainOutcome(
+          "activity",
+          "backfill",
+          runtime.guildId,
+          "cancelled-before-storage-replacement",
+          {
+            attemptedCount: status.channelsScanned,
+            processedCount: status.messagesScanned,
+          },
+        );
         await interaction.editReply(
           "Backfill scan finished, but no metrics were changed because the server was disabled, removed, purged, or reconfigured.",
         );
@@ -198,6 +253,16 @@ async function handleBackfill(
         error instanceof Error
           ? error.message.slice(0, 200)
           : "Storage replacement failed";
+      logDomainOutcome(
+        "activity",
+        "backfill",
+        runtime.guildId,
+        "failed-storage-replacement",
+        {
+          attemptedCount: status.channelsScanned,
+          processedCount: status.messagesScanned,
+        },
+      );
       await interaction.editReply(
         "Backfill storage replacement failed. Its transaction was rolled back, so no partial replacement was written.",
       );
@@ -205,6 +270,13 @@ async function handleBackfill(
     }
 
     status.usersUpdated = totals.size;
+    logDomainOutcome("activity", "backfill", runtime.guildId, "completed", {
+      attemptedCount: status.channelsScanned,
+      processedCount: status.messagesScanned,
+      succeededCount: status.usersUpdated,
+      totalCount: MAX_BACKFILL_MESSAGES,
+      ...(status.truncated ? { state: "safety-limit-reached" } : {}),
+    });
     await interaction.editReply(
       [
         "Activity backfill completed.",
@@ -340,7 +412,7 @@ async function handleBattle(
     ? `**${challenger}** and **${opponentName}** tie at **${challengerRoll}**.`
     : `**${challengerWon ? challenger : opponentName}** wins **${challengerRoll}–${opponentRoll}**.`;
   await reply(interaction, result, false);
-  if (runtime.isCurrent() && runtime.settings.features.activityMetrics) {
+  if (runtime.isCurrent()) {
     runtime.storage.incrementUserMetric(interaction.user.id, "battles_played");
     if (!opponent.bot)
       runtime.storage.incrementUserMetric(opponent.id, "battles_played");
@@ -388,11 +460,11 @@ async function handleLeaderboard(
   const lines = rows.map(
     (row, index) => `${index + 1}. <@${row.userId}> — **${row.value}**`,
   );
-  await interaction.reply({
-    content: `**${METRIC_LABELS[metric]}**\n${lines.join("\n") || "No activity recorded yet."}`,
-    ephemeral: true,
-    allowedMentions: { parse: [] },
-  });
+  await reply(
+    interaction,
+    `**${METRIC_LABELS[metric]}**\n${lines.join("\n") || "No activity recorded yet."}`,
+    true,
+  );
   runtime.storage.recordCommandMetric("fun.leaderboard");
 }
 
@@ -425,14 +497,14 @@ async function reply(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      ephemeral,
+      ...(ephemeral ? { flags: MessageFlags.Ephemeral } : {}),
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral,
+    ...(ephemeral ? { flags: MessageFlags.Ephemeral } : {}),
     allowedMentions: { parse: [] },
   });
 }

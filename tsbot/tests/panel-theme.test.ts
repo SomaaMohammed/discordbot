@@ -113,7 +113,7 @@ describe("Superior panel theme and presets", () => {
 
     expect(inactiveCopy).not.toContain("/greetings send");
     expect(inactiveCopy).not.toContain("/fun stats");
-    expect(inactiveCopy).toContain("No optional member services");
+    expect(inactiveCopy).toContain("Core member services are active");
     expect(activeCopy).toContain("/greetings send");
     expect(activeCopy).toContain("/fun stats");
     expect(activeCopy).toContain("Natural chat");

@@ -243,12 +243,13 @@ export function renderHelpPanel(
   }
   if (activeServices.length === 0) {
     activeServices.push(
-      "No optional member services are active. Administrators can review configuration with `/setup status`.",
+      "Core member services are active; resource-bound workflows appear after their Discord bindings are verified.",
     );
   }
 
   const ownerAdministratorCommands = [
-    "`/setup` - review and validate server configuration.",
+    "`/config` - review optional settings or use the emergency bot-state switch.",
+    "`/data` - export, import, or purge this server's stored data.",
     "`/access` - grant or revoke delegated role capabilities.",
   ];
   const workflowCommands = [

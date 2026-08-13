@@ -109,15 +109,9 @@ export function loadProcessConfig(repoRoot: string): ProcessConfig {
     );
   }
 
-  const packageVersion = String(
-    process.env.npm_package_version ?? PACKAGE_VERSION,
-  );
-  const botVersion =
-    String(process.env.BOT_VERSION ?? packageVersion).trim() || packageVersion;
-
   return {
     discordToken,
-    botVersion,
+    botVersion: PACKAGE_VERSION,
     dbFile: resolveDatabaseFile(repoRoot),
     commandRegistrationMode,
     devGuildIds,

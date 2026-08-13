@@ -1,8 +1,17 @@
 import { DateTime } from "luxon";
 import { getNow } from "./time.js";
-import type { GuildSettings, ProcessConfig } from "./types.js";
+import type {
+  ApplicationForm,
+  ApplicationFormField,
+  GuildSettings,
+  ProcessConfig,
+  SuggestionConfiguration,
+  TicketDepartment,
+  TicketDepartmentField,
+} from "./types.js";
 import { BotStorage, type GuildStorage } from "./storage/db.js";
-import { logError, logInfo, logWarn } from "./logging.js";
+import { logDebug, logError, logInfo, logWarn } from "./logging.js";
+import { CURRENT_SCHEMA_VERSION } from "./storage/schema.js";
 import { loadPrivateMudaeWatchConfig } from "./mudae-watch-config.js";
 import {
   PrivateMudaeWatcher,
@@ -31,7 +40,30 @@ export interface BotRuntime {
   readonly privateMudaeWatcher: PrivateMudaeWatcher | null;
   readonly randomInt: (maxExclusive: number) => number;
   forGuild: (guildId: string) => Promise<GuildRuntime | null>;
+  interactionFormsForGuild: (guildId: string) => InteractionFormSnapshot | null;
   invalidateGuild: (guildId: string) => void;
+}
+
+export interface CachedApplicationForm {
+  readonly form: ApplicationForm;
+  readonly fields: readonly ApplicationFormField[];
+}
+
+export interface CachedTicketDepartment {
+  readonly department: TicketDepartment;
+  readonly fields: readonly TicketDepartmentField[];
+}
+
+/**
+ * Memory-only form definitions used to make showModal the first Discord API
+ * action at interaction receipt. Every modal submission still reloads and
+ * revalidates the authoritative database records before changing state.
+ */
+export interface InteractionFormSnapshot {
+  readonly guildId: string;
+  readonly suggestionConfiguration: SuggestionConfiguration | null;
+  readonly applicationForms: readonly CachedApplicationForm[];
+  readonly ticketDepartments: readonly CachedTicketDepartment[];
 }
 
 export function createRuntime(
@@ -40,11 +72,26 @@ export function createRuntime(
 ): BotRuntime {
   const storage = new BotStorage({ dbFile: processConfig.dbFile });
   storage.initStorage();
-  storage.pruneMudaeWatchDeliveries();
+  logInfo("storage", "Database opened and validated", {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    schemaClassification: `exact-v${CURRENT_SCHEMA_VERSION}`,
+    databaseMode: processConfig.dbFile === ":memory:" ? "memory" : "file",
+  });
+  const prunedDeliveries = storage.pruneMudaeWatchDeliveries();
+  if (prunedDeliveries > 0) {
+    logInfo("delivery-cleanup", "Expired delivery reservations pruned", {
+      rowsDeleted: prunedDeliveries,
+    });
+  } else {
+    logDebug("delivery-cleanup", "No expired delivery reservations found", {
+      rowsDeleted: 0,
+    });
+  }
   const privateMudaeWatcher = applicationRoot
     ? createPrivateMudaeWatcher(storage, applicationRoot)
     : null;
   const guildGenerations = new Map<string, number>();
+  const interactionFormSnapshots = new Map<string, InteractionFormSnapshot>();
   const randomInt = (maxExclusive: number): number =>
     Math.floor(Math.random() * Math.max(maxExclusive, 1));
 
@@ -85,8 +132,7 @@ export function createRuntime(
           return Boolean(
             record?.enabled &&
             record.leftAt === null &&
-            currentSettings?.enabled &&
-            !currentSettings.reviewRequired,
+            currentSettings?.enabled,
           );
         },
         invalidate(): void {
@@ -142,14 +188,84 @@ export function createRuntime(
       };
       return guildRuntime;
     },
+    interactionFormsForGuild(guildId: string): InteractionFormSnapshot | null {
+      const normalizedGuildId = String(guildId).trim();
+      if (!/^\d{17,20}$/.test(normalizedGuildId)) return null;
+      return interactionFormSnapshots.get(normalizedGuildId) ?? null;
+    },
     invalidateGuild(guildId: string): void {
       const normalizedGuildId = String(guildId);
       guildGenerations.set(
         normalizedGuildId,
         (guildGenerations.get(normalizedGuildId) ?? 0) + 1,
       );
+      refreshInteractionFormSnapshot(normalizedGuildId);
     },
   };
+
+  const refreshInteractionFormSnapshot = (guildId: string): void => {
+    try {
+      const guild = storage.getGuild(guildId);
+      const settings = storage.getGuildSettings(guildId);
+      if (
+        !guild ||
+        guild.leftAt !== null ||
+        !guild.enabled ||
+        !settings?.enabled
+      ) {
+        interactionFormSnapshots.delete(guildId);
+        return;
+      }
+      const guildStorage = storage.forGuild(guildId);
+      const suggestionConfiguration = guildStorage.getSuggestionConfiguration();
+      const applicationForms = guildStorage
+        .listApplicationForms({ enabledOnly: true, limit: 25 })
+        .filter(
+          (form) =>
+            form.guildId === guildId &&
+            form.enabled &&
+            form.bindingsVerifiedAt !== null,
+        )
+        .map((form) => ({
+          form: structuredClone(form),
+          fields: structuredClone(
+            guildStorage.listApplicationFormFields(form.formId),
+          ),
+        }));
+      const ticketDepartments = guildStorage
+        .listTicketDepartments({ enabled: true, limit: 10 })
+        .filter(
+          (department) => department.guildId === guildId && department.enabled,
+        )
+        .map((department) => ({
+          department: structuredClone(department),
+          fields: structuredClone(
+            guildStorage.listTicketDepartmentFields(department.departmentId),
+          ),
+        }));
+      interactionFormSnapshots.set(guildId, {
+        guildId,
+        suggestionConfiguration:
+          suggestionConfiguration?.enabled === true &&
+          suggestionConfiguration.bindingsVerifiedAt !== null
+            ? structuredClone(suggestionConfiguration)
+            : null,
+        applicationForms,
+        ticketDepartments,
+      });
+    } catch (error) {
+      interactionFormSnapshots.delete(guildId);
+      logWarn(
+        "interaction-forms",
+        "Could not refresh the in-memory interaction form snapshot",
+        { guildId, error },
+      );
+    }
+  };
+
+  for (const guild of storage.listActiveGuilds()) {
+    refreshInteractionFormSnapshot(guild.guildId);
+  }
   return runtime;
 }
 
@@ -215,6 +331,9 @@ function createPrivateMudaeDeduplicationStore(
 }
 
 const PRIVATE_MUDAE_WATCH_LOGGER: PrivateMudaeWatchLogger = {
+  info(message, metadata): void {
+    logInfo("private-mudae-watch", message, { ...metadata });
+  },
   warn(message, metadata): void {
     logWarn("private-mudae-watch", message, { ...metadata });
   },

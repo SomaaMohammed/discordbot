@@ -1,6 +1,7 @@
 import {
   AttachmentBuilder,
   ChannelType,
+  MessageFlags,
   escapeMarkdown,
   type ButtonInteraction,
   type GuildMember,
@@ -36,6 +37,7 @@ import {
 } from "./forms.js";
 import { parseApplicationOpenCustomId } from "./panel-theme.js";
 import { inspectApplicationResources } from "./phase2-permissions.js";
+import { logDomainOutcome } from "./domain-outcomes.js";
 
 const NAMESPACE = "superior:application:";
 
@@ -314,7 +316,7 @@ async function openApplicationFormSelector(
         forms.map((form) => toApplicationFormDisplay(form, [])),
       ),
     ],
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
   runtime.storage.recordCommandMetric("panel.applications.use");
@@ -428,6 +430,12 @@ async function submitApplication(
     return;
   }
   if (reservation.status === "disabled") {
+    logDomainOutcome(
+      "application",
+      "submit",
+      runtime.guildId,
+      "rejected-disabled",
+    );
     await replyPrivate(
       interaction,
       "That application form was disabled before submission.",
@@ -435,12 +443,26 @@ async function submitApplication(
     return;
   }
   if (reservation.status === "existing") {
+    logDomainOutcome(
+      "application",
+      "submit",
+      runtime.guildId,
+      "rejected-existing-active-application",
+      {
+        recordId: reservation.application.applicationId,
+        recordNumber: reservation.application.applicationNumber,
+      },
+    );
     await replyPrivate(
       interaction,
       `You already have active application #${reservation.application.applicationNumber} for this form.`,
     );
     return;
   }
+  logDomainOutcome("application", "submit", runtime.guildId, "reserved", {
+    recordId: reservation.application.applicationId,
+    recordNumber: reservation.application.applicationNumber,
+  });
   const deliveryForm = storage.getApplicationForm(form.formId);
   if (
     !runtime.isCurrent() ||
@@ -457,6 +479,16 @@ async function submitApplication(
       "The application form changed during submission. Your reserved submission was not posted; withdraw it or ask staff to recover it safely.",
     );
     runtime.storage.recordCommandMetric("application.submit", false);
+    logDomainOutcome(
+      "application",
+      "submit",
+      runtime.guildId,
+      "failed-configuration-changed",
+      {
+        recordId: reservation.application.applicationId,
+        recordNumber: reservation.application.applicationNumber,
+      },
+    );
     return;
   }
   try {
@@ -473,12 +505,28 @@ async function submitApplication(
       `Application #${published.application.applicationNumber} was submitted privately for staff review.`,
     );
     runtime.storage.recordCommandMetric("application.submit");
+    logDomainOutcome("application", "submit", runtime.guildId, "delivered", {
+      recordId: published.application.applicationId,
+      recordNumber: published.application.applicationNumber,
+      channelId: published.message.channelId,
+      state: published.application.state,
+    });
   } catch {
     await replyPrivate(
       interaction,
       "Superior could not deliver the application safely. The failed reservation was recorded for recovery.",
     );
     runtime.storage.recordCommandMetric("application.submit", false);
+    logDomainOutcome(
+      "application",
+      "submit",
+      runtime.guildId,
+      "failed-delivery",
+      {
+        recordId: reservation.application.applicationId,
+        recordNumber: reservation.application.applicationNumber,
+      },
+    );
   }
 }
 
@@ -546,6 +594,16 @@ async function decideApplication(
     result.status === "unavailable" ||
     result.status === "conflict"
   ) {
+    logDomainOutcome(
+      "application",
+      "review-decision",
+      runtime.guildId,
+      `rejected-${result.status}`,
+      {
+        recordId: verifiedApplication.applicationId,
+        recordNumber: verifiedApplication.applicationNumber,
+      },
+    );
     await replyPrivate(
       interaction,
       "That application changed or is not claimed by you. Refresh the review message and try again.",
@@ -577,6 +635,17 @@ async function decideApplication(
       : `Application #${result.application.applicationNumber} was **${result.application.state}**.`,
   );
   runtime.storage.recordCommandMetric("application.review.decision");
+  logDomainOutcome(
+    "application",
+    "review-decision",
+    runtime.guildId,
+    result.status,
+    {
+      recordId: result.application.applicationId,
+      recordNumber: result.application.applicationNumber,
+      state: result.application.state,
+    },
+  );
 }
 
 async function handleClaimResult(
@@ -591,6 +660,12 @@ async function handleClaimResult(
     result.status === "unavailable" ||
     result.status === "conflict"
   ) {
+    logDomainOutcome(
+      "application",
+      "review-claim",
+      runtime.guildId,
+      `rejected-${result.status}`,
+    );
     await replyPrivate(
       interaction,
       "That application is no longer available to claim.",
@@ -622,6 +697,17 @@ async function handleClaimResult(
       : `You claimed application #${result.application.applicationNumber}.`,
   );
   runtime.storage.recordCommandMetric("application.review.claim");
+  logDomainOutcome(
+    "application",
+    "review-claim",
+    runtime.guildId,
+    result.status,
+    {
+      recordId: result.application.applicationId,
+      recordNumber: result.application.applicationNumber,
+      state: result.application.state,
+    },
+  );
 }
 
 async function showReviewerInfo(
@@ -738,7 +824,7 @@ async function deferPrivate(
   interaction: ApplicationInteraction,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -753,14 +839,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }

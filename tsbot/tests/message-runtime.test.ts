@@ -63,10 +63,6 @@ function createHarness(
   ];
   const settings = createDefaultGuildSettings();
   settings.enabled = true;
-  settings.reviewRequired = false;
-  settings.features.chat = true;
-  settings.features.replyModeration = true;
-  settings.features.activityMetrics = false;
   settings.timezone = "Asia/Amman";
 
   const guild = {
@@ -321,21 +317,16 @@ describe("message runtime chat", () => {
     expect(harness.recordCommandMetric).not.toHaveBeenCalled();
   });
 
-  it.each(["disabled", "review-required", "chat-disabled"])(
-    "is side-effect free when %s",
-    async (state) => {
-      const harness = createHarness();
-      if (state === "disabled") harness.settings.enabled = false;
-      if (state === "review-required") harness.settings.reviewRequired = true;
-      if (state === "chat-disabled") harness.settings.features.chat = false;
+  it("is side-effect free when explicitly disabled", async () => {
+    const harness = createHarness();
+    harness.settings.enabled = false;
 
-      await handleMessageCreate(harness.message, harness.processRuntime);
+    await handleMessageCreate(harness.message, harness.processRuntime);
 
-      expect(harness.reply).not.toHaveBeenCalled();
-      expect(harness.recordCommandMetric).not.toHaveBeenCalled();
-      expect(harness.incrementUserMetric).not.toHaveBeenCalled();
-    },
-  );
+    expect(harness.reply).not.toHaveBeenCalled();
+    expect(harness.recordCommandMetric).not.toHaveBeenCalled();
+    expect(harness.incrementUserMetric).not.toHaveBeenCalled();
+  });
 
   it("rejects mismatched guild, channel, runtime, and member tenants", async () => {
     const guildMismatch = createHarness();
@@ -379,9 +370,8 @@ describe("message runtime chat", () => {
     expect(memberMismatch.reply).not.toHaveBeenCalled();
   });
 
-  it("records passive activity only when the guild opts in", async () => {
+  it("records passive activity by default", async () => {
     const harness = createHarness({ content: "ordinary message" });
-    harness.settings.features.activityMetrics = true;
 
     await handleMessageCreate(harness.message, harness.processRuntime);
 
@@ -424,20 +414,6 @@ describe("reply moderation runtime", () => {
       actorAdmin: false,
       reference: true,
     });
-
-    await handleMessageCreate(harness.message, harness.processRuntime);
-
-    expect(harness.timeout).not.toHaveBeenCalled();
-    expect(harness.reply).not.toHaveBeenCalled();
-    expect(harness.recordCommandMetric).not.toHaveBeenCalled();
-  });
-
-  it("keeps moderation-shaped text out of chat when moderation is disabled", async () => {
-    const harness = createHarness({
-      content: "superior mute because the reason says ping",
-      reference: true,
-    });
-    harness.settings.features.replyModeration = false;
 
     await handleMessageCreate(harness.message, harness.processRuntime);
 
@@ -733,9 +709,8 @@ describe("private watcher routing", () => {
 });
 
 describe("reaction activity metrics", () => {
-  it("records opted-in same-guild reactions and rejects cross-guild messages", async () => {
+  it("records default same-guild reactions and rejects cross-guild messages", async () => {
     const harness = createHarness();
-    harness.settings.features.activityMetrics = true;
     const reaction = {
       message: {
         partial: false,

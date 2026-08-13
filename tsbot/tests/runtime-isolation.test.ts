@@ -33,17 +33,6 @@ function createTestRuntime(): BotRuntime {
 
 function approveAndEnable(runtime: BotRuntime, guildId: string): void {
   runtime.storage.ensureGuild(guildId, `Guild ${guildId}`);
-  const current = runtime.storage.getGuildSettings(guildId)!;
-  runtime.storage.saveGuildSettings(
-    guildId,
-    { ...structuredClone(current), reviewRequired: false },
-    current,
-  );
-  runtime.storage.setGuildEnabled(
-    guildId,
-    true,
-    runtime.storage.getGuildEnableExpectation(guildId)!,
-  );
 }
 
 describe("runtime tenant isolation", () => {

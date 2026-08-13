@@ -3,6 +3,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  MessageFlags,
   ModalBuilder,
   PermissionFlagsBits,
   TextInputBuilder,
@@ -15,11 +16,13 @@ import {
   type ModalSubmitInteraction,
   type Role,
 } from "discord.js";
+import { classifyError } from "../errors.js";
 import type { GuildRuntime } from "../runtime.js";
+import { logDomainOutcome } from "./domain-outcomes.js";
 
-const ROLE_BUTTON_PREFIX = "superior:role:";
-const DM_BUTTON_PREFIX = "superior:dm:";
-const DM_MODAL_PREFIX = "superior:dm-modal:";
+export const ROLE_BUTTON_PREFIX = "superior:role:";
+export const DM_BUTTON_PREFIX = "superior:dm:";
+export const DM_MODAL_PREFIX = "superior:dm-modal:";
 const DM_INPUT_ID = "message";
 const MAX_PANEL_ROLES = 5;
 const DM_PANEL_COOLDOWN_MS = 60_000;
@@ -70,7 +73,7 @@ export async function handlePanelCommand(
   actor: GuildMember,
 ): Promise<boolean> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
   switch (interaction.options.getSubcommand()) {
     case "say":
@@ -94,15 +97,35 @@ export async function handlePanelButton(
   interaction: ButtonInteraction,
   runtime: GuildRuntime,
 ): Promise<boolean> {
-  if (interaction.customId.startsWith(ROLE_BUTTON_PREFIX)) {
+  const parsed = parsePersistentPanelButtonId(interaction.customId);
+  if (parsed?.kind === "role") {
     await handleRoleButton(interaction, runtime);
     return true;
   }
-  if (interaction.customId.startsWith(DM_BUTTON_PREFIX)) {
+  if (parsed?.kind === "private-message") {
     await handleDmButton(interaction, runtime);
     return true;
   }
   return false;
+}
+
+export type ParsedPersistentPanelButton =
+  | { kind: "role"; roleId: string }
+  | { kind: "private-message"; targetId: string };
+
+/** Stable router contract for Discord messages posted by earlier releases. */
+export function parsePersistentPanelButtonId(
+  customId: string,
+): ParsedPersistentPanelButton | null {
+  if (customId.startsWith(ROLE_BUTTON_PREFIX)) {
+    const roleId = parseId(customId, ROLE_BUTTON_PREFIX);
+    return roleId ? { kind: "role", roleId } : null;
+  }
+  if (customId.startsWith(DM_BUTTON_PREFIX)) {
+    const targetId = parseId(customId, DM_BUTTON_PREFIX);
+    return targetId ? { kind: "private-message", targetId } : null;
+  }
+  return null;
 }
 
 export async function handlePanelModal(
@@ -134,21 +157,25 @@ export async function handlePanelModal(
     return true;
   }
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
   const guild = interaction.guild;
   const [sender, target] = await Promise.all([
     guild.members.fetch(interaction.user.id).catch(() => null),
     guild.members.fetch(modalTarget.targetId).catch(() => null),
   ]);
-  if (
-    !sender ||
-    sender.guild.id !== runtime.guildId ||
-    !target ||
-    target.guild.id !== runtime.guildId ||
-    target.user.bot
-  ) {
-    await replyPrivate(interaction, "The panel recipient is unavailable.");
+  if (!sender || sender.guild.id !== runtime.guildId) {
+    await replyPrivate(
+      interaction,
+      "Superior could not verify your current server membership. No private message was sent.",
+    );
+    return true;
+  }
+  if (!target || target.guild.id !== runtime.guildId || target.user.bot) {
+    await replyPrivate(
+      interaction,
+      "The member configured as this panel's recipient has left or was deleted. Ask an administrator to replace the panel recipient.",
+    );
     return true;
   }
   if (!runtime.isCurrent()) {
@@ -162,6 +189,13 @@ export async function handlePanelModal(
   const now = Date.now();
   const remaining = claimDmPanelCooldown(cooldownKey, now);
   if (remaining > 0) {
+    logDomainOutcome(
+      "panel",
+      "private-message-delivery",
+      runtime.guildId,
+      "rejected-cooldown",
+      { recordId: modalTarget.panelId },
+    );
     await replyPrivate(
       interaction,
       `Please wait **${remaining} seconds** before using this private-message panel again.`,
@@ -183,14 +217,28 @@ export async function handlePanelModal(
       allowedMentions: { parse: [] },
     });
   } catch {
+    logDomainOutcome(
+      "panel",
+      "private-message-delivery",
+      runtime.guildId,
+      "failed-discord-delivery",
+      { recordId: modalTarget.panelId },
+    );
     await replyPrivate(
       interaction,
-      "Discord could not deliver that private message.",
+      "Discord blocked delivery to the configured recipient (their direct messages may be closed). No private message was sent.",
     );
     return true;
   }
   await replyPrivate(interaction, "Your private message was delivered.");
   runtime.storage.recordCommandMetric("superior.dmpanel.message");
+  logDomainOutcome(
+    "panel",
+    "private-message-delivery",
+    runtime.guildId,
+    "delivered",
+    { recordId: modalTarget.panelId },
+  );
   return true;
 }
 
@@ -251,6 +299,18 @@ async function handleSay(
   });
   await replyPrivate(interaction, `Announcement sent to <#${channel.id}>.`);
   runtime.storage.recordCommandMetric("superior.say");
+  logDomainOutcome(
+    "panel",
+    "announcement-delivery",
+    runtime.guildId,
+    "delivered",
+    {
+      channelId: channel.id,
+      state: mentionEveryone
+        ? "everyone-mention-authorized"
+        : "mentions-suppressed",
+    },
+  );
 }
 
 async function handleDmPanel(
@@ -322,6 +382,13 @@ async function handleDmPanel(
     `Private-message panel posted in <#${channel.id}>.`,
   );
   runtime.storage.recordCommandMetric("superior.dmpanel");
+  logDomainOutcome(
+    "panel",
+    "private-message-panel-post",
+    runtime.guildId,
+    "delivered",
+    { channelId: channel.id },
+  );
 }
 
 async function handleRolePanel(
@@ -413,6 +480,11 @@ async function handleRolePanel(
   runtime.storage.recordCommandMetric(
     `superior.${multiple ? "rolepanelmulti" : "rolepanel"}`,
   );
+  logDomainOutcome("panel", "role-panel-post", runtime.guildId, "delivered", {
+    channelId: channel.id,
+    totalCount: uniqueRoles.length,
+    state: multiple ? "multi-role" : "single-role",
+  });
 }
 
 async function handleRoleButton(
@@ -434,18 +506,33 @@ async function handleRoleButton(
     return;
   }
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
-  const member = await guild.members
-    .fetch(interaction.user.id)
-    .catch(() => null);
-  const botMember =
-    guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
-  const role = await guild.roles.fetch(roleId).catch(() => null);
-  if (!member || !botMember || !role) {
+  const [member, botMember, role] = await Promise.all([
+    guild.members.fetch(interaction.user.id).catch(() => null),
+    Promise.resolve(
+      guild.members.me ?? guild.members.fetchMe().catch(() => null),
+    ),
+    guild.roles.fetch(roleId).catch(() => null),
+  ]);
+  if (!member) {
     await replyPrivate(
       interaction,
-      "That role is no longer available. Ask an administrator to post a new panel.",
+      "Superior could not verify your current server membership. No role was changed.",
+    );
+    return;
+  }
+  if (!botMember) {
+    await replyPrivate(
+      interaction,
+      "Superior could not verify its current server permissions. Ask an administrator to check the bot's membership.",
+    );
+    return;
+  }
+  if (!role) {
+    await replyPrivate(
+      interaction,
+      "The role configured on this panel was deleted or is no longer in this server. Ask an administrator to replace it with an existing safe role.",
     );
     return;
   }
@@ -465,8 +552,22 @@ async function handleRoleButton(
   try {
     if (removing) await member.roles.remove(role, "Self-service role panel");
     else await member.roles.add(role, "Self-service role panel");
-  } catch {
-    await replyPrivate(interaction, "Discord rejected that role change.");
+  } catch (error) {
+    const classified = classifyError(error);
+    logDomainOutcome(
+      "panel",
+      removing ? "role-remove" : "role-add",
+      runtime.guildId,
+      `failed-${classified.category}`,
+      { recordId: role.id },
+    );
+    const recovery =
+      classified.category === "discord-access"
+        ? "Discord refused the role change because Superior no longer has Manage Roles or its highest role is not above this role. Restore the permission and role hierarchy, then try again."
+        : classified.category === "discord-resource"
+          ? "The role was deleted while Superior was applying the change. Ask an administrator to replace this panel with an existing safe role."
+          : "Discord rejected that role change. Ask an administrator to verify Superior's Manage Roles permission and role hierarchy, then try again.";
+    await replyPrivate(interaction, recovery);
     return;
   }
   await replyPrivate(
@@ -474,6 +575,13 @@ async function handleRoleButton(
     `${removing ? "Removed" : "Added"} **${escapeMarkdown(role.name)}**.`,
   );
   runtime.storage.recordCommandMetric("superior.rolepanel.click");
+  logDomainOutcome(
+    "panel",
+    removing ? "role-remove" : "role-add",
+    runtime.guildId,
+    "completed",
+    { recordId: role.id },
+  );
 }
 
 async function handleDmButton(
@@ -493,8 +601,22 @@ async function handleDmButton(
     );
     return;
   }
-  const modal = new ModalBuilder()
-    .setCustomId(`${DM_MODAL_PREFIX}${targetId}:${interaction.message.id}`)
+  const modal = createPrivateMessagePanelModal(
+    targetId,
+    interaction.message.id,
+  );
+  await interaction.showModal(modal);
+}
+
+export function createPrivateMessagePanelModal(
+  targetId: string,
+  panelMessageId: string,
+): ModalBuilder {
+  if (!/^\d{17,20}$/.test(targetId) || !/^\d{17,20}$/.test(panelMessageId)) {
+    throw new TypeError("Private-message panel identifiers are invalid.");
+  }
+  return new ModalBuilder()
+    .setCustomId(`${DM_MODAL_PREFIX}${targetId}:${panelMessageId}`)
     .setTitle("Send a private message")
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
@@ -506,7 +628,6 @@ async function handleDmButton(
           .setMaxLength(1_800),
       ),
     );
-  await interaction.showModal(modal);
 }
 
 export function getRolePanelSafetyError(
@@ -666,14 +787,14 @@ async function replyPrivate(
     }
     await interaction.followUp({
       content,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }

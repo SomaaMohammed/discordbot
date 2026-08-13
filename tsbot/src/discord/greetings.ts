@@ -1,6 +1,8 @@
-import type {
-  AutocompleteInteraction,
-  ChatInputCommandInteraction,
+import {
+  MessageFlags,
+  type AutocompleteInteraction,
+  type ChatInputCommandInteraction,
+  type MessageMentionOptions,
 } from "discord.js";
 import {
   renderGreetingMessage,
@@ -17,30 +19,54 @@ export async function handleGreetingCommand(
     ({ name }) => name.toLocaleLowerCase() === requested.toLocaleLowerCase(),
   );
   if (!profile) {
-    await interaction.reply({
-      content:
-        "That greeting profile is unavailable. Choose one from autocomplete.",
-      ephemeral: true,
-      allowedMentions: { parse: [] },
-    });
+    await respondGreeting(
+      interaction,
+      "That greeting profile is unavailable. Choose one from autocomplete.",
+      true,
+    );
     return;
   }
   if (!runtime.isCurrent()) {
-    await interaction.reply({
-      content: "This server was disabled or reconfigured. Please try again.",
-      ephemeral: true,
-      allowedMentions: { parse: [] },
-    });
+    await respondGreeting(
+      interaction,
+      "This server was disabled or reconfigured. Please try again.",
+      true,
+    );
     return;
   }
   const content = truncateDiscordContent(
     renderGreetingMessage(profile.message, interaction.user.id),
   );
+  await respondGreeting(interaction, content, false, interaction.user.id);
+  runtime.storage.recordCommandMetric("greetings.send");
+}
+
+async function respondGreeting(
+  interaction: ChatInputCommandInteraction,
+  content: string,
+  privateResponse: boolean,
+  mentionedUserId?: string,
+): Promise<void> {
+  const allowedMentions: MessageMentionOptions = mentionedUserId
+    ? { parse: [], users: [mentionedUserId] }
+    : { parse: [] };
+  if (interaction.deferred && !interaction.replied) {
+    await interaction.editReply({ content, allowedMentions });
+    return;
+  }
+  if (interaction.replied) {
+    await interaction.followUp({
+      content,
+      ...(privateResponse ? { flags: MessageFlags.Ephemeral } : {}),
+      allowedMentions,
+    });
+    return;
+  }
   await interaction.reply({
     content,
-    allowedMentions: { parse: [], users: [interaction.user.id] },
+    ...(privateResponse ? { flags: MessageFlags.Ephemeral } : {}),
+    allowedMentions,
   });
-  runtime.storage.recordCommandMetric("greetings.send");
 }
 
 export async function handleGreetingAutocomplete(
@@ -57,12 +83,7 @@ export async function handleGreetingAutocomplete(
     return;
   }
   const guildRuntime = await runtime.forGuild(interaction.guildId);
-  if (
-    !guildRuntime?.settings.enabled ||
-    guildRuntime.settings.reviewRequired ||
-    !guildRuntime.settings.features.greetings ||
-    !guildRuntime.isCurrent()
-  ) {
+  if (!guildRuntime?.settings.enabled || !guildRuntime.isCurrent()) {
     await interaction.respond([]);
     return;
   }

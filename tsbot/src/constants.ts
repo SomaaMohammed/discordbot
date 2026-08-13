@@ -1,2 +1,2 @@
-/** Package version reported by runtime health and portable launchers. */
-export const PACKAGE_VERSION = "5.5.0";
+/** Authoritative package identity generated from package.json. */
+export { PACKAGE_VERSION } from "./generated-version.js";

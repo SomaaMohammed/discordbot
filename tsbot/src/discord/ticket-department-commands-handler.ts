@@ -1,5 +1,6 @@
 import {
   ChannelType,
+  MessageFlags,
   PermissionFlagsBits,
   escapeMarkdown,
   type CategoryChannel,
@@ -292,7 +293,7 @@ async function createDepartment(
   if (!runtime.isCurrent()) {
     await replyPrivate(
       interaction,
-      "This server changed after department setup was verified. No department was created.",
+      "This server changed after department configuration was verified. No department was created.",
     );
     return;
   }
@@ -1434,7 +1435,7 @@ async function deferPrivate(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -1449,14 +1450,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }

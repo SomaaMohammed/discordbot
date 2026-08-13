@@ -102,7 +102,6 @@ function createHarness(existing = false) {
   };
   const settings = createDefaultGuildSettings();
   settings.enabled = true;
-  settings.reviewRequired = false;
   const runtime = {
     guildId: GUILD_ID,
     storage,
@@ -339,7 +338,7 @@ describe("preset panel delivery", () => {
     expect(harness.channel.send).not.toHaveBeenCalled();
     expect(harness.interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining("/ticket setup"),
+        content: expect.stringContaining("/ticket department create"),
       }),
     );
   });

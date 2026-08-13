@@ -137,6 +137,7 @@ function dependencies(
   };
   const deliver = vi.fn(async () => delivery);
   const logger: PrivateMudaeWatchLogger = {
+    info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
   };
@@ -209,6 +210,7 @@ describe("private Mudae watcher", () => {
     const watcher = new PrivateMudaeWatcher(configuration(), {
       deduplicationStore: deps.store,
       deliver: deps.deliver,
+      logger: deps.logger,
       now: () => new Date("2026-08-10T10:00:00.000Z"),
     });
     const matching = messageFixture({
@@ -239,6 +241,16 @@ describe("private Mudae watcher", () => {
       GUILD_ID,
       "reservation-1",
       "delivered",
+    );
+    expect(deps.logger.info).toHaveBeenCalledWith(
+      "Private watcher notification delivered",
+      {
+        outcome: "native-forwarded",
+        stage: "native-forward",
+      },
+    );
+    expect(JSON.stringify(vi.mocked(deps.logger.info!).mock.calls)).not.toMatch(
+      /recipient|series|messageContent|answers?/iu,
     );
 
     const nonmatchingDeps = dependencies();
@@ -332,6 +344,14 @@ describe("private Mudae watcher", () => {
       GUILD_ID,
       "reservation-1",
       "delivered",
+    );
+    expect(fallbackDeps.logger.warn).toHaveBeenCalledWith(
+      "Native Discord forwarding failed, but Superior sent the safe fallback successfully.",
+      expect.objectContaining({
+        code: 160_014,
+        outcome: "fallback-sent",
+        stage: "native-forward",
+      }),
     );
 
     const failedDeps = dependencies({

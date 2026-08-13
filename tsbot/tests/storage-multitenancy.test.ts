@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { BotStorage, GuildSettingsConflictError } from "../src/storage/db.js";
+import { createDefaultLegacyGuildSettingsV2 } from "../src/storage/guild-settings-v2.js";
 import type { UserMetrics } from "../src/types.js";
 
 const GUILD_A = "111111111111111111";
@@ -15,24 +16,54 @@ afterEach(() => {
 });
 
 describe("active guild storage", () => {
+  it("starts active with neutral v3 defaults and reverses the emergency switch", () => {
+    const storage = makeStorage();
+    const created = storage.ensureGuild(GUILD_A, "Fresh guild");
+
+    expect(created).toMatchObject({ enabled: true, leftAt: null });
+    expect(storage.getGuildSettings(GUILD_A)).toEqual({
+      version: 3,
+      enabled: true,
+      timezone: "UTC",
+      channels: { log: null },
+      invocation: { keyword: "superior", aliases: [] },
+      limits: { bulkModerationTargetCap: 100 },
+      greetings: [{ name: "Welcome", message: "Welcome, {user}!" }],
+    });
+
+    expect(storage.setGuildEnabled(GUILD_A, false)).toMatchObject({
+      enabled: false,
+    });
+    expect(storage.getGuild(GUILD_A)).toMatchObject({ enabled: false });
+    const disabledExpectation = storage.getGuildEnableExpectation(GUILD_A)!;
+    expect(
+      storage.setGuildEnabled(GUILD_A, true, disabledExpectation),
+    ).toMatchObject({ enabled: true });
+    expect(storage.getGuild(GUILD_A)).toMatchObject({
+      enabled: true,
+      leftAt: null,
+    });
+  });
+
   it("isolates lifecycle and settings by exact guild ID", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD_A, "A");
     storage.ensureGuild(GUILD_B, "B");
 
     const a = storage.getGuildSettings(GUILD_A)!;
-    a.features.chat = true;
     a.invocation.aliases = ["helper bot"];
     storage.saveGuildSettings(GUILD_A, a);
 
-    expect(storage.getGuildSettings(GUILD_A)?.features.chat).toBe(true);
-    expect(storage.getGuildSettings(GUILD_B)?.features.chat).toBe(false);
+    expect(storage.getGuildSettings(GUILD_A)?.invocation.aliases).toEqual([
+      "helper bot",
+    ]);
     expect(storage.getGuildSettings(GUILD_B)?.invocation.aliases).toEqual([]);
 
     const expectation = storage.getGuildEnableExpectation(GUILD_A)!;
     expect(storage.setGuildEnabled(GUILD_A, true, expectation).enabled).toBe(
       true,
     );
+    storage.setGuildEnabled(GUILD_B, false);
     expect(storage.listEnabledGuilds().map((row) => row.guildId)).toEqual([
       GUILD_A,
     ]);
@@ -43,11 +74,13 @@ describe("active guild storage", () => {
     });
     expect(storage.getGuild(GUILD_A)?.leftAt).not.toBeNull();
     const rejoined = storage.reactivateGuild(GUILD_A, "A again");
-    expect(rejoined).toMatchObject({ enabled: false, leftAt: null });
-    expect(storage.getGuildSettings(GUILD_A)?.features.chat).toBe(true);
+    expect(rejoined).toMatchObject({ enabled: true, leftAt: null });
+    expect(storage.getGuildSettings(GUILD_A)?.invocation.aliases).toEqual([
+      "helper bot",
+    ]);
   });
 
-  it("uses compare-and-swap settings writes and clears review only on enable", () => {
+  it("uses compare-and-swap writes without disabling unrelated behavior", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD_A);
     const original = storage.getGuildSettings(GUILD_A)!;
@@ -65,19 +98,18 @@ describe("active guild storage", () => {
       exported,
       storage.getGuildSettings(GUILD_A)!,
     );
-    expect(imported).toMatchObject({ enabled: false, reviewRequired: true });
+    expect(imported).toMatchObject({ enabled: true });
 
     const reviewExpectation = storage.getGuildEnableExpectation(GUILD_A)!;
     const enabled = storage.setGuildEnabled(GUILD_A, true, reviewExpectation);
-    expect(enabled).toMatchObject({ enabled: true, reviewRequired: false });
+    expect(enabled).toMatchObject({ enabled: true });
 
     const edited = structuredClone(enabled);
-    edited.features.greetings = true;
+    edited.timezone = "UTC";
     expect(storage.saveGuildSettings(GUILD_A, edited, enabled)).toMatchObject({
-      enabled: false,
-      reviewRequired: true,
+      enabled: true,
     });
-    expect(storage.getGuild(GUILD_A)?.enabled).toBe(false);
+    expect(storage.getGuild(GUILD_A)?.enabled).toBe(true);
   });
 
   it("stores command and user metrics per tenant", () => {
@@ -88,6 +120,13 @@ describe("active guild storage", () => {
     const b = storage.forGuild(GUILD_B);
 
     a.recordCommandMetric("superior.purge", false);
+    for (const metric of [
+      "access.grant",
+      "application.submit",
+      "suggestion.configure",
+    ]) {
+      expect(() => a.recordCommandMetric(metric)).not.toThrow();
+    }
     a.incrementUserMetric(USER_A, "messages_sent", 4);
     a.incrementUserMetric(USER_B, "messages_sent", 2);
     b.incrementUserMetric(USER_A, "messages_sent", 9);
@@ -100,6 +139,9 @@ describe("active guild storage", () => {
     ]);
     expect(a.metricsGet("command_usage.superior.purge", "0")).toBe("1");
     expect(a.metricsGet("command_failures.superior.purge", "0")).toBe("1");
+    expect(a.metricsGet("command_usage.access.grant", "0")).toBe("1");
+    expect(a.metricsGet("command_usage.application.submit", "0")).toBe("1");
+    expect(a.metricsGet("command_usage.suggestion.configure", "0")).toBe("1");
     expect(b.metricsGet("command_usage.superior.purge", "0")).toBe("0");
   });
 
@@ -193,7 +235,7 @@ describe("active guild storage", () => {
     const payload = storage.exportGuildData(GUILD_A);
 
     expect(payload).toMatchObject({
-      formatVersion: 5,
+      formatVersion: 6,
       guildId: GUILD_A,
       metrics: [
         {
@@ -376,7 +418,7 @@ describe("active guild storage", () => {
       guildId: payload.guildId,
       exportedAt: payload.exportedAt,
       metadata: payload.metadata,
-      settings: payload.settings,
+      settings: createDefaultLegacyGuildSettingsV2(),
       metrics: payload.metrics,
     };
     storage.importGuildData(

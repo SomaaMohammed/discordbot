@@ -1,15 +1,12 @@
 import {
   ChannelType,
-  PermissionFlagsBits,
-  escapeMarkdown,
-  type CategoryChannel,
+  MessageFlags,
   type ChatInputCommandInteraction,
   type Guild,
   type GuildBasedChannel,
   type GuildMember,
   type GuildTextBasedChannel,
   type Message,
-  type Role,
   type TextChannel,
 } from "discord.js";
 import type { GuildRuntime } from "../runtime.js";
@@ -18,11 +15,7 @@ import type {
   TicketDepartment,
   TicketRecord,
 } from "../types.js";
-import {
-  authorizeSupportRoleOrCapability,
-  fetchAndValidateRole,
-} from "./authorization.js";
-import { inspectContentDestinationBoundary } from "./content-destination-boundary.js";
+import { authorizeSupportRoleOrCapability } from "./authorization.js";
 import { postTicketLauncher } from "./preset-panels.js";
 import {
   buildTicketWelcomePayload,
@@ -33,12 +26,11 @@ import { isConfiguredDepartment } from "./phase2-permissions.js";
 import {
   createPrivateTicketChannel,
   inspectTicketConfigurationResources,
-  inspectTicketManagerRoles,
   quarantinePrivateTicketChannel,
   reconcilePrivateTicketChannel,
   ticketChannelRecoveryMarker,
-  validateTicketSetupResources,
 } from "./ticket-permissions.js";
+import { logDomainOutcome } from "./domain-outcomes.js";
 
 const TICKET_RECOVERY_LEASE_MS = 5 * 60 * 1_000;
 const TICKET_RECOVERY_CHANNEL_SCAN_LIMIT = 500;
@@ -70,9 +62,6 @@ export async function handleTicketCommand(
     return;
   }
   switch (interaction.options.getSubcommand()) {
-    case "setup":
-      await configureTickets(interaction, runtime, actor);
-      return;
     case "status":
       await showTicketStatus(interaction, runtime);
       return;
@@ -90,271 +79,6 @@ export async function handleTicketCommand(
   }
 }
 
-async function configureTickets(
-  interaction: ChatInputCommandInteraction,
-  runtime: GuildRuntime,
-  actor: GuildMember,
-): Promise<void> {
-  const guild = interaction.guild;
-  const rawCategory = interaction.options.getChannel(
-    "category",
-    true,
-  ) as unknown as CategoryChannel;
-  const rawLogChannel = interaction.options.getChannel(
-    "log_channel",
-    true,
-  ) as unknown as GuildTextBasedChannel;
-  const rawSupportRole = interaction.options.getRole(
-    "support_role",
-    true,
-  ) as unknown as Role;
-  if (!guild || guild.id !== runtime.guildId) {
-    await replyPrivate(interaction, "Ticket setup must run in this server.");
-    return;
-  }
-  if (
-    !rawCategory ||
-    rawCategory.guild?.id !== runtime.guildId ||
-    rawCategory.type !== ChannelType.GuildCategory
-  ) {
-    await replyPrivate(interaction, "Choose a category from this server.");
-    return;
-  }
-  if (
-    !rawLogChannel ||
-    typeof rawLogChannel.isDMBased !== "function" ||
-    rawLogChannel.guild?.id !== runtime.guildId ||
-    (rawLogChannel.type !== ChannelType.GuildText &&
-      rawLogChannel.type !== ChannelType.GuildAnnouncement) ||
-    rawLogChannel.isDMBased()
-  ) {
-    await replyPrivate(
-      interaction,
-      "Choose a text or announcement log channel from this server.",
-    );
-    return;
-  }
-  if (!rawSupportRole || rawSupportRole.guild?.id !== runtime.guildId) {
-    await replyPrivate(interaction, "Choose a support role from this server.");
-    return;
-  }
-  const [categoryValue, logChannelValue, supportRoleValue, botMember] =
-    await Promise.all([
-      guild.channels
-        .fetch(rawCategory.id, { cache: true, force: true })
-        .catch(() => null),
-      guild.channels
-        .fetch(rawLogChannel.id, { cache: true, force: true })
-        .catch(() => null),
-      fetchAndValidateRole(guild, rawSupportRole.id),
-      guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
-    ]);
-  if (
-    !categoryValue ||
-    categoryValue.guild.id !== guild.id ||
-    categoryValue.type !== ChannelType.GuildCategory
-  ) {
-    await replyPrivate(
-      interaction,
-      "That ticket category was deleted, changed type, or could not be freshly verified.",
-    );
-    return;
-  }
-  if (
-    !logChannelValue ||
-    logChannelValue.guild.id !== guild.id ||
-    (logChannelValue.type !== ChannelType.GuildText &&
-      logChannelValue.type !== ChannelType.GuildAnnouncement) ||
-    logChannelValue.isDMBased()
-  ) {
-    await replyPrivate(
-      interaction,
-      "That ticket log channel was deleted, changed type, or could not be freshly verified.",
-    );
-    return;
-  }
-  if (!supportRoleValue.valid) {
-    await replyPrivate(
-      interaction,
-      "That ticket support role was deleted or could not be freshly verified.",
-    );
-    return;
-  }
-  if (!botMember || botMember.guild.id !== guild.id) {
-    await replyPrivate(
-      interaction,
-      "Could not verify Superior's current server permissions.",
-    );
-    return;
-  }
-  const category = categoryValue;
-  const logChannel = logChannelValue;
-  const supportRole = supportRoleValue.role;
-  const managers = await inspectTicketManagerRoles(guild, runtime.storage);
-  const issues = validateTicketSetupResources(
-    guild,
-    category,
-    logChannel,
-    supportRole,
-    actor,
-    botMember,
-    managers.roles,
-  );
-  issues.push(...managers.issues);
-  if (issues.length > 0) {
-    await replyPrivate(interaction, `Ticket setup failed: ${issues.join(" ")}`);
-    return;
-  }
-  if (!runtime.isCurrent()) {
-    await replyPrivate(
-      interaction,
-      "This server was disabled or reconfigured. Please try again.",
-    );
-    return;
-  }
-  const previous = runtime.storage.getTicketConfiguration();
-  const previousDepartment = previous?.departmentId
-    ? runtime.storage.getTicketDepartment(previous.departmentId)
-    : null;
-  const previousBindingsVerified = previous
-    ? previousDepartment
-      ? previousDepartment.bindingsVerifiedAt !== null
-      : true
-    : false;
-  if (
-    cannotAssignSupportRole(
-      actor,
-      guild,
-      supportRole.id,
-      previousBindingsVerified ? previous?.supportRoleId : null,
-    )
-  ) {
-    await replyPrivate(
-      interaction,
-      "A `tickets.configure` delegate cannot select a support role they currently hold because that would also grant ticket-content access. Ask the server owner or an Administrator to make this access change.",
-    );
-    return;
-  }
-  if (
-    (!previousBindingsVerified || previous?.logChannelId !== logChannel.id) &&
-    !(await allowCompatibilityLogDestination(
-      interaction,
-      runtime,
-      logChannel,
-      supportRole.id,
-      actor.id,
-    ))
-  ) {
-    return;
-  }
-  const changesAccessRouting =
-    previous &&
-    (previous.categoryId !== category.id ||
-      previous.supportRoleId !== supportRole.id);
-  const changesLogRouting =
-    previous !== null && previous.logChannelId !== logChannel.id;
-  const changesActiveRouting = Boolean(
-    changesAccessRouting || changesLogRouting,
-  );
-  let replacementSafety: "present" | "missing" | "unavailable" | null = null;
-  let replacingMissingAccessResource = false;
-  if (changesAccessRouting && previous) {
-    replacementSafety = await inspectPreviousAccessResources(
-      guild,
-      previous.categoryId !== category.id ? previous.categoryId : null,
-      previous.supportRoleId !== supportRole.id ? previous.supportRoleId : null,
-    );
-    if (replacementSafety === "unavailable") {
-      await replyPrivate(
-        interaction,
-        "Superior could not verify the previous ticket category or support role with Discord. No configuration was changed; try again shortly.",
-      );
-      return;
-    }
-  }
-  if (!runtime.isCurrent()) {
-    await replyPrivate(
-      interaction,
-      "This server changed while the previous ticket resources were being checked. No configuration was changed.",
-    );
-    return;
-  }
-  const activeTicketCount = runtime.storage.countTickets([
-    "creating",
-    "open",
-    "closing",
-  ]);
-  if (changesActiveRouting && activeTicketCount > 0) {
-    if (changesLogRouting || replacementSafety === "present") {
-      await replyPrivate(
-        interaction,
-        `Superior did not change the ticket category, log channel, or support role because ${activeTicketCount} active ticket record${activeTicketCount === 1 ? " exists" : "s exist"}. Close those tickets before changing department routing.`,
-      );
-      return;
-    }
-    replacingMissingAccessResource = replacementSafety === "missing";
-  }
-  runtime.storage.upsertTicketConfiguration({
-    enabled: true,
-    categoryId: category.id,
-    logChannelId: logChannel.id,
-    supportRoleId: supportRole.id,
-  });
-  runtime.invalidate();
-  await replyPrivate(
-    interaction,
-    `Tickets are enabled. New channels will be created under **${escapeMarkdown(category.name)}**, support access uses <@&${supportRole.id}>, and closures will be logged in <#${logChannel.id}>.${replacingMissingAccessResource ? " The previous access resource was confirmed missing; run /ticket recover for each active ticket to reconcile its channel and controls." : ""}`,
-  );
-  runtime.storage.recordCommandMetric("ticket.setup");
-}
-
-function cannotAssignSupportRole(
-  actor: GuildMember,
-  guild: Guild,
-  selectedRoleId: string,
-  currentRoleId: string | null | undefined,
-): boolean {
-  if (selectedRoleId === currentRoleId) return false;
-  if (actor.guild.id !== guild.id) return true;
-  if (actor.id === guild.ownerId) return false;
-  if (actor.permissions.has(PermissionFlagsBits.Administrator)) return false;
-  return actor.roles.cache.has(selectedRoleId);
-}
-
-async function allowCompatibilityLogDestination(
-  interaction: ChatInputCommandInteraction,
-  runtime: GuildRuntime,
-  logChannel: GuildTextBasedChannel,
-  supportRoleId: string,
-  actorId: string,
-): Promise<boolean> {
-  const guild = interaction.guild;
-  if (!guild || guild.id !== runtime.guildId) return false;
-  const boundary = await inspectContentDestinationBoundary({
-    guild,
-    userId: actorId,
-    capability: "tickets.manage",
-    configuredRoleId: supportRoleId,
-    grants: runtime.storage,
-    channel: logChannel,
-  });
-  if (!runtime.isCurrent() || boundary === "unverifiable") {
-    await replyPrivate(
-      interaction,
-      "Superior could not verify the current ticket-content boundary. No routing was changed; try again.",
-    );
-    return false;
-  }
-  if (boundary === "visible-without-authority") {
-    await replyPrivate(
-      interaction,
-      "A configuration-only delegate cannot route ticket transcripts to a log channel they can read without ticket-management or support-role authority. Ask the server owner or an Administrator to choose that destination.",
-    );
-    return false;
-  }
-  return true;
-}
-
 async function showTicketStatus(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
@@ -363,7 +87,7 @@ async function showTicketStatus(
   if (!configuration) {
     await replyPrivate(
       interaction,
-      "Tickets are not configured. Run `/ticket setup` to choose a category, log channel, and support role.",
+      "Tickets are not configured. Use `/ticket department create`, add any form fields, then verify and enable the department.",
     );
     return;
   }
@@ -428,6 +152,13 @@ async function disableTickets(
       : "New tickets are already disabled in every department. Existing ticket records and channels were preserved.",
   );
   runtime.storage.recordCommandMetric("ticket.disable");
+  logDomainOutcome(
+    "ticket",
+    "disable-new-tickets",
+    runtime.guildId,
+    disabledCount > 0 ? "completed" : "already-disabled",
+    { succeededCount: disabledCount },
+  );
 }
 
 export async function handleTicketRecoveryCommand(
@@ -1094,6 +825,12 @@ async function recoverTicket(
     if (runtime.isCurrent()) {
       runtime.storage.recordCommandMetric("ticket.recover", false);
     }
+    logDomainOutcome("ticket", "recover", runtime.guildId, "failed", {
+      recordId: ticket.ticketId,
+      recordNumber: ticket.ticketNumber,
+      ...(channel ? { channelId: channel.id } : {}),
+      state: ticket.state,
+    });
     return;
   }
   await replyPrivate(
@@ -1101,6 +838,12 @@ async function recoverTicket(
     `${created ? "Recreated" : "Refreshed"} ticket #${ticket.ticketNumber} in <#${channel.id}>.${openerMissing ? " The opener is no longer a server member, so the recovered channel is staff-only." : ""}`,
   );
   runtime.storage.recordCommandMetric("ticket.recover");
+  logDomainOutcome("ticket", "recover", runtime.guildId, "completed", {
+    recordId: ticket.ticketId,
+    recordNumber: ticket.ticketNumber,
+    channelId: channel.id,
+    state: created ? "recreated" : "refreshed",
+  });
 }
 
 function ticketRoutingConfiguration(
@@ -1264,38 +1007,6 @@ function ticketDisplayContext(runtime: GuildRuntime, ticket: TicketRecord) {
       )
       .map(toTicketFormResponse),
   };
-}
-
-async function inspectPreviousAccessResources(
-  guild: Guild,
-  categoryId: string | null,
-  supportRoleId: string | null,
-): Promise<"missing" | "present" | "unavailable"> {
-  const checks = await Promise.all([
-    categoryId
-      ? fetchTicketChannel(guild, categoryId).then(({ status }) => status)
-      : Promise.resolve("missing" as const),
-    supportRoleId
-      ? fetchTicketRole(guild, supportRoleId)
-      : Promise.resolve("missing" as const),
-  ]);
-  if (checks.includes("unavailable")) return "unavailable";
-  return checks.includes("present") ? "present" : "missing";
-}
-
-async function fetchTicketRole(
-  guild: Guild,
-  roleId: string,
-): Promise<"missing" | "present" | "unavailable"> {
-  try {
-    const role = await guild.roles.fetch(roleId, { cache: true, force: true });
-    if (!role) return "missing";
-    return role.guild.id === guild.id ? "present" : "unavailable";
-  } catch (error) {
-    return isUnknownDiscordResourceError(error, 10_011)
-      ? "missing"
-      : "unavailable";
-  }
 }
 
 function isSameRecoverySnapshot(
@@ -1465,14 +1176,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }

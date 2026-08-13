@@ -113,6 +113,32 @@ function Expand-ZipChecked {
     )
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $DestinationPrefix = [System.IO.Path]::GetFullPath($DestinationDirectory).TrimEnd("\") + "\"
+    $Archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        [long]$TotalUncompressedBytes = 0
+        foreach ($Entry in $Archive.Entries) {
+            if ($Entry.Length -lt 0 -or $Entry.Length -gt 1GB) {
+                throw "Archive contains an oversized entry: $($Entry.FullName)"
+            }
+            $TotalUncompressedBytes += $Entry.Length
+            if ($TotalUncompressedBytes -gt 2GB) {
+                throw "Archive exceeds the extraction size limit: $ArchivePath"
+            }
+            $UnixMode = ($Entry.ExternalAttributes -shr 16) -band 0xF000
+            if ($UnixMode -eq 0xA000) {
+                throw "Archive contains a symbolic link: $($Entry.FullName)"
+            }
+            $RelativeName = $Entry.FullName.Replace("/", "\")
+            $Destination = [System.IO.Path]::GetFullPath((Join-Path $DestinationDirectory $RelativeName))
+            if (-not $Destination.StartsWith($DestinationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Archive entry escapes its extraction directory: $($Entry.FullName)"
+            }
+        }
+    }
+    finally {
+        $Archive.Dispose()
+    }
     [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $DestinationDirectory)
 }
 
@@ -139,6 +165,7 @@ if ($Package.name -ne "superior-discord-bot") {
 if ($Package.version -notmatch "^\d+\.\d+\.\d+$") {
     throw "Package version must use semantic versioning: $($Package.version)"
 }
+$AssemblyVersion = "$($Package.version).0"
 
 $ArtifactName = "SuperiorBot-$($Package.version)-win-x64"
 $StageRoot = Join-Path $WorkRoot $ArtifactName
@@ -228,6 +255,14 @@ try {
     if (Test-Path -LiteralPath (Join-Path $DistRoot "tests")) {
         throw "Production build contains compiled tests."
     }
+    $SourceIdentityScript = Join-Path $WindowsDirectory "compute-source-identity.mjs"
+    if (-not (Test-Path -LiteralPath $SourceIdentityScript -PathType Leaf)) {
+        throw "Cannot find the release source-identity tool: $SourceIdentityScript"
+    }
+    $SourceIdentity = (& $BundledNode $SourceIdentityScript).Trim()
+    if ($LASTEXITCODE -ne 0 -or $SourceIdentity -notmatch "^[a-f0-9]{64}$") {
+        throw "Release source identity generation failed."
+    }
 
     $NpmCli = Join-Path $ExtractedNodeRoot "node_modules\npm\bin\npm-cli.js"
     if (-not (Test-Path -LiteralPath $NpmCli -PathType Leaf)) {
@@ -280,6 +315,7 @@ try {
     Copy-Item -LiteralPath $BundledNode -Destination $RuntimeRoot
     Copy-Item -LiteralPath (Join-Path $ExtractedNodeRoot "LICENSE") -Destination (Join-Path $RuntimeRoot "NODE-LICENSE.txt")
     Copy-Item -LiteralPath (Join-Path $WindowsDirectory "check-portable.mjs") -Destination $ToolsRoot
+    Copy-Item -LiteralPath (Join-Path $WindowsDirectory "diagnostics.mjs") -Destination $ToolsRoot
     Copy-Item -LiteralPath (Join-Path $WindowsDirectory "templates\Start Superior Bot.cmd") -Destination $StageRoot
     Copy-Item -LiteralPath (Join-Path $WindowsDirectory "PORTABLE-README.txt") -Destination (Join-Path $StageRoot "README-WINDOWS.txt")
     Copy-Item -LiteralPath (Join-Path $RepositoryRoot ".env.example") -Destination $StageRoot
@@ -298,7 +334,8 @@ try {
         "REFERENCE_ASSEMBLIES_VERSION=$ReferenceAssembliesVersion",
         "REFERENCE_ASSEMBLIES_PACKAGE_SHA256=$($ReferenceAssembliesPackageSha256.ToLowerInvariant())",
         "BETTER_SQLITE3_BINARY_SHA256=$($BetterSqlite3BinarySha256.ToLowerInvariant())",
-        "PACKAGE_LOCK_SHA256=$PackageLockHash"
+        "PACKAGE_LOCK_SHA256=$PackageLockHash",
+        "SOURCE_SHA256=$SourceIdentity"
     )
     [System.IO.File]::WriteAllLines((Join-Path $StageRoot "BUILD-INFO.txt"), $BuildInfo, $Utf8NoBom)
 
@@ -327,6 +364,29 @@ try {
     $LauncherText = [System.IO.File]::ReadAllText($LauncherSource)
     $LauncherText = $LauncherText.Replace("`r`n", "`n").Replace("`r", "`n")
     [System.IO.File]::WriteAllText($CanonicalLauncherSource, $LauncherText, $Utf8NoBom)
+    $LauncherSupportSource = Join-Path $WindowsDirectory "launcher\LauncherSupport.cs"
+    $CanonicalLauncherSupportSource = Join-Path $LauncherSourceRoot "LauncherSupport.cs"
+    $LauncherSupportText = [System.IO.File]::ReadAllText($LauncherSupportSource)
+    $LauncherSupportText = $LauncherSupportText.Replace("`r`n", "`n").Replace("`r", "`n")
+    [System.IO.File]::WriteAllText($CanonicalLauncherSupportSource, $LauncherSupportText, $Utf8NoBom)
+    $BuildIdentitySource = Join-Path $LauncherSourceRoot "BuildIdentity.cs"
+    $BuildIdentityText = @"
+using System.Reflection;
+
+[assembly: AssemblyTitle("Superior Bot")]
+[assembly: AssemblyProduct("Superior Bot")]
+[assembly: AssemblyCompany("Superior")]
+[assembly: AssemblyVersion("$AssemblyVersion")]
+[assembly: AssemblyFileVersion("$AssemblyVersion")]
+[assembly: AssemblyInformationalVersion("$($Package.version)")]
+
+internal static class BuildIdentity
+{
+    public const string Version = "$($Package.version)";
+}
+"@
+    $BuildIdentityText = $BuildIdentityText.Replace("`r`n", "`n").Replace("`r", "`n")
+    [System.IO.File]::WriteAllText($BuildIdentitySource, $BuildIdentityText, $Utf8NoBom)
 
     Invoke-NativeChecked -Executable $Compiler -Arguments @(
         "/nologo",
@@ -343,7 +403,9 @@ try {
         "/reference:$($CompilerReferences[1])",
         "/reference:$($CompilerReferences[2])",
         "/out:$StageRoot\SuperiorBot.exe",
-        $CanonicalLauncherSource
+        $CanonicalLauncherSource,
+        $CanonicalLauncherSupportSource,
+        $BuildIdentitySource
     ) -WorkingDirectory $RepositoryRoot
 
     $NativeAddon = Get-ChildItem -LiteralPath (Join-Path $AppRoot "node_modules\better-sqlite3") -Filter "better_sqlite3.node" -Recurse -File
@@ -358,12 +420,21 @@ try {
     $Forbidden = Get-ChildItem -LiteralPath $StageRoot -Recurse -Force | Where-Object {
         $Relative = Get-RelativeFileName -BaseDirectory $StageRoot -FileName $_.FullName
         $_.Name -eq ".env" -or
-        $_.Extension -in @(".db", ".sqlite", ".sqlite3", ".backup", ".bak") -or
+        ($_.Name.StartsWith(".env") -and $_.Name -ne ".env.example") -or
+        $_.Name -eq "mudae-watch.private.json" -or
+        $_.Name.EndsWith(".private.json") -or
+        $_.Extension -in @(".db", ".sqlite", ".sqlite3", ".backup", ".bak", ".log") -or
         $Relative -match "(^|/)(data|backups)(/|$)" -or
         $Relative -match "^app/(dist/)?tests(/|$)"
     }
     if (@($Forbidden).Count -gt 0) {
         throw "Portable staging contains forbidden files: $(@($Forbidden.FullName) -join ', ')"
+    }
+    $ReparsePoints = Get-ChildItem -LiteralPath $StageRoot -Recurse -Force | Where-Object {
+        ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+    }
+    if (@($ReparsePoints).Count -gt 0) {
+        throw "Portable staging contains reparse points: $(@($ReparsePoints.FullName) -join ', ')"
     }
     $MigrationCompatibilityFiles = @(
         Get-ChildItem -LiteralPath (Join-Path $AppRoot "dist\src") -Recurse -File |
@@ -441,7 +512,9 @@ try {
             "/reference:$($CompilerReferences[4])",
             "/resource:$FinalArchive,SuperiorBot.Payload.zip",
             "/out:$StandaloneWorkOutput",
-            $CanonicalStandaloneSource
+            $CanonicalStandaloneSource,
+            $CanonicalLauncherSupportSource,
+            $BuildIdentitySource
         ) -WorkingDirectory $RepositoryRoot
 
         $StandaloneParent = Split-Path -Parent $StandaloneTarget

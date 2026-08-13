@@ -35,13 +35,7 @@ export const SAFE_ALLOWED_MENTIONS: MessageMentionOptions = Object.freeze({
 
 interface ActiveMessageSettings {
   enabled: boolean;
-  reviewRequired: boolean;
   timezone: string;
-  features: {
-    chat: boolean;
-    replyModeration: boolean;
-    activityMetrics: boolean;
-  };
   channels: {
     log: string | null;
   };
@@ -139,7 +133,7 @@ export async function handleMessageCreate(
     return;
   }
   const settings = getActiveSettings(runtime);
-  if (!settings.enabled || settings.reviewRequired) {
+  if (!settings.enabled) {
     return;
   }
 
@@ -155,16 +149,13 @@ export async function handleMessageCreate(
       addressOptions,
     );
     if (moderation) {
-      if (
-        settings.features.replyModeration &&
-        isGuildAdministrator(member, guildId)
-      ) {
+      if (isGuildAdministrator(member, guildId)) {
         await handleReplyModeration(message, member, moderation, runtime);
       }
       return;
     }
 
-    if (!settings.features.chat || !runtime.isCurrent()) {
+    if (!runtime.isCurrent()) {
       return;
     }
 
@@ -207,7 +198,7 @@ export async function handleMessageCreate(
       recordCommandMetricSafely(runtime, `superior.chat.${intent.type}`);
     }
   } finally {
-    if (settings.features.activityMetrics && runtime.isCurrent()) {
+    if (runtime.isCurrent()) {
       incrementUserMetricSafely(runtime, member.id, "messages_sent");
     }
   }
@@ -271,11 +262,7 @@ export async function handleReactionAdd(
     return;
   }
   const settings = getActiveSettings(runtime);
-  if (
-    !settings.enabled ||
-    settings.reviewRequired ||
-    !settings.features.activityMetrics
-  ) {
+  if (!settings.enabled) {
     return;
   }
 

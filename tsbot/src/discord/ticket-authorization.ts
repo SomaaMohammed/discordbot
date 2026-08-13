@@ -151,7 +151,7 @@ export function evaluatePanelManagement(
 /** Shared owner/Administrator gate for all current guild configuration. */
 export const evaluateGuildManagement = evaluatePanelManagement;
 
-/** Ticket setup uses the same policy as all other panel configuration. */
+/** Ticket configuration uses the same policy as all other panel configuration. */
 export const evaluateTicketConfiguration = evaluatePanelManagement;
 
 /** Support-role-or-owner-or-Administrator policy for ticket staff actions. */

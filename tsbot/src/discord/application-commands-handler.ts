@@ -1,5 +1,6 @@
 import {
   ChannelType,
+  MessageFlags,
   escapeMarkdown,
   type AutocompleteInteraction,
   type ChatInputCommandInteraction,
@@ -47,6 +48,7 @@ import {
   inspectApplicationResources,
 } from "./phase2-permissions.js";
 import { postFeatureLauncher } from "./preset-panels.js";
+import { logDomainOutcome } from "./domain-outcomes.js";
 
 const PAGE_SIZE = 10;
 
@@ -319,6 +321,13 @@ async function handleFormConfiguration(
       `Created disabled application form **${escapeMarkdown(saved.displayName)}** (\`${saved.slug}\`). Add 1-5 questions, then enable it.`,
     );
     runtime.storage.recordCommandMetric("application.form.create");
+    logDomainOutcome(
+      "application",
+      "form-create",
+      runtime.guildId,
+      "completed-disabled",
+      { recordId: saved.formId, state: "disabled" },
+    );
     return;
   }
 
@@ -377,6 +386,13 @@ async function handleFormConfiguration(
       `Updated **${escapeMarkdown(saved!.displayName)}** and disabled it pending review.`,
     );
     runtime.storage.recordCommandMetric("application.form.edit");
+    logDomainOutcome(
+      "application",
+      "form-edit",
+      runtime.guildId,
+      "completed-disabled",
+      { recordId: saved!.formId, state: "disabled" },
+    );
     return;
   }
   if (subcommand === "enable") {
@@ -456,6 +472,17 @@ async function handleFormConfiguration(
       `Enabled application form **${escapeMarkdown(current.displayName)}**.`,
     );
     runtime.storage.recordCommandMetric("application.form.enable");
+    logDomainOutcome(
+      "application",
+      "form-enable",
+      runtime.guildId,
+      "completed",
+      {
+        recordId: current.formId,
+        channelId: current.reviewChannelId,
+        state: "enabled",
+      },
+    );
     return;
   }
   if (subcommand === "disable") {
@@ -473,6 +500,13 @@ async function handleFormConfiguration(
       `Disabled application form **${escapeMarkdown(current.displayName)}**.`,
     );
     runtime.storage.recordCommandMetric("application.form.disable");
+    logDomainOutcome(
+      "application",
+      "form-disable",
+      runtime.guildId,
+      "completed",
+      { recordId: current.formId, state: "disabled" },
+    );
     return;
   }
   if (subcommand === "delete") {
@@ -494,6 +528,13 @@ async function handleFormConfiguration(
     runtime.storage.recordCommandMetric(
       "application.form.delete",
       result.status === "deleted",
+    );
+    logDomainOutcome(
+      "application",
+      "form-delete",
+      runtime.guildId,
+      result.status === "deleted" ? "completed" : "rejected-has-history",
+      { recordId: current.formId },
     );
     return;
   }
@@ -1075,6 +1116,11 @@ async function withdrawApplication(
       : `Application #${number} was withdrawn.`,
   );
   runtime.storage.recordCommandMetric("application.withdraw");
+  logDomainOutcome("application", "withdraw", runtime.guildId, result.status, {
+    recordId: result.application.applicationId,
+    recordNumber: result.application.applicationNumber,
+    state: result.application.state,
+  });
 }
 
 async function recoverApplication(
@@ -1138,6 +1184,17 @@ async function recoverApplication(
       interaction,
       `Application #${number} is healthy and refreshed.`,
     );
+    logDomainOutcome(
+      "application",
+      "recover",
+      runtime.guildId,
+      "healthy-refreshed",
+      {
+        recordId: application.applicationId,
+        recordNumber: application.applicationNumber,
+        state: application.deliveryState,
+      },
+    );
     return;
   }
   application =
@@ -1183,12 +1240,29 @@ async function recoverApplication(
       `Application #${number} was reposted in <#${published.message.channelId}>.`,
     );
     runtime.storage.recordCommandMetric("application.recover");
+    logDomainOutcome("application", "recover", runtime.guildId, "delivered", {
+      recordId: published.application.applicationId,
+      recordNumber: published.application.applicationNumber,
+      channelId: published.message.channelId,
+      state: published.application.state,
+    });
   } catch (error) {
     await replyPrivate(
       interaction,
       `Application recovery failed safely: ${errorMessage(error)}`,
     );
     runtime.storage.recordCommandMetric("application.recover", false);
+    logDomainOutcome(
+      "application",
+      "recover",
+      runtime.guildId,
+      "failed-delivery",
+      {
+        recordId: application.applicationId,
+        recordNumber: application.applicationNumber,
+        state: application.deliveryState,
+      },
+    );
   }
 }
 
@@ -1383,7 +1457,7 @@ async function deferPrivate(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -1398,14 +1472,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }

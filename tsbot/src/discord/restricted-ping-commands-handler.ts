@@ -1,6 +1,7 @@
 import {
   ChannelType,
   EmbedBuilder,
+  MessageFlags,
   escapeMarkdown,
   type ChatInputCommandInteraction,
   type Guild,
@@ -882,14 +883,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       ...options,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     ...options,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }
@@ -898,6 +899,6 @@ async function deferPrivate(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
 }

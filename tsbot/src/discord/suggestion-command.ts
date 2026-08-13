@@ -51,7 +51,7 @@ export function buildSuggestionCommandDefinition(): SlashCommandSubcommandsOnlyB
     )
     .addSubcommand((subcommand) =>
       subcommand
-        .setName("setup")
+        .setName("configure")
         .setDescription("Configure suggestion routing and rate limits")
         .addChannelOption((option) =>
           option

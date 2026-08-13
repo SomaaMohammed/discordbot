@@ -1,5 +1,6 @@
 import {
   Collection,
+  MessageFlags,
   PermissionFlagsBits,
   escapeMarkdown,
   type ChatInputCommandInteraction,
@@ -10,6 +11,7 @@ import {
   type TextChannel,
 } from "discord.js";
 import type { GuildRuntime } from "../runtime.js";
+import { logDomainOutcome } from "./domain-outcomes.js";
 
 const BULK_DELETE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1_000;
 const MAX_PURGE_SCAN = 500;
@@ -97,6 +99,13 @@ async function handlePurge(
   try {
     messages = await context.channel.messages.fetch({ limit: amount });
   } catch {
+    logDomainOutcome(
+      "moderation",
+      "purge",
+      runtime.guildId,
+      "failed-history-fetch",
+      { attemptedCount: amount },
+    );
     await interaction.editReply(
       formatPurgeResult({
         requested: amount,
@@ -140,6 +149,19 @@ async function handlePurge(
   });
   await interaction.editReply(report);
   runtime.storage.recordCommandMetric("superior.purge", !deleteFailed);
+  logDomainOutcome(
+    "moderation",
+    "purge",
+    runtime.guildId,
+    deleteFailed ? "failed-discord-delete" : "completed",
+    {
+      channelId: context.channel.id,
+      attemptedCount: eligible.size,
+      succeededCount: deleted,
+      failedCount: apiSkipped,
+      processedCount: messages.size,
+    },
+  );
   await sendModerationLog(
     runtime,
     context.channel,
@@ -232,6 +254,23 @@ async function handlePurgeUser(
   runtime.storage.recordCommandMetric(
     "superior.purgeuser",
     !fetchFailed && !deleteFailed,
+  );
+  logDomainOutcome(
+    "moderation",
+    "purge-user",
+    runtime.guildId,
+    deleteFailed
+      ? "failed-discord-delete"
+      : fetchFailed
+        ? "partial-history-fetch"
+        : "completed",
+    {
+      channelId: context.channel.id,
+      attemptedCount: eligible.length,
+      succeededCount: deleted,
+      failedCount: apiSkipped,
+      processedCount: scanned,
+    },
   );
   await sendModerationLog(
     runtime,
@@ -385,6 +424,13 @@ async function handleLock(
   runtime.storage.recordCommandMetric(
     `superior.${unlocking ? "unlock" : "lock"}`,
   );
+  logDomainOutcome(
+    "moderation",
+    unlocking ? "unlock-channel" : "lock-channel",
+    runtime.guildId,
+    "completed",
+    { channelId: channel.id },
+  );
   await sendModerationLog(runtime, channel, interaction.user.id, report);
 }
 
@@ -426,6 +472,10 @@ async function handleSlowmode(
     `Slowmode for <#${channel.id}> is now **${seconds} seconds**.`,
   );
   runtime.storage.recordCommandMetric("superior.slowmode");
+  logDomainOutcome("moderation", "slowmode", runtime.guildId, "completed", {
+    channelId: channel.id,
+    state: seconds === 0 ? "disabled" : "enabled",
+  });
 }
 
 async function handleSingleTimeout(
@@ -475,6 +525,13 @@ async function handleSingleTimeout(
   );
   runtime.storage.recordCommandMetric(
     `superior.${removing ? "untimeout" : "timeout"}`,
+  );
+  logDomainOutcome(
+    "moderation",
+    removing ? "remove-timeout" : "apply-timeout",
+    runtime.guildId,
+    "completed",
+    { succeededCount: 1 },
   );
 }
 
@@ -543,6 +600,22 @@ async function handleManyTimeouts(
       failures.length === 0,
     );
   }
+  logDomainOutcome(
+    "moderation",
+    removing ? "bulk-remove-timeout" : "bulk-apply-timeout",
+    runtime.guildId,
+    cancelled > 0
+      ? "cancelled-partial"
+      : failures.length > 0
+        ? "partial-api-failures"
+        : "completed",
+    {
+      attemptedCount: ids.length,
+      succeededCount: applied,
+      failedCount: failures.length,
+      processedCount: eligible.length,
+    },
+  );
 }
 
 async function handleAllTimeouts(
@@ -568,6 +641,13 @@ async function handleAllTimeouts(
   );
   const cap = runtime.settings.limits.bulkModerationTargetCap;
   if (eligible.length > cap) {
+    logDomainOutcome(
+      "moderation",
+      removing ? "server-remove-timeout" : "server-apply-timeout",
+      runtime.guildId,
+      "rejected-safety-cap",
+      { attemptedCount: eligible.length, totalCount: cap },
+    );
     await interaction.editReply(
       `Refused: **${eligible.length}** eligible targets exceeds this server's finite cap of **${cap}**.`,
     );
@@ -612,6 +692,22 @@ async function handleAllTimeouts(
       failed === 0,
     );
   }
+  logDomainOutcome(
+    "moderation",
+    removing ? "server-remove-timeout" : "server-apply-timeout",
+    runtime.guildId,
+    cancelled > 0
+      ? "cancelled-partial"
+      : failed > 0
+        ? "partial-api-failures"
+        : "completed",
+    {
+      attemptedCount: eligible.length,
+      succeededCount: applied,
+      failedCount: failed,
+      processedCount: eligible.length - cancelled,
+    },
+  );
 }
 
 function getTimeoutIssue(
@@ -725,14 +821,14 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
 }
@@ -741,7 +837,7 @@ async function deferPrivate(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
 }
 

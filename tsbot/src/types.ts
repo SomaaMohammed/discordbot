@@ -14,16 +14,9 @@ export interface GuildGreetingProfile {
 }
 
 export interface GuildSettings {
-  version: 2;
+  version: 3;
   enabled: boolean;
-  reviewRequired: boolean;
   timezone: string;
-  features: {
-    chat: boolean;
-    replyModeration: boolean;
-    greetings: boolean;
-    activityMetrics: boolean;
-  };
   channels: {
     log: string | null;
   };
@@ -904,7 +897,7 @@ export interface ApplicationEvent {
 
 /** Portable, tenant-scoped export of the active product data model. */
 export interface GuildDataExport {
-  formatVersion: 5;
+  formatVersion: 6;
   guildId: string;
   exportedAt: string;
   metadata: GuildRecord;

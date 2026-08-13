@@ -4,9 +4,14 @@ import {
   isDiscordSnowflake,
   parseGuildSettingsJson,
 } from "../guild-settings.js";
+import {
+  LEGACY_GUILD_SETTINGS_VERSION,
+  parseLegacyGuildSettingsV2Json,
+} from "./guild-settings-v2.js";
 import { isActiveMetricKey } from "./metric-keys.js";
 
-export const CURRENT_SCHEMA_VERSION = 7 as const;
+export const CURRENT_SCHEMA_VERSION = 8 as const;
+export const LEGACY_V7_SCHEMA_VERSION = 7 as const;
 export const LEGACY_V6_SCHEMA_VERSION = 6 as const;
 export const LEGACY_V5_SCHEMA_VERSION = 5 as const;
 export const LEGACY_V4_SCHEMA_VERSION = 4 as const;
@@ -48,7 +53,8 @@ export type DatabaseSchemaKind =
   | "legacy-v4"
   | "legacy-v5"
   | "legacy-v6"
-  | "current-v7"
+  | "legacy-v7"
+  | "current-v8"
   | "unknown";
 
 export const SCHEMA_MIGRATIONS_TABLE_SQL = `
@@ -78,6 +84,16 @@ export const GUILD_SETTINGS_TABLE_SQL = `
 CREATE TABLE guild_settings (
   guild_id TEXT NOT NULL PRIMARY KEY,
   settings_version INTEGER NOT NULL CHECK (settings_version = 2),
+  settings_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const V8_GUILD_SETTINGS_TABLE_SQL = `
+CREATE TABLE guild_settings (
+  guild_id TEXT NOT NULL PRIMARY KEY,
+  settings_version INTEGER NOT NULL CHECK (settings_version = ${GUILD_SETTINGS_VERSION}),
   settings_json TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
@@ -1561,6 +1577,19 @@ const V7_INDEX_SQL: Record<(typeof V7_EXPLICIT_INDEX_NAMES)[number], string> = {
     MUDAE_WATCH_DELIVERIES_RESERVATION_INDEX_SQL,
 };
 
+/** Schema v8 changes only the persisted guild-settings generation. */
+export const V8_TABLE_NAMES = [...V7_TABLE_NAMES] as const;
+export const V8_EXPLICIT_INDEX_NAMES = [...V7_EXPLICIT_INDEX_NAMES] as const;
+
+const V8_TABLE_SQL: Record<(typeof V8_TABLE_NAMES)[number], string> = {
+  ...V7_TABLE_SQL,
+  guild_settings: V8_GUILD_SETTINGS_TABLE_SQL,
+};
+
+const V8_INDEX_SQL: Record<(typeof V8_EXPLICIT_INDEX_NAMES)[number], string> = {
+  ...V7_INDEX_SQL,
+};
+
 export const V1_TABLE_NAMES = [
   "kv",
   "posts",
@@ -1870,6 +1899,21 @@ export function createV7Objects(db: Database.Database): void {
   createV7OperationalObjects(db);
 }
 
+/** Creates the active schema-v8 layout for a new, empty database. */
+export function createV8Objects(db: Database.Database): void {
+  for (const table of V8_TABLE_NAMES) {
+    db.exec(V8_TABLE_SQL[table]);
+  }
+  for (const index of V8_EXPLICIT_INDEX_NAMES) {
+    db.exec(V8_INDEX_SQL[index]);
+  }
+}
+
+/** Creates the v8 settings table after the frozen v7 table was renamed. */
+export function createV8GuildSettingsObject(db: Database.Database): void {
+  db.exec(V8_GUILD_SETTINGS_TABLE_SQL);
+}
+
 export function recordV4SchemaVersion(
   db: Database.Database,
   appliedAt: string,
@@ -1895,6 +1939,15 @@ export function recordV6SchemaVersion(
   db.prepare(
     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
   ).run(LEGACY_V6_SCHEMA_VERSION, appliedAt);
+}
+
+export function recordV7SchemaVersion(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  db.prepare(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+  ).run(LEGACY_V7_SCHEMA_VERSION, appliedAt);
 }
 
 export function recordCurrentSchemaVersion(
@@ -1974,8 +2027,23 @@ export function initializeV7Schema(
 ): void {
   const initialize = db.transaction(() => {
     createV7Objects(db);
-    recordCurrentSchemaVersion(db, appliedAt);
+    recordV7SchemaVersion(db, appliedAt);
     const issues = validateV7Schema(db);
+    if (issues.length > 0) {
+      throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
+    }
+  });
+  initialize.immediate();
+}
+
+export function initializeV8Schema(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  const initialize = db.transaction(() => {
+    createV8Objects(db);
+    recordCurrentSchemaVersion(db, appliedAt);
+    const issues = validateV8Schema(db);
     if (issues.length > 0) {
       throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
     }
@@ -2003,8 +2071,10 @@ export function detectDatabaseSchema(
     .map((row) => row.name)
     .sort();
 
-  if (sameStrings(tables, [...V7_TABLE_NAMES].sort())) {
-    return validateV7Schema(db).length === 0 ? "current-v7" : "unknown";
+  if (sameStrings(tables, [...V8_TABLE_NAMES].sort())) {
+    if (validateV8Schema(db).length === 0) return "current-v8";
+    if (validateV7Schema(db).length === 0) return "legacy-v7";
+    return "unknown";
   }
   if (sameStrings(tables, [...V6_TABLE_NAMES].sort())) {
     return validateV6Schema(db).length === 0 ? "legacy-v6" : "unknown";
@@ -2345,25 +2415,25 @@ export function validateV7Schema(db: Database.Database): string[] {
     .all() as Array<{ version: number; applied_at: string }>;
   const versionNumbers = versions.map((row) => row.version);
   const validVersionSequence = [
-    [CURRENT_SCHEMA_VERSION],
-    [LEGACY_V6_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION],
+    [LEGACY_V7_SCHEMA_VERSION],
+    [LEGACY_V6_SCHEMA_VERSION, LEGACY_V7_SCHEMA_VERSION],
     [
       LEGACY_V5_SCHEMA_VERSION,
       LEGACY_V6_SCHEMA_VERSION,
-      CURRENT_SCHEMA_VERSION,
+      LEGACY_V7_SCHEMA_VERSION,
     ],
     [
       LEGACY_V4_SCHEMA_VERSION,
       LEGACY_V5_SCHEMA_VERSION,
       LEGACY_V6_SCHEMA_VERSION,
-      CURRENT_SCHEMA_VERSION,
+      LEGACY_V7_SCHEMA_VERSION,
     ],
     [
       LEGACY_V3_SCHEMA_VERSION,
       LEGACY_V4_SCHEMA_VERSION,
       LEGACY_V5_SCHEMA_VERSION,
       LEGACY_V6_SCHEMA_VERSION,
-      CURRENT_SCHEMA_VERSION,
+      LEGACY_V7_SCHEMA_VERSION,
     ],
   ].some(
     (expected) =>
@@ -2380,6 +2450,74 @@ export function validateV7Schema(db: Database.Database): string[] {
   }
 
   validateV3Data(db, issues);
+  validateV5Data(db, issues);
+  validateV6Data(db, issues);
+  validateV7Data(db, issues);
+  validateDatabaseHealth(db, issues);
+  return issues;
+}
+
+export function validateV8Schema(db: Database.Database): string[] {
+  const issues = validateExactObjects(
+    db,
+    [...V8_TABLE_NAMES],
+    [...V8_EXPLICIT_INDEX_NAMES],
+  );
+  if (issues.length > 0) return issues;
+
+  validateSqlDefinitions(db, V8_TABLE_SQL, "table", issues);
+  validateSqlDefinitions(db, V8_INDEX_SQL, "index", issues);
+
+  const versions = db
+    .prepare(
+      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
+    )
+    .all() as Array<{ version: number; applied_at: string }>;
+  const versionNumbers = versions.map((row) => row.version);
+  const validVersionSequence = [
+    [CURRENT_SCHEMA_VERSION],
+    [LEGACY_V7_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION],
+    [
+      LEGACY_V6_SCHEMA_VERSION,
+      LEGACY_V7_SCHEMA_VERSION,
+      CURRENT_SCHEMA_VERSION,
+    ],
+    [
+      LEGACY_V5_SCHEMA_VERSION,
+      LEGACY_V6_SCHEMA_VERSION,
+      LEGACY_V7_SCHEMA_VERSION,
+      CURRENT_SCHEMA_VERSION,
+    ],
+    [
+      LEGACY_V4_SCHEMA_VERSION,
+      LEGACY_V5_SCHEMA_VERSION,
+      LEGACY_V6_SCHEMA_VERSION,
+      LEGACY_V7_SCHEMA_VERSION,
+      CURRENT_SCHEMA_VERSION,
+    ],
+    [
+      LEGACY_V3_SCHEMA_VERSION,
+      LEGACY_V4_SCHEMA_VERSION,
+      LEGACY_V5_SCHEMA_VERSION,
+      LEGACY_V6_SCHEMA_VERSION,
+      LEGACY_V7_SCHEMA_VERSION,
+      CURRENT_SCHEMA_VERSION,
+    ],
+  ].some(
+    (expected) =>
+      expected.length === versionNumbers.length &&
+      expected.every((version, index) => versionNumbers[index] === version),
+  );
+  if (
+    !validVersionSequence ||
+    versions.some((row) => !isValidTimestamp(row.applied_at))
+  ) {
+    issues.push(
+      "schema_migrations must contain version 8, optionally following a complete supported sequence ending at version 7",
+    );
+  }
+
+  validateV8CoreData(db, issues);
   validateV5Data(db, issues);
   validateV6Data(db, issues);
   validateV7Data(db, issues);
@@ -2481,6 +2619,24 @@ function validateV1Schema(db: Database.Database): string[] {
 }
 
 function validateV3Data(db: Database.Database, issues: string[]): void {
+  validateCoreData(
+    db,
+    issues,
+    LEGACY_GUILD_SETTINGS_VERSION,
+    parseLegacyGuildSettingsV2Json,
+  );
+}
+
+function validateV8CoreData(db: Database.Database, issues: string[]): void {
+  validateCoreData(db, issues, GUILD_SETTINGS_VERSION, parseGuildSettingsJson);
+}
+
+function validateCoreData(
+  db: Database.Database,
+  issues: string[],
+  settingsVersion: number,
+  parseSettings: (raw: string) => { enabled: boolean },
+): void {
   const guilds = db
     .prepare(
       "SELECT guild_id, enabled, joined_at, left_at, created_at, updated_at FROM guilds ORDER BY guild_id",
@@ -2522,12 +2678,14 @@ function validateV3Data(db: Database.Database, issues: string[]): void {
       issues.push(`settings row ${row.guild_id} has no guild`);
       continue;
     }
-    if (row.settings_version !== GUILD_SETTINGS_VERSION) {
-      issues.push(`guild ${row.guild_id} settings version is not 2`);
+    if (row.settings_version !== settingsVersion) {
+      issues.push(
+        `guild ${row.guild_id} settings version is not ${settingsVersion}`,
+      );
       continue;
     }
     try {
-      const settings = parseGuildSettingsJson(row.settings_json);
+      const settings = parseSettings(row.settings_json);
       if (settings.enabled !== Boolean(guild.enabled)) {
         issues.push(`guild ${row.guild_id} enabled state is inconsistent`);
       }

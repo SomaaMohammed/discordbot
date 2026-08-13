@@ -54,8 +54,8 @@ import {
 } from "./metric-keys.js";
 import {
   detectDatabaseSchema,
-  initializeV7Schema,
-  validateV7Schema,
+  initializeV8Schema,
+  validateV8Schema,
 } from "./schema.js";
 import { GuildOperationalRepository } from "./operational-repository.js";
 import { GuildAccessRepository } from "./access-repository.js";
@@ -204,7 +204,7 @@ export class BotStorage {
       const memory = new Database(":memory:", { timeout: 5_000 });
       try {
         memory.pragma("foreign_keys = ON");
-        initializeV7Schema(memory, utcNow());
+        initializeV8Schema(memory, utcNow());
         this.db = memory;
       } catch (error) {
         memory.close();
@@ -230,7 +230,7 @@ export class BotStorage {
 
     if (schema === "legacy-v1") {
       throw new Error(
-        "Database schema v1 is not supported by v7 startup. Upgrade through the final v4 release to schema v2, create an offline backup, then run the v7 migration command.",
+        "Database schema v1 is not supported by v8 startup. Upgrade through the final v4 release to schema v2, create an offline backup, stop every older executable, then run the current migration command.",
       );
     }
     if (schema === "legacy-v2") {
@@ -258,6 +258,11 @@ export class BotStorage {
         `Database schema v6 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
       );
     }
+    if (schema === "legacy-v7") {
+      throw new Error(
+        `Database schema v7 requires an explicit migration to v8. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}. After migration, do not run a pre-6.0.0 executable against this database.`,
+      );
+    }
     if (schema === "unknown") {
       throw new Error(
         "Database schema is unknown or incomplete; startup refused without modifying it",
@@ -268,9 +273,9 @@ export class BotStorage {
     try {
       writable.pragma("foreign_keys = ON");
       if (schema === "empty") {
-        initializeV7Schema(writable, utcNow());
+        initializeV8Schema(writable, utcNow());
       } else {
-        const issues = validateV7Schema(writable);
+        const issues = validateV8Schema(writable);
         if (issues.length > 0) {
           throw new Error(
             `Database changed after read-only classification: ${issues.join("; ")}`,
@@ -319,7 +324,7 @@ export class BotStorage {
       db.prepare(
         `INSERT INTO guilds (
            guild_id, enabled, name, joined_at, left_at, created_at, updated_at
-         ) VALUES (?, 0, ?, ?, NULL, ?, ?)
+         ) VALUES (?, 1, ?, ?, NULL, ?, ?)
          ON CONFLICT(guild_id) DO UPDATE SET
            name = COALESCE(excluded.name, guilds.name),
            joined_at = COALESCE(guilds.joined_at, excluded.joined_at),
@@ -352,16 +357,16 @@ export class BotStorage {
       db.prepare(
         `INSERT INTO guilds (
            guild_id, enabled, name, joined_at, left_at, created_at, updated_at
-         ) VALUES (?, 0, ?, ?, NULL, ?, ?)
+         ) VALUES (?, 1, ?, ?, NULL, ?, ?)
          ON CONFLICT(guild_id) DO UPDATE SET
-           enabled = 0,
+           enabled = 1,
            name = COALESCE(excluded.name, guilds.name),
            joined_at = excluded.joined_at,
            left_at = NULL,
            updated_at = excluded.updated_at`,
       ).run(normalized, guildName, joinedAt, now, now);
       const settings = priorSettings ?? createDefaultGuildSettings();
-      settings.enabled = false;
+      settings.enabled = true;
       this.upsertSettings(normalized, settings, now);
     });
     reactivate.immediate();
@@ -466,15 +471,13 @@ export class BotStorage {
         throw new GuildSettingsConflictError(normalized);
       }
       const next = sanitizeGuildSettings(input);
-      // Every configuration edit is fail-closed. The administrator-only,
-      // compare-and-swap enable path is the sole operation that can clear the
-      // review gate and make the edited configuration live.
-      next.enabled = false;
-      next.reviewRequired = true;
+      // Configuration writes are atomic and may not implicitly change the
+      // explicit emergency bot-state switch.
+      next.enabled = current.enabled;
       const validated = sanitizeGuildSettings(next);
       db.prepare(
-        "UPDATE guilds SET enabled = 0, updated_at = ? WHERE guild_id = ?",
-      ).run(now, normalized);
+        "UPDATE guilds SET enabled = ?, updated_at = ? WHERE guild_id = ?",
+      ).run(validated.enabled ? 1 : 0, now, normalized);
       this.upsertSettings(normalized, validated, now);
       saved = validated;
     });
@@ -522,7 +525,6 @@ export class BotStorage {
         }
       }
       current.enabled = Boolean(enabled);
-      current.reviewRequired = !enabled;
       const validated = sanitizeGuildSettings(current);
       db.prepare(
         "UPDATE guilds SET enabled = ?, updated_at = ? WHERE guild_id = ?",
@@ -669,7 +671,7 @@ export class BotStorage {
         )
         .all(normalized) as MetricRow[];
       return {
-        formatVersion: 5,
+        formatVersion: 6,
         guildId: normalized,
         exportedAt: utcNow(),
         metadata,
@@ -703,12 +705,13 @@ export class BotStorage {
         throw new GuildSettingsConflictError(normalized);
       }
       const settings = sanitizeGuildSettings(imported.settings);
-      settings.enabled = false;
-      settings.reviewRequired = true;
+      // Imports cannot globally disable otherwise safe core behavior. External
+      // authority and Discord bindings are deactivated independently below.
+      settings.enabled = true;
       const reviewed = sanitizeGuildSettings(settings);
 
       db.prepare(
-        "UPDATE guilds SET enabled = 0, updated_at = ? WHERE guild_id = ?",
+        "UPDATE guilds SET enabled = 1, updated_at = ? WHERE guild_id = ?",
       ).run(now, normalized);
       this.upsertSettings(normalized, reviewed, now);
       db.prepare("DELETE FROM metrics WHERE guild_id = ?").run(normalized);

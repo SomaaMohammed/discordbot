@@ -1,4 +1,4 @@
-import { ChannelType, PermissionFlagsBits } from "discord.js";
+import { ChannelType, MessageFlags, PermissionFlagsBits } from "discord.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDefaultGuildSettings } from "../src/guild-settings.js";
 import type { BotRuntime, GuildRuntime } from "../src/runtime.js";
@@ -86,7 +86,6 @@ function createHarness(
   const storage = rootStorage.forGuild(GUILD_ID);
   const settings = createDefaultGuildSettings();
   settings.enabled = true;
-  settings.reviewRequired = false;
 
   const guild: Record<string, any> = {
     id: GUILD_ID,
@@ -499,7 +498,6 @@ describe("ticket command definition", () => {
     expect(command.dm_permission).toBe(false);
     expect(command.default_member_permissions).toBeUndefined();
     expect(options?.map(({ name }) => name)).toEqual([
-      "setup",
       "status",
       "panel",
       "disable",
@@ -625,7 +623,7 @@ describe("department ticket workflow", () => {
     expect(open.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("Choose"),
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
         allowedMentions: { parse: [] },
       }),
     );
@@ -917,275 +915,6 @@ describe("department ticket workflow", () => {
 });
 
 describe("ticket interaction workflow", () => {
-  it("does not let a configure-only support member reactivate imported compatibility bindings", async () => {
-    const harness = createHarness();
-    const configuration = harness.storage.getTicketConfiguration()!;
-    const department = harness.storage.getTicketDepartment(
-      configuration.departmentId!,
-    )!;
-    harness.storage.updateTicketDepartment(department.departmentId, {
-      enabled: false,
-      bindingsVerifiedAt: null,
-    });
-    const interaction: Record<string, any> = {
-      guild: harness.guild,
-      guildId: GUILD_ID,
-      options: {
-        getSubcommand: vi.fn(() => "setup"),
-        getChannel: vi.fn((name: string) =>
-          name === "category" ? harness.category : harness.logChannel,
-        ),
-        getRole: vi.fn(() => harness.supportRole),
-      },
-      deferred: false,
-      replied: false,
-      reply: vi.fn(async () => undefined),
-      editReply: vi.fn(async () => undefined),
-      followUp: vi.fn(async () => undefined),
-    };
-
-    await handleTicketCommand(
-      interaction as never,
-      harness.runtime,
-      harness.staffA as never,
-    );
-
-    expect(
-      harness.storage.getTicketDepartment(department.departmentId),
-    ).toMatchObject({
-      enabled: false,
-      bindingsVerifiedAt: null,
-    });
-    expect(harness.runtime.invalidate).not.toHaveBeenCalled();
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringContaining("cannot select"),
-      }),
-    );
-  });
-
-  it("prevents a configure-only delegate from rotating support access to a role they hold", async () => {
-    const harness = createHarness();
-    const replacementRole = {
-      id: NEW_SUPPORT_ROLE_ID,
-      name: "Escalations",
-      guild: harness.guild,
-      managed: false,
-    };
-    harness.guild.roles.cache.set(NEW_SUPPORT_ROLE_ID, replacementRole);
-    harness.guild.roles.fetch.mockImplementation(async (id: string) => {
-      if (id === SUPPORT_ROLE_ID) return harness.supportRole;
-      if (id === NEW_SUPPORT_ROLE_ID) return replacementRole;
-      return null;
-    });
-    harness.staffA.roles.cache.set(NEW_SUPPORT_ROLE_ID, replacementRole);
-    const interaction: Record<string, any> = {
-      guild: harness.guild,
-      guildId: GUILD_ID,
-      options: {
-        getSubcommand: vi.fn(() => "setup"),
-        getChannel: vi.fn((name: string) =>
-          name === "category" ? harness.category : harness.logChannel,
-        ),
-        getRole: vi.fn(() => replacementRole),
-      },
-      deferred: false,
-      replied: false,
-      reply: vi.fn(async () => undefined),
-      editReply: vi.fn(async () => undefined),
-      followUp: vi.fn(async () => undefined),
-    };
-
-    await handleTicketCommand(
-      interaction as never,
-      harness.runtime,
-      harness.staffA as never,
-    );
-
-    expect(harness.storage.getTicketConfiguration()).toMatchObject({
-      supportRoleId: SUPPORT_ROLE_ID,
-    });
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringMatching(/tickets\.configure.*ticket-content/i),
-      }),
-    );
-  });
-
-  it("refuses category or support-role rotation while tickets are active", async () => {
-    const harness = createHarness();
-    createActiveTicket(harness);
-    const replacementRole = {
-      id: NEW_SUPPORT_ROLE_ID,
-      name: "Escalations",
-      guild: harness.guild,
-      managed: false,
-    };
-    harness.guild.roles.cache.set(NEW_SUPPORT_ROLE_ID, replacementRole);
-    harness.guild.roles.fetch.mockImplementation(
-      async (id: string) => harness.guild.roles.cache.get(id) ?? null,
-    );
-    const interaction: Record<string, any> = {
-      guild: harness.guild,
-      guildId: GUILD_ID,
-      options: {
-        getSubcommand: vi.fn(() => "setup"),
-        getChannel: vi.fn((name: string) =>
-          name === "category" ? harness.category : harness.logChannel,
-        ),
-        getRole: vi.fn(() => replacementRole),
-      },
-      deferred: false,
-      replied: false,
-      reply: vi.fn(async () => undefined),
-      editReply: vi.fn(async () => undefined),
-      followUp: vi.fn(async () => undefined),
-    };
-
-    await handleTicketCommand(
-      interaction as never,
-      harness.runtime,
-      harness.staffA as never,
-    );
-
-    expect(harness.storage.getTicketConfiguration()).toMatchObject({
-      supportRoleId: SUPPORT_ROLE_ID,
-    });
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining("active") }),
-    );
-  });
-
-  it("allows replacement of a confirmed-missing support role with active tickets", async () => {
-    const harness = createHarness();
-    createActiveTicket(harness);
-    const replacementRole = {
-      id: NEW_SUPPORT_ROLE_ID,
-      name: "Escalations",
-      guild: harness.guild,
-      managed: false,
-    };
-    harness.guild.roles.cache.delete(SUPPORT_ROLE_ID);
-    harness.guild.roles.cache.set(NEW_SUPPORT_ROLE_ID, replacementRole);
-    harness.guild.roles.fetch.mockImplementation(async (id: string) =>
-      id === NEW_SUPPORT_ROLE_ID ? replacementRole : null,
-    );
-    const interaction: Record<string, any> = {
-      guild: harness.guild,
-      guildId: GUILD_ID,
-      options: {
-        getSubcommand: vi.fn(() => "setup"),
-        getChannel: vi.fn((name: string) =>
-          name === "category" ? harness.category : harness.logChannel,
-        ),
-        getRole: vi.fn(() => replacementRole),
-      },
-      deferred: false,
-      replied: false,
-      reply: vi.fn(async () => undefined),
-      editReply: vi.fn(async () => undefined),
-      followUp: vi.fn(async () => undefined),
-    };
-
-    await handleTicketCommand(
-      interaction as never,
-      harness.runtime,
-      harness.staffA as never,
-    );
-
-    expect(harness.storage.getTicketConfiguration()).toMatchObject({
-      supportRoleId: NEW_SUPPORT_ROLE_ID,
-    });
-    expect(harness.runtime.invalidate).toHaveBeenCalledTimes(1);
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining("recover") }),
-    );
-  });
-
-  it("does not authorize active-role replacement after a transient lookup failure", async () => {
-    const harness = createHarness();
-    createActiveTicket(harness);
-    const replacementRole = {
-      id: NEW_SUPPORT_ROLE_ID,
-      name: "Escalations",
-      guild: harness.guild,
-      managed: false,
-    };
-    harness.guild.roles.cache.set(NEW_SUPPORT_ROLE_ID, replacementRole);
-    harness.guild.roles.fetch
-      .mockResolvedValueOnce(replacementRole)
-      .mockRejectedValueOnce(new Error("synthetic Discord role lookup outage"));
-    const interaction: Record<string, any> = {
-      guild: harness.guild,
-      guildId: GUILD_ID,
-      options: {
-        getSubcommand: vi.fn(() => "setup"),
-        getChannel: vi.fn((name: string) =>
-          name === "category" ? harness.category : harness.logChannel,
-        ),
-        getRole: vi.fn(() => replacementRole),
-      },
-      deferred: false,
-      replied: false,
-      reply: vi.fn(async () => undefined),
-      editReply: vi.fn(async () => undefined),
-      followUp: vi.fn(async () => undefined),
-    };
-
-    await handleTicketCommand(
-      interaction as never,
-      harness.runtime,
-      harness.staffA as never,
-    );
-
-    expect(harness.storage.getTicketConfiguration()).toMatchObject({
-      supportRoleId: SUPPORT_ROLE_ID,
-    });
-    expect(harness.runtime.invalidate).not.toHaveBeenCalled();
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringContaining("could not verify"),
-      }),
-    );
-  });
-
-  it("refuses a log-channel-only update while tickets are active", async () => {
-    const harness = createHarness();
-    createActiveTicket(harness);
-    const interaction: Record<string, any> = {
-      guild: harness.guild,
-      guildId: GUILD_ID,
-      options: {
-        getSubcommand: vi.fn(() => "setup"),
-        getChannel: vi.fn((name: string) =>
-          name === "category" ? harness.category : harness.panelChannel,
-        ),
-        getRole: vi.fn(() => harness.supportRole),
-      },
-      deferred: false,
-      replied: false,
-      reply: vi.fn(async () => undefined),
-      editReply: vi.fn(async () => undefined),
-      followUp: vi.fn(async () => undefined),
-    };
-
-    await handleTicketCommand(
-      interaction as never,
-      harness.runtime,
-      harness.staffA as never,
-    );
-
-    expect(harness.storage.getTicketConfiguration()).toMatchObject({
-      categoryId: CATEGORY_ID,
-      supportRoleId: SUPPORT_ROLE_ID,
-      logChannelId: LOG_CHANNEL_ID,
-    });
-    expect(harness.runtime.invalidate).not.toHaveBeenCalled();
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining("active") }),
-    );
-  });
-
   it("does not disable a newer ticket configuration from a stale runtime", async () => {
     const harness = createHarness();
     (harness.runtime.isCurrent as ReturnType<typeof vi.fn>).mockReturnValue(
