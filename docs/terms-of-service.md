@@ -1,7 +1,7 @@
 # Superior terms of service
 
 **Effective date:** NOT YET EFFECTIVE<br>
-**Last updated:** August 11, 2026
+**Last updated:** August 21, 2026
 
 > **Unpublished draft. Do not link this document from the Discord Developer Portal or present it as binding terms.** Replace the operator/contact placeholders, complete the [Privacy Policy](privacy-policy.md) publication prerequisites, verify the hosted service, and obtain appropriate legal review for the operator's jurisdictions.
 
@@ -19,7 +19,7 @@ You must meet Discord's minimum age requirement in your country and be legally a
 
 ## 3. Service
 
-Superior provides configurable conversational replies, greetings, information utilities, announcements, fixed panels, multi-department private support tickets, attributable public suggestions/voting, private configurable staff applications, restricted role notifications, delegated role-based management, optional activity statistics, message cleanup, channel controls, timeouts, role panels, and other bounded moderation tools. Guild owners and administrators select supported features, permissions, destinations, workflow roles, delegated capabilities, and limits.
+Superior provides configurable conversational replies, greetings, information utilities, announcements, fixed panels, multi-department private support tickets, attributable public suggestions/voting, private configurable staff applications, confidential member reports, eligible in-guild case appeals, persistent moderation cases, configurable narrow anti-spam, restricted role notifications, delegated role-based management, optional activity statistics, message cleanup, channel controls, sanctions, role panels, and other bounded moderation tools. Guild owners and administrators select supported features, permissions, destinations, workflow roles, delegated capabilities, and limits.
 
 The Bot is not an emergency service, professional adviser, or substitute for human moderation judgment. Features, limits, and availability may change.
 
@@ -34,11 +34,11 @@ You must not use the Bot in a way that causes the Operator to violate Discord's 
 An installer or administrator is responsible for:
 
 - granting only the permissions needed for enabled features and maintaining safe role hierarchy and channel visibility;
-- configuring the explicit bot-state switch, logging, invocation terms, timezone, moderation limits, panels, ticket departments/forms/routing, suggestion channels/rates/review roles, private application forms/review channels, restricted-ping roles/channels/cooldowns/thread policy, and greetings appropriately;
+- configuring the explicit bot-state switch, logging, invocation terms, timezone, moderation limits, panels, ticket departments/forms/routing, suggestion/application workflows, private report/appeal destinations and reviewer roles, moderation logging, default-disabled anti-spam rules/exemptions, restricted-ping policy, and greetings appropriately;
 - granting each delegated role only the narrow capability needed, reviewing stale roles, and understanding that configuration authority does not automatically include private-content review authority;
 - telling members how the Bot is used and making the effective privacy notice and terms available;
-- supervising message cleanup, bulk actions, timeouts, panels, tickets, closure transcripts, suggestions/voting/reviews, staff applications/decisions, restricted role notifications, announcements, exports, activity backfill, statistics, and leaderboards;
-- keeping application review channels private, making public suggestion attribution clear, and protecting downloaded exports, backups, ticket logs, and staff review content; and
+- supervising message cleanup, bulk actions, warnings/notes/timeouts/kicks/bans, appeals and reversals, anti-spam actions, panels, tickets, closure transcripts, suggestions/voting/reviews, staff applications/decisions, confidential reports, restricted role notifications, announcements, exports, activity backfill, statistics, and leaderboards;
+- keeping application/report/appeal review channels private, preserving reporter confidentiality, making public suggestion attribution clear, and protecting downloaded exports, backups, moderation/ticket logs, private notes, and staff review content; and
 - reviewing Bot output and correcting or reversing actions when human judgment is needed.
 
 Permission checks supplement, but do not replace, responsible administration.
@@ -50,9 +50,9 @@ You must not:
 - violate law, Discord's rules, another person's rights, or applicable guild rules;
 - harass, threaten, exploit, discriminate, impersonate, dox, spam, or deceive;
 - submit malware, credentials, authentication tokens, unlawful content, or sensitive personal information;
-- use panels, tickets, transcripts, suggestions, voter records, staff applications, private answers, exports, statistics, backfill, or moderation tools for unauthorized surveillance, retaliation, profiling, or harm;
-- publish private application answers or ticket content without authorization, falsely promise anonymity for suggestions/applications, or solicit credentials or other sensitive data through a form;
-- bypass delegated/workflow permissions, role hierarchy, lifecycle checks, active-record limits, input bounds, persisted cooldowns, or other safeguards;
+- use panels, tickets, transcripts, suggestions, voter records, staff applications, reports, appeals, case notes, enforcement records, exports, statistics, backfill, or moderation tools for unauthorized surveillance, retaliation, profiling, or harm;
+- publish private application answers, reporter identity/content, appeal content, moderator notes, or ticket content without authorization; falsely promise anonymity for suggestions, applications, reports, or appeals; or solicit credentials or other sensitive data through a form;
+- bypass delegated/workflow permissions, private-content boundaries, role hierarchy, lifecycle checks, active-record/rate limits, anti-spam exemptions, persisted cooldowns/idempotency, or other safeguards;
 - bypass restricted-ping role membership, channel/parent-thread mappings, dangerous-role exclusions, cooldowns, or the exact single-role mention boundary, or use the feature to spam or harass;
 - disrupt, overload, scrape, probe, or gain unauthorized access to the Bot, host, data, or another guild's data;
 - sell or broker Discord or Bot data; or
@@ -78,13 +78,21 @@ A staff-application submission persists the applicant's Discord ID and normalize
 
 A restricted role ping is a real Discord notification sent by the Bot for one safe, normally non-mentionable role. The requesting member must currently hold that role and use `/pingrole` in its mapped channel or an exact allowed child thread/post. The Bot never makes the role globally mentionable and does not grant the requester Mention Everyone. The payload contains no member-authored text and allows only the authorized role mention. Configuration and successful use persist actor/member, guild, role, channel, cooldown, result/source, and timestamp data for security, anti-spam, and audit purposes. The default limits are 60 seconds per member/role and 30 seconds per role guild-wide, with no administrator bypass; administrators may change the configured values within product bounds.
 
+A moderation action can persist a case containing the target/actor IDs, public reason, optional private moderator note, Discord outcome metadata, status, related-case data, delivery checkpoint, and audit history. A successful Discord sanction remains effective even if later log delivery fails. Voiding a case changes the record only and does not reverse Discord state; Superior refuses to void an active timeout, anti-spam timeout, or ban until a separately authorized removal completes. Timeout removal and unban are separate actions. Private notes are restricted to authorized case inspection and must not be copied to members, moderation logs, reports, or appeals.
+
+A member report is confidential, not anonymous to authorized reviewers. It persists reporter/target IDs, category, explanation, optional same-guild message-link identifiers, private review state, staff reasons, and audit history. The Bot does not store the raw evidence link, copy the referenced message, accept evidence attachments, or notify the reported member automatically. The default cooldown allows three reports in 30 minutes; administrators may configure the limit and window within product bounds. A resolved report does not mean the target was punished unless a real moderation case records an action.
+
+An appeal is limited to the target of an eligible same-guild case and one appeal per case. It persists the explanation, private review state, staff reason, and any verified reversal outcome. Private moderator notes are not shown to the appellant. A warning may be marked overturned; a timeout or ban is reversed only after the corresponding Discord action succeeds or is verified already complete; a kick has no continuing state. A banned member cannot invoke guild slash commands, so the in-guild Phase 3 flow is not a universal ban-appeal service and provides no DM or external-form fallback.
+
+Anti-spam is disabled by default and supports only bounded burst, duplicate, and combined user/role mention rules. Depending on administrator configuration it may delete a triggering message, warn, or timeout after current permission/hierarchy checks. It ignores bots, webhooks, the guild owner, Administrators, and verified exemptions. Raw message content is not persisted for detection; duplicate comparison uses an in-memory SHA-256 fingerprint. Restart can reset detection windows but not persisted enforcement cooldowns/idempotency. Message edits, word lists, AI classification, sentiment, link reputation, attachment scanning, and scam judgments are not enforced in Phase 3. Anti-spam can miss abuse or produce an unwanted enforcement, so administrators remain responsible for review and correction.
+
 Member-activity metrics and optional history backfill can produce member-specific statistics and leaderboards from Discord events and eligible history. Administrators must operate those features only with an appropriate, disclosed basis.
 
 ## 8. Privacy and deletion
 
-The effective [Privacy Policy](privacy-policy.md) will explain processing, disclosure, retention, and requests. Removing the Bot from a guild marks that tenant inactive and retains its live SQLite rows for restart-safe panels and a possible rejoin; owner-confirmed purge or operator deletion removes the live tenant rows. Disabling a department, suggestions, an application form, or a restricted-ping role stops new work and preserves applicable existing records.
+The effective [Privacy Policy](privacy-policy.md) will explain processing, disclosure, retention, and requests. Removing the Bot from a guild marks that tenant inactive and retains its live SQLite rows for restart-safe panels and a possible rejoin; owner-confirmed purge or operator deletion removes the live tenant rows. Disabling a department, suggestions, an application form, new moderation actions, report/appeal intake, an anti-spam rule, or a restricted-ping role stops new work and preserves applicable existing records.
 
-Only the guild owner can use `/data import` to replace validated same-guild live data or `/data purge` to remove the guild's live database rows. Format 6 replaces the complete portable tenant product model while preserving internal delivery deduplication; legacy formats retain their documented compatibility behavior. Every import leaves the core bot active, while imported delegated authority and external resource bindings remain inactive or unverified pending review. Neither import nor purge deletes Discord-hosted panels, ticket channels/transcripts/logs, suggestion messages/threads, application review messages, prior restricted-role notifications, direct messages, host logs, backups, exports, or SQLite free pages.
+Only the guild owner can use `/data import` to replace validated same-guild live data or `/data purge` to remove the guild's live database rows. Format 7 replaces the complete portable tenant product model; legacy formats 2-6 retain their documented compatibility behavior. Every import leaves the core bot active, while imported delegated authority and external resource bindings remain inactive or unverified, anti-spam rules remain disabled, and sanctions are not replayed. Neither import nor purge reverses sanctions or deletes Discord-hosted panels, moderation logs, report/appeal review messages, ticket channels/transcripts/logs, suggestion/application messages, prior restricted-role notifications, direct messages, host logs, backups, exports, or SQLite free pages.
 
 This behavior is a publication blocker, not a promise of indefinite retention. Before public operation, the Operator must implement and document appropriate guild-removal, individual-request, log, backup, vendor, and shutdown deletion procedures.
 

@@ -13,7 +13,7 @@ import {
 } from "../src/discord/commands.js";
 
 describe("command guide", () => {
-  it("covers the complete Phase 2 command surface", () => {
+  it("covers the complete Phase 3 command surface", () => {
     const guide = buildSuperiorCommandGuide();
 
     for (const command of [
@@ -21,11 +21,15 @@ describe("command guide", () => {
       "/ticket",
       "/suggestion",
       "/application",
+      "/moderation",
+      "/report",
+      "/appeal",
+      "/automod",
     ]) {
       expect(guide).toContain(`\`${command}\``);
     }
     expect(guide).toContain("delegated");
-    expect(guide).toContain("format-6");
+    expect(guide).toContain("format-7");
     expect(guide.length).toBeLessThanOrEqual(2_000);
   });
 

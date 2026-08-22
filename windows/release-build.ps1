@@ -3,6 +3,7 @@ param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "hash-utils.ps1")
 
 $WindowsDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepositoryRoot = Split-Path -Parent $WindowsDirectory
@@ -50,6 +51,6 @@ $Archive = Join-Path $RepositoryRoot "release\SuperiorBot-$($Package.version)-wi
 & (Join-Path $WindowsDirectory "test-standalone.ps1") -Executable (Join-Path $RepositoryRoot "SuperiorBot.exe")
 & (Join-Path $WindowsDirectory "verify-release.ps1") -RequirePortableArtifact
 
-$Hash = (Get-FileHash -LiteralPath (Join-Path $RepositoryRoot "SuperiorBot.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+$Hash = Get-Sha256Hex -LiteralPath (Join-Path $RepositoryRoot "SuperiorBot.exe")
 Write-Host "Superior Bot release $($Package.version) is reproducible and verified."
 Write-Host "SuperiorBot.exe SHA-256: $Hash"

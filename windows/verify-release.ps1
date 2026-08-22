@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "hash-utils.ps1")
 
 $WindowsDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepositoryRoot = Split-Path -Parent $WindowsDirectory
@@ -108,11 +109,11 @@ finally {
     }
 }
 
-$ExecutableHash = (Get-FileHash -LiteralPath $ResolvedExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+$ExecutableHash = Get-Sha256Hex -LiteralPath $ResolvedExecutable
 Write-Host "Release identity verified: $ExpectedVersion"
 Write-Host "SuperiorBot.exe SHA-256: $ExecutableHash"
 if (Test-Path -LiteralPath $ExpectedArchive -PathType Leaf) {
-    $ArchiveHash = (Get-FileHash -LiteralPath $ExpectedArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $ArchiveHash = Get-Sha256Hex -LiteralPath $ExpectedArchive
     Write-Host "$([System.IO.Path]::GetFileName($ExpectedArchive)) SHA-256: $ArchiveHash"
 }
 elseif (-not $RequirePortableArtifact) {

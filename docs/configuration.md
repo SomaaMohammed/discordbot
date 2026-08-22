@@ -18,14 +18,17 @@ Core replies and panels normally need View Channels, Send Messages, Embed Links,
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Message cleanup             | Manage Messages in the target channel                                                                                                                                                                                                                                               |
 | Channel locks and slow mode | Manage Channels                                                                                                                                                                                                                                                                     |
-| Member timeouts             | Moderate Members and a safe role hierarchy                                                                                                                                                                                                                                          |
+| Member sanctions            | Moderate Members for timeouts, Kick Members for kicks, Ban Members for bans/unbans, and a safe role hierarchy                                                                                                                                                                       |
+| Moderation records          | The log channel needs View Channel, Send Messages, Embed Links, Attach Files, and Read Message History                                                                                                                                                                              |
+| Reports and appeals         | Each review destination must be a standard private text channel where `@everyone` cannot View Channel; Superior and the corresponding reviewer role need View Channel, Send Messages, and Read Message History, and Superior also needs Embed Links and Attach Files                |
+| Anti-spam                   | Manage Messages in every enforced channel; delete-and-timeout additionally needs Moderate Members and a safe role hierarchy                                                                                                                                                         |
 | Role panels                 | Manage Roles and a bot role above every managed role                                                                                                                                                                                                                                |
 | Restricted role pings       | View Channel and Mention Everyone in every configured destination, plus Send Messages for a direct channel or Send Messages in Threads for an authorized thread/post                                                                                                                |
 | Ticket departments          | Manage Channels and Manage Roles; each category must allow View Channel, Send Messages, Read Message History, Embed Links, Attach Files, Manage Channels, and Manage Roles; each closure-log channel also needs Attach Files                                                        |
 | Suggestions                 | The public channel needs View Channel, Send Messages, Read Message History, and Embed Links; discussion mode additionally needs Create Public Threads and Send Messages in Threads in a standard text channel; an optional review channel needs the core message permissions        |
 | Staff applications          | The private review channel must be a standard text channel where `@everyone` cannot View Channel; Superior needs View Channel, Send Messages, Read Message History, and Embed Links, while the configured reviewer role needs View Channel, Send Messages, and Read Message History |
 
-`Mention Everyone` is needed when an administrator explicitly chooses that announcement option or when Superior sends an approved mention of a normally non-mentionable restricted-ping role. Ordinary members do not need Mention Everyone. Keep Superior's highest role above roles it must manage or members it must moderate; restricted pings do not manage roles and therefore do not require a hierarchy relationship. Superior verifies effective channel permissions, current resources, and role hierarchy whenever the operation needs it.
+`Mention Everyone` is needed when an administrator explicitly chooses that announcement option or when Superior sends an approved mention of a normally non-mentionable restricted-ping role. Ordinary members do not need Mention Everyone. Keep Superior's highest role above roles it must manage or members it must moderate; restricted pings do not manage roles and therefore do not require a hierarchy relationship. A reviewer role must have effective access to its own private report or appeal destination. Superior verifies effective channel permissions, current resources, and role hierarchy whenever the operation needs it.
 
 ## Process environment
 
@@ -44,7 +47,7 @@ Copy `.env.example` to `.env` in the application root. For a Windows portable bu
 
 Use global registration for production. Discord can take time to propagate global command changes. Use guild registration only for controlled development because updates appear faster. Never put a production guild ID into source code.
 
-Discord cannot vary slash-command visibility by a guild's delegated grants. `/panel`, `/ticket`, `/suggestion`, and `/application` therefore expose relevant command choices and enforce the exact permission at runtime. A visible command is not evidence that the member may use it. `/access` and `/restrictedping` are Administrator-restricted in Discord and also perform a fresh owner-or-Administrator check at runtime.
+Discord cannot vary slash-command visibility by a guild's delegated grants. `/panel`, `/ticket`, `/suggestion`, `/application`, `/moderation`, and `/automod` therefore expose relevant command choices and enforce the exact permission at runtime. A visible command is not evidence that the member may use it. `/access` and `/restrictedping` are Administrator-restricted in Discord and also perform a fresh owner-or-Administrator check at runtime. Report and appeal review controls repeat authorization at use time even when a member can see the private channel.
 
 ## Immediate defaults and optional configuration
 
@@ -63,6 +66,8 @@ Configure only the external-resource workflows the guild needs:
 - Configure suggestions with `/suggestion configure`, then post `/suggestion panel`.
 - Create application forms with `/application form create`, add 1–5 questions with `/application field add`, enable each healthy form, then post `/application panel`.
 - Register each restricted role and destination with `/restrictedping add`, review it with `/restrictedping info`, and leave the Discord role's **Allow anyone to @mention this role** setting off.
+- Configure moderation logging and the private report/appeal destinations with `/moderation configure`, verify `/moderation status`, then post the `safety` panel if wanted.
+- Configure individual `/automod rule` entries and exemptions, inspect them with `/automod status`, and enable a rule only after `/automod test` and a permission review.
 - If routine management should be delegated, use `/access grant` only after the relevant roles exist and have been reviewed.
 
 `/config bot-state enabled:false` stops guild behavior without deleting data. Removing Superior from a guild marks that tenant inactive and retains its rows and persistent-panel bindings so a later rejoin works without reposting. `/data purge` is owner-only and permanently removes only that guild's live rows after exact confirmation; neither departure nor purge deletes Discord-hosted messages, logs, exports, or backups.
@@ -71,21 +76,25 @@ Configure only the external-resource workflows the guild needs:
 
 Only the guild owner or a freshly re-fetched member with Administrator permission can run `/access grant`, `/access revoke`, `/access list`, or `/access status`. Grants target roles. Superior rejects `@everyone`, managed/integration roles, deleted roles, roles from another guild, and duplicate active grants. Delegates cannot use `/access`.
 
-The seven capabilities are intentionally separate:
+The eleven capabilities are intentionally separate:
 
-| Capability               | Allows                                                                                    | Does not imply                                   |
-| ------------------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `panels.manage`          | List, post, refresh, and inspect fixed panels                                             | Ticket, suggestion, or application configuration |
-| `tickets.configure`      | Configure departments and fields, enable/disable them, post launchers, and inspect health | Reading or managing private ticket contents      |
-| `tickets.manage`         | Recover tickets and manage private ticket controls                                        | Editing departments or delegated access          |
-| `suggestions.configure`  | Configure/disable suggestions, post launchers, and recover public delivery                | Reviewing suggestion content                     |
-| `suggestions.review`     | List and transition suggestions                                                           | Changing service configuration                   |
-| `applications.configure` | Configure forms/questions and post launchers                                              | Reading or deciding private applications         |
-| `applications.review`    | Review, claim, decide, and recover applications                                           | Changing form configuration                      |
+| Capability               | Allows                                                                                         | Does not imply                                        |
+| ------------------------ | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `panels.manage`          | List, post, refresh, and inspect fixed panels                                                  | Ticket, suggestion, or application configuration      |
+| `tickets.configure`      | Configure departments and fields, enable/disable them, post launchers, and inspect health      | Reading or managing private ticket contents           |
+| `tickets.manage`         | Recover tickets and manage private ticket controls                                             | Editing departments or delegated access               |
+| `suggestions.configure`  | Configure/disable suggestions, post launchers, and recover public delivery                     | Reviewing suggestion content                          |
+| `suggestions.review`     | List and transition suggestions                                                                | Changing service configuration                        |
+| `applications.configure` | Configure forms/questions and post launchers                                                   | Reading or deciding private applications              |
+| `applications.review`    | Review, claim, decide, and recover applications                                                | Changing form configuration                           |
+| `moderation.configure`   | Configure moderation logging, report/appeal bindings, anti-spam, exemptions, and safety panels | Managing sanctions or reading private reports/appeals |
+| `moderation.manage`      | Warn, note, timeout/untimeout, kick, ban/unban, inspect, amend, void, and recover cases        | Changing configuration or delegated access            |
+| `reports.review`         | Inspect, claim/release, resolve, dismiss, and recover confidential reports                     | Configuring destinations or reviewing appeals         |
+| `appeals.review`         | Inspect, claim/release, uphold, overturn, and recover confidential appeals                     | Configuring destinations or reviewing reports         |
 
 Owner and Administrator access is evaluated before delegated storage, so they retain recovery authority even if a grant or delegated role is stale. Every delegated action re-fetches the member and matching role. Removing or managing a granted role makes its authorization unusable. Revoke grants before deleting their roles when practical; `/access list` identifies a role that has already disappeared.
 
-A configure-only delegate cannot create or change a ticket support role, suggestion reviewer role, or application reviewer role to a role they currently hold. An unchanged existing workflow role does not prevent unrelated metadata edits. The guild owner and a freshly verified Administrator remain the authorities for intentional overlap.
+A configure-only delegate cannot create or change a ticket support role, suggestion reviewer role, application reviewer role, report reviewer role, or appeal reviewer role to a role they currently hold unless they also have the matching content-review authority. An unchanged existing workflow role does not prevent unrelated metadata edits. The guild owner and a freshly verified Administrator remain the authorities for intentional overlap.
 
 Discord channel visibility is a separate boundary from Superior's action authorization:
 
@@ -134,18 +143,51 @@ For example, these names are illustrative configuration rather than hard-coded b
 
 A member who currently has `@Food` can run `/pingrole role:@Food` in `#food`; Superior sends the real `@Food` notification. The same implementation handles `@Pics`, `@Media`, multiple allowed channels for one role, and future roles without new code.
 
+## Moderation cases and private safety workflows
+
+`/moderation configure` stores the moderation-log channel, private report and appeal destinations, reviewer roles, service state, binding-verification times, and update actors. `/moderation status` reports bounded health without exposing private content. `/moderation disable` stops new actions without erasing history. Changing a destination or reviewer role invalidates that binding until current guild ownership, private-channel visibility, reviewer access, and Superior's permissions are verified again.
+
+`/moderation warn`, `note`, `timeout`, `untimeout`, `kick`, `ban`, and `unban` create normalized guild-local case history. Destructive member actions require a 1-500-character public reason; a private moderator note is limited to 1,000 characters. History and case views return at most 10 rows per page, suppress mentions, and keep private notes inside authorized staff output. Legacy `/superior timeout`, `/superior untimeout`, and bounded multi-member timeout operations now fail closed while Phase 3 moderation cases are disabled, ensuring every successful legacy sanction can be recorded durably. When cases are enabled, successful targets create the same per-target cases; failed or skipped targets never receive successful cases. Legacy purge, channel lock/unlock, and slowmode actions remain available independently because they do not create member cases.
+
+Cases record a stable opaque ID, guild-local number, target, actor, action, source, public reason, optional private note, relevant Discord outcome metadata, status, related case, timestamps, and up to 100 audit events. States distinguish `active`, `completed`, `voided`, `overturned`, and `failed`; supported actions include `warning`, `note`, `timeout`, `timeout-removed`, `kick`, `ban`, `unban`, `automod-warning`, and `automod-timeout`. `/moderation amend` appends the previous value to audit history. `/moderation void` changes the record only; it never silently reverses Discord state, and Superior refuses to void an active timeout, anti-spam timeout, or ban until the sanction is removed through a separately authorized action. Removing a timeout or ban creates its corresponding case and completes the original record before that original can be voided.
+
+Moderation-log embeds contain only the case number, action, safe target/actor display and IDs, public reason, timestamp, and outcome. They never contain private notes, report or appeal content, raw messages, or stack traces. A log-delivery failure after Discord confirms a sanction leaves the successful case intact and a durable checkpoint for bounded, idempotent recovery.
+
+Members use `/report submit member:<user>` and a private modal with category `harassment`, `spam`, `scam`, `safety`, or `other`, a 10-2,000-character explanation, and an optional same-guild Discord message link of at most 200 characters. Superior rejects self-reports, malformed or cross-guild evidence links, inappropriate bot targets, and submissions beyond the configured persistent cooldown. The default is three reports in a rolling 30-minute window; configuration accepts 1–10 reports and a 60–86,400-second window. Superior stores only the validated guild/channel/message IDs, never the raw link, referenced message content, or an attachment. `/report status` and `/report withdraw` reveal only the reporter's own eligible records.
+
+Reports move through `submitted`, `under-review`, `resolved`, `dismissed`, and `withdrawn`. The reporter's identity and report body are visible only to the configured reviewer role, owner, Administrators, and `reports.review` delegates inside the private destination. Superior never notifies the reported member automatically. Claim, Release, Resolve, Dismiss, and Info controls are conditional and idempotent; only the current authorized claimant can release or decide a record. A different reviewer may take over only after Superior proves the prior claimant is absent or no longer authorized; an unavailable member lookup fails closed. A decision requires a bounded staff reason and does not imply punishment unless it links to a real moderation case. `/report recover` may refresh or recreate a missing private review record only after revalidating the content boundary.
+
+Members use `/appeal submit case_number:<number>` with a 10-2,000-character explanation, then `/appeal status` or `/appeal withdraw` for their own records. Eligible records are manual warning, kick, or ban cases, plus an active manual timeout whose live Discord expiry still exactly matches the case; notes, removal/unban records, anti-spam cases, failed/voided/overturned cases, and completed timeouts are ineligible. The appellant must be the target of the same-guild case, and only one appeal is accepted per case. Private moderator notes are never shown. Appeals move through `submitted`, `under-review`, `upheld`, `overturned`, and `withdrawn`; authorized review uses conditional Claim, Release, Uphold, Overturn, and Info controls with a 1-500-character decision reason. Only the current authorized claimant can release or decide an appeal, and takeover uses the same proof-of-absence-or-lost-authority rule as reports. `/appeal recover` revalidates the case and private boundary before it refreshes or recreates a review record.
+
+An upheld appeal preserves the case. An overturned warning marks that case overturned. An active timeout is removed only after fresh permission and hierarchy verification, then receives a `timeout-removed` case. A kick has no continuing Discord state to reverse. A ban is marked overturned only after a separately authorized unban succeeds or is verified to have already occurred. Discord rejection is never represented as reversal. Because banned members cannot invoke guild slash commands, Phase 3's appeal flow is available only while the member can still access the guild; there is no DM command or external-form fallback.
+
+## Configurable anti-spam
+
+Anti-spam is narrow, opt-in, and disabled by default after fresh initialization, migration, and import. `/automod rule configure|enable|disable` manages these rule types:
+
+- **Burst:** 2-100 messages in a configurable 1-300-second rolling window.
+- **Duplicate:** 2-100 repetitions in a configurable 1-300-second rolling window. Only an in-memory normalized SHA-256 fingerprint is compared; neither the text nor fingerprint is persisted.
+- **Mention:** a 2-100 combined user/role mention threshold on one message.
+
+Each rule stores its enabled state, threshold, applicable window, action, optional timeout duration up to Discord's 28-day maximum, 1-86,400-second enforcement cooldown, and creation/update actors and timestamps. Actions are delete, delete-and-warn, or delete-and-timeout. `/automod exempt-role add|remove` and `/automod exempt-channel add|remove` maintain up to 250 same-guild entries of each kind; stale, managed, `@everyone`, and cross-guild roles are rejected. `/automod test` evaluates optional synthetic text up to 1,000 characters and message, repetition, and mention counts from 0–1,000 without deleting a message, reserving an enforcement, or moderating a member.
+
+Runtime enforcement ignores bots, webhooks, the owner, and Administrators and freshly checks every role/channel exemption. It verifies deletion permission before deleting, re-fetches the target and bot member before a timeout, and respects current hierarchy and moderatability. A failed or ambiguous deletion never becomes a warning or timeout. Durable guild/rule/message/member reservations and persisted cooldowns prevent duplicate gateway delivery from producing duplicate actions; interrupted reservations are recovered in a bounded way. Successful warnings and confirmed timeouts create real cases.
+
+Detection windows are bounded in memory and cleared on guild disable, purge/removal, and shutdown. A restart may reset those windows but does not reset persisted enforcement cooldowns or idempotency records. Raw message content is never persisted for anti-spam, successful deletion prevents ordinary chat/activity processing for that message, and Phase 3 does not enforce message edits. Anti-spam does not implement word lists, AI classification, sentiment, link reputation, attachment scanning, scam judgments, shadow actions, or cross-server reputation.
+
 ## Fixed panels
 
-Superior has six fixed gold presets:
+Superior has seven fixed gold presets:
 
 - `help`: active member services and management command families;
 - `server-info`: a bounded guild snapshot;
 - `resources`: administrator-supplied title/body plus up to five unique HTTPS links;
 - `tickets`: the current department launcher;
 - `suggestions`: the suggestion submission launcher; and
-- `applications`: the private staff-application launcher.
+- `applications`: the private staff-application launcher; and
+- `safety`: private report and eligible in-guild appeal launchers with a concise privacy explanation.
 
-`/panel post` targets a text or announcement channel and records the exact bot-authored message so `replace_existing` can refresh it safely. `/panel status` privately lists a bounded set of tracked panels and current feature health. Operational presets are refused when their stored configuration is disabled, missing, belongs to another guild, or fails current resource/permission checks. Member-controlled text cannot select arbitrary styling and all payloads suppress automatic mentions.
+`/panel post` targets a text or announcement channel and records the exact bot-authored message so `replace_existing` can refresh it safely. `/panel status` privately lists a bounded set of tracked panels and current feature health. Operational presets are refused when their stored configuration is disabled, missing, belongs to another guild, or fails current resource/permission checks. The safety panel enables only controls whose report/appeal service is currently verified and never displays a case or private record publicly. Member-controlled text cannot select arbitrary styling and all payloads suppress automatic mentions.
 
 ## Ticket departments and forms
 
@@ -191,19 +233,20 @@ Only the applicant can use `/application status` for their records or `/applicat
 
 ## Export, import, purge, and recovery review
 
-`/data export` lets the owner or an Administrator download a bounded same-guild format-6 snapshot. It contains metadata, settings, metrics, delegated grants, departments/fields/responses/events, persistent panels, suggestions/votes/events, application forms/responses/events, restricted-ping configuration/mappings/audit history, and operational delivery identifiers.
+`/data export` lets the owner or an Administrator download a bounded same-guild format-7 snapshot. It contains the existing portable model plus moderation configuration/cases/events, reports/events, appeals/events, anti-spam rules/exemptions/safe enforcement metadata, and legitimately portable delivery checkpoints.
 
 `/data import` is owner-only, requires exact same-guild confirmation, validates collection limits and references, and runs in one transaction:
 
-- Format 6 replaces settings, metrics, and the complete portable operational model while preserving internal delivery deduplication.
-- Legacy format 5 replaces its schema-v7 portable model and converts settings to the current safe defaults while preserving its operational records.
-- Legacy format 4 replaces its complete schema-v5 model and leaves restricted-ping collections empty.
-- Legacy format 3 replaces settings, metrics, panels, and the Phase 1 ticket model, converting it to a `General Support` department with Subject/Details responses. Phase 2 collections absent from the file are cleared.
+- Format 7 replaces settings, metrics, and the complete portable operational model while preserving non-portable internal delivery deduplication.
+- Legacy format 6 replaces its complete schema-v8-era model and leaves Phase 3 configuration and records empty/default-disabled.
+- Legacy format 5 replaces its schema-v7 portable model, converts settings to the current safe defaults, preserves the operational collections represented by that format, and leaves Phase 3 empty/default-disabled.
+- Legacy format 4 replaces its complete schema-v5 model and leaves restricted-ping and Phase 3 collections empty/default-disabled.
+- Legacy format 3 replaces settings, metrics, panels, and the Phase 1 ticket model, converting it to a `General Support` department with Subject/Details responses. Phase 2 collections absent from the file are cleared, and Phase 3 is empty/default-disabled.
 - Legacy format 2 replaces settings and metrics while preserving all current operational rows.
 
-Every import leaves the core guild bot active. Imported delegated grants are inactive; external ticket, application, suggestion, restricted-ping, and resource bindings remain dormant or unverified until the corresponding configuration or recovery path checks current Discord resources and permissions. Imported historical records remain intact. Keep a protected pre-import export or operator backup when rollback may be necessary.
+Every import leaves the core guild bot active. Imported delegated grants are inactive; external ticket, application, suggestion, restricted-ping, moderation-log, report, appeal, and resource bindings remain dormant or unverified until the corresponding configuration or recovery path checks current Discord resources and permissions. Imported anti-spam rules remain disabled and imported sanctions are never replayed. Imported historical records remain readable to authorized staff. Keep a protected pre-import export or operator backup when rollback may be necessary.
 
-Import and purge affect only the live SQLite database. They do not delete downloaded exports, backups, SQLite free pages, Discord panels, ticket/application/suggestion messages, ticket channels, transcripts, review logs, discussion threads, or direct messages.
+Import and purge affect only the live SQLite database. They do not delete downloaded exports, backups, SQLite free pages, Discord panels, ticket/application/suggestion/report/appeal messages, ticket channels, moderation logs, transcripts, review logs, discussion threads, prior sanctions, or direct messages.
 
 ## Command reference
 
@@ -212,10 +255,14 @@ Import and purge affect only the live SQLite database. They do not delete downlo
 - `/access`: grant, revoke, list, and status for delegated role capabilities.
 - `/pingrole role:<role>`: request one authorized restricted role ping in the current channel or allowed child thread/post.
 - `/restrictedping`: add/remove/list/info/enable/disable restricted role mappings, clean stale role/channel IDs, and configure cooldown/thread policy; owner-or-Administrator only.
-- `/panel`: list, post, and status for all six fixed presets.
+- `/panel`: list, post, and status for all seven fixed presets.
 - `/ticket`: status, panel, disable, recover; department list/create/edit/enable/disable/delete/health; field add/edit/remove/move.
 - `/suggestion`: submit, status, withdraw, configure, panel, list, review, disable, and recover.
 - `/application`: submit, status, withdraw, panel, recover; form list/create/edit/enable/disable/delete; field add/edit/remove/move.
+- `/moderation`: configure/status/disable/recover; warn, note, timeout, untimeout, kick, ban, unban, history, case, amend, and void.
+- `/report`: submit, status, withdraw, and reviewer-authorized recover; review decisions use the private record controls.
+- `/appeal`: submit, status, withdraw, and reviewer-authorized recover; review decisions use the private record controls.
+- `/automod`: status, rule configure/enable/disable, exempt-role add/remove, exempt-channel add/remove, and non-mutating test.
 - `/superior`: `say`, `dmpanel`, `rolepanel`, `rolepanelmulti`, `purge`, `purgeuser`, `lock`, `unlock`, `slowmode`, `timeout`, `untimeout`, `mutemany`, `unmutemany`, `muteall`, `unmuteall`, `backfillstats`, `backfillstatus`, and `help`.
 - `/utility`: `ping`, `avatar`, `userinfo`, `serverinfo`, `roleinfo`, `channelinfo`, `snowflake`, and `timestamp`.
 - `/fun`: `battle`, `stats`, and `leaderboard`.

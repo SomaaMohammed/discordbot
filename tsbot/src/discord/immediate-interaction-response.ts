@@ -29,9 +29,21 @@ import {
 } from "./panels.js";
 import {
   parseApplicationOpenCustomId,
+  parseAppealOpenCustomId,
+  parseReportOpenCustomId,
   parseSuggestionOpenCustomId,
   parseTicketOpenCustomId,
 } from "./panel-theme.js";
+import {
+  createReportDecisionModal,
+  createReportSubmitModal,
+  parseReportComponentId,
+} from "./report-components.js";
+import {
+  createAppealDecisionModal,
+  createAppealSubmitModal,
+  parseAppealComponentId,
+} from "./appeal-components.js";
 import {
   createSuggestionReviewModal,
   createSuggestionSubmitModal,
@@ -181,6 +193,24 @@ function handleImmediateCommand(
       lifecycle,
     );
   }
+  if (interaction.commandName === "report") {
+    const target = interaction.options.getUser("member", true);
+    return showModal(
+      interaction,
+      createReportSubmitModal("command", target.id),
+      lifecycle,
+    );
+  }
+  if (interaction.commandName === "appeal") {
+    return showModal(
+      interaction,
+      createAppealSubmitModal(
+        "command",
+        interaction.options.getInteger("case_number", true),
+      ),
+      lifecycle,
+    );
+  }
   if (interaction.commandName !== "application") {
     return Promise.resolve("continue");
   }
@@ -264,6 +294,39 @@ function handleImmediateButton(
     );
   }
 
+  const report = parseReportComponentId(interaction.customId);
+  if (
+    report?.kind === "control" &&
+    (report.action === "resolve" || report.action === "dismiss")
+  ) {
+    return showModal(
+      interaction,
+      createReportDecisionModal(
+        report.reportId,
+        report.action,
+        report.versionToken,
+        interaction.message.id,
+      ),
+      lifecycle,
+    );
+  }
+  const appeal = parseAppealComponentId(interaction.customId);
+  if (
+    appeal?.kind === "control" &&
+    (appeal.action === "uphold" || appeal.action === "overturn")
+  ) {
+    return showModal(
+      interaction,
+      createAppealDecisionModal(
+        appeal.appealId,
+        appeal.action,
+        appeal.versionToken,
+        interaction.message.id,
+      ),
+      lifecycle,
+    );
+  }
+
   const snapshot = currentSnapshot(interaction, runtime);
   const suggestionPanelId = parseSuggestionOpenCustomId(interaction.customId);
   if (suggestionPanelId) {
@@ -288,6 +351,23 @@ function handleImmediateButton(
       lifecycle,
       snapshot,
       applicationPanelId,
+    );
+  }
+
+  const reportPanelId = parseReportOpenCustomId(interaction.customId);
+  if (reportPanelId) {
+    return showModal(
+      interaction,
+      createReportSubmitModal(reportPanelId, null, interaction.message.id),
+      lifecycle,
+    );
+  }
+  const appealPanelId = parseAppealOpenCustomId(interaction.customId);
+  if (appealPanelId) {
+    return showModal(
+      interaction,
+      createAppealSubmitModal(appealPanelId, null, interaction.message.id),
+      lifecycle,
     );
   }
 

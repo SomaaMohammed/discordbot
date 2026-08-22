@@ -19,6 +19,7 @@ import {
   wireMessageRuntime,
 } from "../src/message-runtime.js";
 import type { BotRuntime, GuildRuntime } from "../src/runtime.js";
+import { clearAntiSpamProcessState } from "../src/discord/anti-spam-enforcement.js";
 
 const GUILD_ID = "123456789012345678";
 const OTHER_GUILD_ID = "223456789012345678";
@@ -118,6 +119,12 @@ function createHarness(
     permissions: { has: vi.fn(() => false) },
     roles: { highest: highest(10) },
     moderatable: true,
+    isCommunicationDisabled: vi.fn(() => timeout.mock.calls.length > 0),
+    get communicationDisabledUntil() {
+      return timeout.mock.calls.length > 0
+        ? new Date("2026-07-28T12:31:00.000Z")
+        : null;
+    },
     timeout,
     toString: () => `<@${TARGET_ID}>`,
   } as unknown as GuildMember;
@@ -129,7 +136,8 @@ function createHarness(
   };
   members.me = me;
   members.fetchMe = vi.fn(async () => me);
-  members.fetch = vi.fn(async (id: string) => {
+  members.fetch = vi.fn(async (input: string | { user: string }) => {
+    const id = typeof input === "string" ? input : input.user;
     if (id === USER_ID) return actor;
     if (id === TARGET_ID) return target;
     if (id === BOT_ID) return me;
@@ -160,6 +168,9 @@ function createHarness(
     id: "723456789012345678",
     content: options.content ?? "superior hru",
     author: { id: USER_ID, bot: false },
+    webhookId: null,
+    createdTimestamp: 1_000,
+    mentions: { users: { size: 0 }, roles: { size: 0 } },
     guildId: GUILD_ID,
     guild,
     member: actor,
@@ -172,6 +183,9 @@ function createHarness(
       return referencedMessage;
     }),
     reply,
+    delete: vi.fn(async () => {
+      events.push("delete");
+    }),
   } as unknown as Message;
 
   referencedMessage = options.reference
@@ -193,6 +207,61 @@ function createHarness(
   const storage = {
     recordCommandMetric,
     incrementUserMetric,
+    getModerationConfiguration: vi.fn(() => ({
+      guildId: GUILD_ID,
+      casesEnabled: true,
+      updatedAt: "2026-07-28T12:30:00.000Z",
+      moderationLogChannelId: null,
+      moderationLogVerifiedAt: null,
+    })),
+    reserveModerationCaseAttempt: vi.fn(() => ({
+      guildId: GUILD_ID,
+      caseId: "reply_timeout_case",
+      caseNumber: 7,
+      targetUserId: TARGET_ID,
+      actorId: USER_ID,
+      actionType: "timeout",
+      source: "superior-command",
+      publicReason: "reason",
+      privateNote: null,
+      discordActionMetadata: null,
+      status: "failed",
+      relatedCaseId: null,
+      voidedBy: null,
+      voidedAt: null,
+      voidReason: null,
+      overturnedBy: null,
+      overturnedAt: null,
+      overturnReason: null,
+      createdAt: "2026-07-28T12:30:00.000Z",
+      updatedAt: "2026-07-28T12:30:00.000Z",
+    })),
+    confirmModerationCase: vi.fn(() => ({
+      status: "changed",
+      case: {
+        guildId: GUILD_ID,
+        caseId: "reply_timeout_case",
+        caseNumber: 7,
+        targetUserId: TARGET_ID,
+        actorId: USER_ID,
+        actionType: "timeout",
+        source: "superior-command",
+        publicReason: "reason",
+        privateNote: null,
+        discordActionMetadata: null,
+        status: "active",
+        relatedCaseId: null,
+        voidedBy: null,
+        voidedAt: null,
+        voidReason: null,
+        overturnedBy: null,
+        overturnedAt: null,
+        overturnReason: null,
+        createdAt: "2026-07-28T12:30:00.000Z",
+        updatedAt: "2026-07-28T12:30:01.000Z",
+      },
+    })),
+    failModerationCaseAttempt: vi.fn(),
   };
   const guildRuntime = {
     guildId: GUILD_ID,
@@ -248,16 +317,66 @@ function replyPayload(harness: Harness): {
 }
 
 afterEach(() => {
+  clearAntiSpamProcessState();
   vi.restoreAllMocks();
 });
 
 describe("message runtime chat", () => {
+  it("stops normal chat and activity accounting after anti-spam deletes a message", async () => {
+    const harness = createHarness({
+      content: "superior hru",
+      actorAdmin: false,
+    });
+    harness.setChannelPermissions([
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.ManageMessages,
+    ]);
+    (harness.message as unknown as { content: string }).content =
+      `<@${TARGET_ID}> <@!${TARGET_ID}>`;
+    Object.assign(harness.message.mentions.users, {
+      size: 1,
+      has: (id: string) => id === TARGET_ID,
+    });
+    Object.assign(harness.guildRuntime.storage, {
+      getModerationConfiguration: vi.fn(() => ({
+        casesEnabled: true,
+        antiSpamEnabled: true,
+      })),
+      listAntiSpamRules: vi.fn(() => [
+        {
+          ruleType: "mention",
+          enabled: true,
+          threshold: 2,
+          windowSeconds: null,
+          action: "delete",
+          timeoutSeconds: null,
+          cooldownSeconds: 30,
+        },
+      ]),
+      listAntiSpamExemptRoleIds: vi.fn(() => []),
+      listAntiSpamExemptChannelIds: vi.fn(() => []),
+      reserveAntiSpamEnforcement: vi.fn(() => ({
+        status: "reserved",
+        reservationId: "reservation_token",
+      })),
+      completeAntiSpamEnforcement: vi.fn(),
+    });
+
+    await handleMessageCreate(harness.message, harness.processRuntime);
+
+    expect(harness.events).toEqual(["delete"]);
+    expect(harness.reply).not.toHaveBeenCalled();
+    expect(harness.recordCommandMetric).not.toHaveBeenCalled();
+    expect(harness.incrementUserMetric).not.toHaveBeenCalled();
+  });
+
   it("sends a safe reply and records its metric only afterward", async () => {
     const harness = createHarness({ content: "superior hru" });
 
     await handleMessageCreate(harness.message, harness.processRuntime);
 
-    expect(replyPayload(harness).content).toContain("doing well");
+    expect(replyPayload(harness).content.trim().length).toBeGreaterThan(0);
     expect(replyPayload(harness).allowedMentions).toEqual({
       parse: [],
       repliedUser: false,

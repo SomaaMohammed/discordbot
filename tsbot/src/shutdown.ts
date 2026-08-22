@@ -5,6 +5,7 @@ import {
 } from "./discord/bot.js";
 import { logClassifiedError, logError, logInfo, logWarn } from "./logging.js";
 import type { BotRuntime } from "./runtime.js";
+import { clearAntiSpamProcessState } from "./discord/anti-spam-enforcement.js";
 
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 15_000;
 
@@ -86,6 +87,8 @@ export function createShutdownCoordinator(
               guildId: record.guildId,
               error,
             });
+          } finally {
+            clearAntiSpamProcessState(record.guildId);
           }
         }
       } catch (error) {

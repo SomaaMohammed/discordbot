@@ -5,6 +5,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "hash-utils.ps1")
 
 $ResolvedArtifact = (Resolve-Path -LiteralPath $Artifact).Path
 if ([System.IO.Path]::GetExtension($ResolvedArtifact) -ne ".zip") {
@@ -19,7 +20,7 @@ if (Test-Path -LiteralPath $ChecksumPath -PathType Leaf) {
     if ($Matches[2] -ne [System.IO.Path]::GetFileName($ResolvedArtifact)) {
         throw "Artifact checksum names a different ZIP: $($Matches[2])"
     }
-    $ArchiveHash = (Get-FileHash -LiteralPath $ResolvedArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
+    $ArchiveHash = Get-Sha256Hex -LiteralPath $ResolvedArtifact
     if ($ArchiveHash -ne $Matches[1]) {
         throw "Artifact ZIP SHA-256 mismatch."
     }
@@ -99,7 +100,7 @@ try {
     if ($NativeAddons.Count -ne 1) {
         throw "Expected exactly one better-sqlite3 native binary; found $($NativeAddons.Count)."
     }
-    $NativeAddonHash = (Get-FileHash -LiteralPath $NativeAddons[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $NativeAddonHash = Get-Sha256Hex -LiteralPath $NativeAddons[0].FullName
 
     $Forbidden = Get-ChildItem -LiteralPath $PortableRoot -Recurse -Force | Where-Object {
         $Relative = $_.FullName.Substring($PortableRoot.Length).TrimStart("\").Replace("\", "/")
@@ -148,7 +149,7 @@ try {
         if (-not (Test-Path -LiteralPath $ManifestFile -PathType Leaf)) {
             throw "Manifest entry is missing: $Relative"
         }
-        $ActualHash = (Get-FileHash -LiteralPath $ManifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        $ActualHash = Get-Sha256Hex -LiteralPath $ManifestFile
         if ($ActualHash -ne $ExpectedHash) {
             throw "Manifest hash mismatch: $Relative"
         }
@@ -185,7 +186,7 @@ try {
     ) {
         throw "Portable build provenance is incomplete or inconsistent."
     }
-    $PackagedLockHash = (Get-FileHash -LiteralPath (Join-Path $PortableRoot "app\package-lock.json") -Algorithm SHA256).Hash.ToLowerInvariant()
+    $PackagedLockHash = Get-Sha256Hex -LiteralPath (Join-Path $PortableRoot "app\package-lock.json")
     if ($BuildInfo.PACKAGE_LOCK_SHA256 -ne $PackagedLockHash) {
         throw "Packaged lockfile does not match BUILD-INFO.txt."
     }

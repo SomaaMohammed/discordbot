@@ -17,13 +17,22 @@ import {
   type ConversationAddressOptions,
   type ReplyModerationRequest,
 } from "./conversation.js";
+import { classifyError } from "./errors.js";
 import { logError, logInfo } from "./logging.js";
 import { buildConversationReply, escapeUserText } from "./reply-catalog.js";
 import type { BotRuntime, GuildRuntime } from "./runtime.js";
 import { AsyncWorkTracker } from "./discord/work-tracker.js";
 import { describeMudaeDeliveryFailure } from "./mudae-watch-delivery.js";
 import type { PrivateMudaeWatcher } from "./mudae-watch-service.js";
-import type { UserActivityMetric } from "./types.js";
+import type {
+  ModerationCase,
+  ModerationCaseAttemptInput,
+  ModerationCaseTransitionResult,
+  UserActivityMetric,
+} from "./types.js";
+import { processAntiSpamMessage } from "./discord/anti-spam-enforcement.js";
+import { deliverModerationCaseLog } from "./discord/moderation-log-delivery.js";
+import { runModerationTargetAction } from "./discord/moderation-action-queue.js";
 
 export const REPLY_MODERATION_MINUTES = 1;
 const DISCORD_AUDIT_REASON_LIMIT = 512;
@@ -52,6 +61,30 @@ interface MetricStorage {
     metricName: UserActivityMetric,
     amount?: number,
   ) => unknown;
+}
+
+interface ReplyModerationCaseStorage {
+  getModerationConfiguration(): {
+    guildId: string;
+    casesEnabled: boolean;
+    updatedAt: string;
+  } | null;
+  reserveModerationCaseAttempt(
+    input: ModerationCaseAttemptInput,
+  ): ModerationCase;
+  confirmModerationCase(
+    caseId: string,
+    input: {
+      actorId: string;
+      status: "active";
+      discordActionMetadata?: unknown;
+      expectedUpdatedAt?: string;
+    },
+  ): ModerationCaseTransitionResult;
+  failModerationCaseAttempt(
+    caseId: string,
+    input: { actorId: string; failureCode: string; expectedUpdatedAt?: string },
+  ): ModerationCaseTransitionResult;
 }
 
 interface SendableGuildChannel {
@@ -134,6 +167,27 @@ export async function handleMessageCreate(
   }
   const settings = getActiveSettings(runtime);
   if (!settings.enabled) {
+    return;
+  }
+
+  const antiSpamOutcome = await processAntiSpamMessage(message, runtime).catch(
+    (error) => {
+      const classified = classifyError(error);
+      logError(
+        "anti-spam",
+        "Anti-spam processing failed without stopping chat",
+        {
+          guildId,
+          stage: "message-create",
+          category: classified.category,
+          ...(classified.code === null ? {} : { code: classified.code }),
+          retryable: classified.retryable,
+        },
+      );
+      return "continue" as const;
+    },
+  );
+  if (antiSpamOutcome !== "continue" || !runtime.isCurrent()) {
     return;
   }
 
@@ -344,7 +398,21 @@ async function handleReplyModeration(
     return;
   }
 
-  const eligibility = canTimeoutTarget(actor, me, target);
+  await runModerationTargetAction(runtime.guildId, target.id, () =>
+    applyReplyModerationTimeout(message, actor, target, request, runtime, me),
+  );
+}
+
+async function applyReplyModerationTimeout(
+  message: Message,
+  actor: GuildMember,
+  target: GuildMember,
+  request: Extract<ReplyModerationRequest, { type: "timeout" }>,
+  runtime: GuildRuntime,
+  initialBot: GuildMember,
+): Promise<void> {
+  const guild = message.guild!;
+  const eligibility = canTimeoutTarget(actor, initialBot, target);
   if (!eligibility.allowed) {
     const replied = await sendPrimaryReply(
       message,
@@ -356,23 +424,92 @@ async function handleReplyModeration(
     return;
   }
 
-  if (!runtime.isCurrent()) {
+  const storage: ReplyModerationCaseStorage = runtime.storage;
+  const configuration = storage.getModerationConfiguration();
+  if (
+    !configuration?.casesEnabled ||
+    configuration.guildId !== runtime.guildId
+  ) {
     await sendPrimaryReply(
       message,
-      "Server settings changed before the request was applied. No timeout was applied.",
+      "Moderation cases are disabled, so no reply timeout was applied.",
+    );
+    return;
+  }
+  const freshActor = await guild.members
+    .fetch({ user: actor.id, cache: true, force: true })
+    .catch(() => null);
+  const [freshTarget, freshBot] = await Promise.all([
+    guild.members
+      .fetch({ user: target.id, cache: true, force: true })
+      .catch(() => null),
+    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+  ]);
+  const latestConfiguration = storage.getModerationConfiguration();
+  const freshEligibility =
+    freshActor && freshBot && freshTarget
+      ? canTimeoutTarget(freshActor, freshBot, freshTarget)
+      : { allowed: false as const, reason: "current members unavailable" };
+  if (
+    !freshActor ||
+    !freshTarget ||
+    !freshBot ||
+    !freshEligibility.allowed ||
+    freshTarget.isCommunicationDisabled() ||
+    latestConfiguration?.updatedAt !== configuration.updatedAt ||
+    !runtime.isCurrent()
+  ) {
+    await sendPrimaryReply(
+      message,
+      `The final member, hierarchy, timeout, or case configuration check failed${freshEligibility.allowed ? "" : `: ${freshEligibility.reason}`}. No timeout was applied.`,
     );
     return;
   }
 
-  const timeoutReason = buildAuditReason(actor, request.reason);
-  const applied = await target
+  const timeoutReason = buildAuditReason(freshActor, request.reason);
+  let attempt: ModerationCase;
+  try {
+    attempt = storage.reserveModerationCaseAttempt({
+      targetUserId: freshTarget.id,
+      actorId: freshActor.id,
+      actionType: "timeout",
+      source: "superior-command",
+      publicReason: request.reason || "Reply moderation timeout.",
+      privateNote: null,
+      discordActionMetadata: {
+        requestedDurationSeconds: REPLY_MODERATION_MINUTES * 60,
+        sourceMessageId: message.id,
+      },
+      relatedCaseId: null,
+    });
+  } catch (error) {
+    logError("reply-moderation", "Reply timeout case reservation failed", {
+      guildId: runtime.guildId,
+      actorId: freshActor.id,
+      targetId: freshTarget.id,
+      error,
+    });
+    await sendPrimaryReply(
+      message,
+      "Superior could not reserve a durable moderation case, so no timeout was applied.",
+    );
+    return;
+  }
+  const applied = await freshTarget
     .timeout(REPLY_MODERATION_MINUTES * 60_000, timeoutReason)
     .then(() => true)
     .catch((error) => {
+      safeFailReplyModerationAttempt(
+        storage,
+        attempt,
+        freshActor.id,
+        "discord-timeout-failed",
+        runtime.guildId,
+      );
       logError("reply-moderation", "Discord rejected a reply timeout", {
         guildId: runtime.guildId,
-        actorId: actor.id,
-        targetId: target.id,
+        actorId: freshActor.id,
+        targetId: freshTarget.id,
         error,
       });
       return false;
@@ -380,7 +517,7 @@ async function handleReplyModeration(
   if (!applied) {
     const replied = await sendPrimaryReply(
       message,
-      `Discord did not apply the timeout to ${target.toString()}. No timeout was applied.`,
+      `Discord did not apply the timeout to ${freshTarget.toString()}. No timeout was applied.`,
     );
     if (replied && runtime.isCurrent()) {
       recordCommandMetricSafely(runtime, "superior.reply_moderation", false);
@@ -388,15 +525,75 @@ async function handleReplyModeration(
     return;
   }
 
+  const confirmedTarget = await guild.members
+    .fetch({ user: freshTarget.id, cache: true, force: true })
+    .catch(() => null);
+  if (!confirmedTarget?.isCommunicationDisabled()) {
+    safeFailReplyModerationAttempt(
+      storage,
+      attempt,
+      freshActor.id,
+      "timeout-state-unconfirmed",
+      runtime.guildId,
+    );
+    await sendPrimaryReply(
+      message,
+      `Discord did not unambiguously confirm the timeout. Attempt case #${attempt.caseNumber} needs recovery.`,
+    );
+    return;
+  }
+  let confirmed: ModerationCaseTransitionResult;
+  try {
+    confirmed = storage.confirmModerationCase(attempt.caseId, {
+      actorId: freshActor.id,
+      status: "active",
+      discordActionMetadata: {
+        requestedDurationSeconds: REPLY_MODERATION_MINUTES * 60,
+        sourceMessageId: message.id,
+        expiresAt:
+          confirmedTarget.communicationDisabledUntil?.toISOString() ?? null,
+      },
+      expectedUpdatedAt: attempt.updatedAt,
+    });
+  } catch (error) {
+    logError("reply-moderation", "Reply timeout confirmation failed", {
+      guildId: runtime.guildId,
+      actorId: freshActor.id,
+      targetId: freshTarget.id,
+      caseId: attempt.caseId,
+      error,
+    });
+    await sendPrimaryReply(
+      message,
+      `Discord applied the timeout, but attempt case #${attempt.caseNumber} needs persistence recovery.`,
+    );
+    return;
+  }
+  if (confirmed.status !== "changed" && confirmed.status !== "unchanged") {
+    await sendPrimaryReply(
+      message,
+      `Discord applied the timeout, but attempt case #${attempt.caseNumber} needs persistence recovery.`,
+    );
+    return;
+  }
+  const logDelivery = await deliverModerationCaseLog(
+    guild,
+    runtime,
+    confirmed.case,
+  ).catch(() => "failed" as const);
+
   const settingsChanged = !runtime.isCurrent();
   const reasonText = request.reason
     ? ` Reason: ${escapeUserText(request.reason)}.`
     : "";
   const confirmation =
-    `${target.toString()} was timed out for ${REPLY_MODERATION_MINUTES} minute.` +
+    `${freshTarget.toString()} was timed out for ${REPLY_MODERATION_MINUTES} minute. Case #${confirmed.case.caseNumber} was recorded.` +
     reasonText +
     (settingsChanged
       ? " The action completed before server settings changed."
+      : "") +
+    (logDelivery === "failed" || logDelivery === "unavailable"
+      ? " The case is saved, but moderation-log delivery needs recovery."
       : "");
   const replied = await sendPrimaryReply(message, confirmation);
   if (!replied) {
@@ -405,8 +602,8 @@ async function handleReplyModeration(
       "Timeout was applied but the confirmation reply failed",
       {
         guildId: runtime.guildId,
-        actorId: actor.id,
-        targetId: target.id,
+        actorId: freshActor.id,
+        targetId: freshTarget.id,
       },
     );
     return;
@@ -414,17 +611,40 @@ async function handleReplyModeration(
 
   if (runtime.isCurrent()) {
     recordCommandMetricSafely(runtime, "superior.reply_moderation");
-    await sendModerationAudit(guild, runtime, actor, target, request.reason);
   } else {
     logInfo(
       "reply-moderation",
       "Timeout applied while guild settings were invalidated",
       {
         guildId: runtime.guildId,
-        actorId: actor.id,
-        targetId: target.id,
+        actorId: freshActor.id,
+        targetId: freshTarget.id,
       },
     );
+  }
+}
+
+function safeFailReplyModerationAttempt(
+  storage: ReplyModerationCaseStorage,
+  attempt: ModerationCase,
+  actorId: string,
+  failureCode: string,
+  guildId: string,
+): void {
+  try {
+    storage.failModerationCaseAttempt(attempt.caseId, {
+      actorId,
+      failureCode,
+      expectedUpdatedAt: attempt.updatedAt,
+    });
+  } catch (error) {
+    logError("reply-moderation", "Reply timeout failure checkpoint failed", {
+      guildId,
+      actorId,
+      caseId: attempt.caseId,
+      failureCode,
+      error,
+    });
   }
 }
 

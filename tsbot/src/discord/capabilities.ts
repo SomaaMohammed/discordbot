@@ -17,6 +17,10 @@ export const CAPABILITY_DESCRIPTIONS: Readonly<
   "suggestions.review": "Review and decide suggestions",
   "applications.configure": "Configure staff application forms",
   "applications.review": "Review and decide staff applications",
+  "moderation.configure": "Configure moderation and safety services",
+  "moderation.manage": "Manage moderation cases and member sanctions",
+  "reports.review": "Review and decide private member reports",
+  "appeals.review": "Review and decide case appeals",
 });
 
 export const CAPABILITY_CHOICES = GUILD_CAPABILITIES.map((capability) => ({

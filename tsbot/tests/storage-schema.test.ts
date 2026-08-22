@@ -12,10 +12,11 @@ import {
   initializeV5Schema,
   initializeV6Schema,
   initializeV7Schema,
+  initializeV8Schema,
   validateV2Schema,
-  validateV8Schema,
-  V8_EXPLICIT_INDEX_NAMES,
-  V8_TABLE_NAMES,
+  validateV9Schema,
+  V9_EXPLICIT_INDEX_NAMES,
+  V9_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import { createV2FixtureDatabase } from "./helpers/v2-fixture.js";
 
@@ -27,13 +28,13 @@ afterEach(() => {
   }
 });
 
-describe("schema v8", () => {
+describe("schema v9", () => {
   it("creates only the exact active tables and required index", () => {
     const dbFile = freshDatabase();
-    const validation = validateDatabaseFile(dbFile, { expect: 8 });
+    const validation = validateDatabaseFile(dbFile, { expect: 9 });
     expect(validation).toEqual({
-      schema: "current-v8",
-      schemaVersion: 8,
+      schema: "current-v9",
+      schemaVersion: 9,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -48,19 +49,19 @@ describe("schema v8", () => {
         .all() as Array<{ type: string; name: string }>;
       expect(
         objects.filter((row) => row.type === "table").map(rowName),
-      ).toEqual([...V8_TABLE_NAMES].sort());
+      ).toEqual([...V9_TABLE_NAMES].sort());
       expect(
         objects.filter((row) => row.type === "index").map(rowName),
-      ).toEqual([...V8_EXPLICIT_INDEX_NAMES].sort());
+      ).toEqual([...V9_EXPLICIT_INDEX_NAMES].sort());
       expect(objects.some((row) => row.type === "view")).toBe(false);
       expect(objects.some((row) => row.type === "trigger")).toBe(false);
-      expect(validateV8Schema(db)).toEqual([]);
+      expect(validateV9Schema(db)).toEqual([]);
     } finally {
       db.close();
     }
   });
 
-  it("rejects user-principal capability grants in a fresh v8 schema", () => {
+  it("rejects user-principal capability grants in a fresh v9 schema", () => {
     const dbFile = freshDatabase();
     const storage = new BotStorage({ dbFile });
     storage.initStorage();
@@ -86,6 +87,47 @@ describe("schema v8", () => {
             "2026-01-01T00:00:00.000Z",
           ),
       ).toThrow(/CHECK constraint failed/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("flags unsafe anti-spam case metadata during v9 validation", () => {
+    const dbFile = freshDatabase();
+    const storage = new BotStorage({ dbFile });
+    storage.initStorage();
+    storage.ensureGuild("111111111111111111");
+    const moderationCase = storage
+      .forGuild("111111111111111111")
+      .createModerationCase({
+        targetUserId: "222222222222222222",
+        actorId: "333333333333333333",
+        actionType: "automod-warning",
+        source: "anti-spam",
+        publicReason: "Safe automated warning metadata.",
+        status: "active",
+        discordActionMetadata: {
+          ruleType: "burst",
+          messageId: "444444444444444444",
+          channelId: "555555555555555555",
+          observedCount: 4,
+        },
+      });
+    storage.close();
+
+    const db = new Database(dbFile);
+    try {
+      db.prepare(
+        `UPDATE moderation_cases SET discord_action_metadata_json = ?
+         WHERE guild_id = ? AND case_id = ?`,
+      ).run(
+        JSON.stringify({ content: "raw private message content" }),
+        "111111111111111111",
+        moderationCase.caseId,
+      );
+      expect(validateV9Schema(db).join(" ")).toMatch(
+        /unsafe anti-spam metadata/,
+      );
     } finally {
       db.close();
     }
@@ -123,7 +165,31 @@ describe("schema v8", () => {
         "UPDATE guild_settings SET settings_json = '{malformed' WHERE guild_id = ?",
       ).run("111111111111111111");
       expect(detectDatabaseSchema(db)).toBe("unknown");
-      expect(validateV8Schema(db).join(" ")).toMatch(/settings are invalid/);
+      expect(validateV9Schema(db).join(" ")).toMatch(/settings are invalid/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects malformed Phase 3 timestamps despite SQLite dynamic typing", () => {
+    const dbFile = freshDatabase();
+    const storage = new BotStorage({ dbFile });
+    storage.initStorage();
+    storage.ensureGuild("111111111111111111");
+    storage.forGuild("111111111111111111").upsertModerationConfiguration({
+      actorId: "222222222222222222",
+    });
+    storage.close();
+
+    const db = new Database(dbFile);
+    try {
+      db.prepare(
+        "UPDATE moderation_configurations SET updated_at = 'not-a-timestamp' WHERE guild_id = ?",
+      ).run("111111111111111111");
+      expect(detectDatabaseSchema(db)).toBe("unknown");
+      expect(validateV9Schema(db).join(" ")).toMatch(
+        /moderation_configurations contains invalid timestamps/,
+      );
     } finally {
       db.close();
     }
@@ -153,7 +219,7 @@ describe("schema v8", () => {
       );
       db.pragma("ignore_check_constraints = OFF");
 
-      expect(validateV8Schema(db).join(" ")).toMatch(
+      expect(validateV9Schema(db).join(" ")).toMatch(
         /invalid timestamps|invalid delivery state/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -191,7 +257,7 @@ describe("schema v8", () => {
         "2026-01-01T00:00:00.000Z",
       );
 
-      expect(validateV8Schema(db).join(" ")).toMatch(
+      expect(validateV9Schema(db).join(" ")).toMatch(
         /exceeds the per-guild record limit/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -219,7 +285,7 @@ describe("schema v8", () => {
       db.exec("DROP TABLE ticket_events");
       db.exec(table.sql.replace("'creation_reserved'", "'CREATION_RESERVED'"));
       db.exec(index.sql);
-      expect(validateV8Schema(db).join(" ")).toMatch(
+      expect(validateV9Schema(db).join(" ")).toMatch(
         /ticket_events SQL does not match/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -252,7 +318,7 @@ describe("schema v8", () => {
         "2026-01-01T00:00:00.000Z",
       );
       db.pragma("ignore_check_constraints = OFF");
-      expect(validateV8Schema(db).join(" ")).toMatch(
+      expect(validateV9Schema(db).join(" ")).toMatch(
         /invalid or oversized JSON/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -293,7 +359,7 @@ describe("schema v8", () => {
         );
         db.pragma("ignore_check_constraints = OFF");
 
-        expect(validateV8Schema(db).join(" ")).toMatch(/non-text data/);
+        expect(validateV9Schema(db).join(" ")).toMatch(/non-text data/);
         expect(detectDatabaseSchema(db)).toBe("unknown");
       } finally {
         db.close();
@@ -325,7 +391,7 @@ describe("schema v8", () => {
         "2026-01-01T00:00:00.000Z",
       );
 
-      expect(validateV8Schema(db).join(" ")).toMatch(
+      expect(validateV9Schema(db).join(" ")).toMatch(
         /enabled application form does not have 1-5 fields/,
       );
       expect(detectDatabaseSchema(db)).toBe("unknown");
@@ -556,7 +622,7 @@ describe("schema v8", () => {
     );
   });
 
-  it("refuses schema v7 until the explicit v8 migration runs", () => {
+  it("refuses schema v7 until the explicit v9 migration runs", () => {
     const root = makeRoot();
     const dbFile = path.join(root, "v7.db");
     const db = new Database(dbFile);
@@ -567,12 +633,32 @@ describe("schema v8", () => {
 
     const storage = new BotStorage({ dbFile });
     expect(() => storage.initStorage()).toThrow(
-      /schema v7 requires an explicit migration to v8/i,
+      /schema v7 requires an explicit migration to v9/i,
     );
     storage.close();
     expect(fs.readFileSync(dbFile)).toEqual(before);
     expect(validateDatabaseFile(dbFile, { expect: 7 }).schema).toBe(
       "legacy-v7",
+    );
+  });
+
+  it("refuses schema v8 until the explicit v9 migration runs", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "v8.db");
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV8Schema(db, "2026-01-01T00:00:00.000Z");
+    db.close();
+    const before = fs.readFileSync(dbFile);
+
+    const storage = new BotStorage({ dbFile });
+    expect(() => storage.initStorage()).toThrow(
+      /schema v8 requires an explicit migration to v9/i,
+    );
+    storage.close();
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 8 }).schema).toBe(
+      "legacy-v8",
     );
   });
 

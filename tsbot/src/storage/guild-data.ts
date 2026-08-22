@@ -37,6 +37,12 @@ import {
   parseRestrictedPingGuildData,
   RESTRICTED_PING_COLLECTION_LIMITS,
 } from "./guild-data-v5.js";
+import {
+  emptyPhase3GuildData,
+  insertPhase3GuildData,
+  parsePhase3GuildData,
+  PHASE3_COLLECTION_LIMITS,
+} from "./guild-data-v7.js";
 
 const MAX_IMPORTED_METRICS = 50_000;
 const LEGACY_V3_PANEL_PRESETS = [
@@ -50,10 +56,11 @@ export const GUILD_DATA_COLLECTION_LIMITS = Object.freeze({
   metrics: MAX_IMPORTED_METRICS,
   ...PHASE2_COLLECTION_LIMITS,
   ...RESTRICTED_PING_COLLECTION_LIMITS,
+  ...PHASE3_COLLECTION_LIMITS,
 });
 
 export interface ParsedGuildDataImport extends GuildDataExport {
-  sourceFormatVersion: 2 | 3 | 4 | 5 | 6;
+  sourceFormatVersion: 2 | 3 | 4 | 5 | 6 | 7;
 }
 
 type LegacyTicketRecord = Omit<TicketRecord, "departmentId">;
@@ -82,9 +89,12 @@ export function parseGuildDataExport(
     candidate.formatVersion !== 3 &&
     candidate.formatVersion !== 4 &&
     candidate.formatVersion !== 5 &&
-    candidate.formatVersion !== 6
+    candidate.formatVersion !== 6 &&
+    candidate.formatVersion !== 7
   ) {
-    throw new TypeError("Guild import formatVersion must be 2, 3, 4, 5, or 6");
+    throw new TypeError(
+      "Guild import formatVersion must be 2, 3, 4, 5, 6, or 7",
+    );
   }
   if (
     candidate.guildId !== guildId ||
@@ -93,7 +103,7 @@ export function parseGuildDataExport(
     throw new TypeError("Guild import must belong to the current guild");
   }
   const settings =
-    candidate.formatVersion === 6
+    candidate.formatVersion === 6 || candidate.formatVersion === 7
       ? sanitizeGuildSettings(candidate.settings)
       : upgradeLegacyExportSettings(candidate.settings);
   if (!Array.isArray(candidate.metrics)) {
@@ -155,7 +165,8 @@ export function parseGuildDataExport(
   const operational =
     candidate.formatVersion === 4 ||
     candidate.formatVersion === 5 ||
-    candidate.formatVersion === 6
+    candidate.formatVersion === 6 ||
+    candidate.formatVersion === 7
       ? parsePhase2OperationalData(candidate, guildId)
       : candidate.formatVersion === 3
         ? upgradeLegacyV3OperationalData({
@@ -167,12 +178,18 @@ export function parseGuildDataExport(
           })
         : emptyPhase2OperationalData();
   const restrictedPings =
-    candidate.formatVersion === 5 || candidate.formatVersion === 6
+    candidate.formatVersion === 5 ||
+    candidate.formatVersion === 6 ||
+    candidate.formatVersion === 7
       ? parseRestrictedPingGuildData(candidate, guildId)
       : emptyRestrictedPingGuildData();
+  const phase3 =
+    candidate.formatVersion === 7
+      ? parsePhase3GuildData(candidate, guildId)
+      : emptyPhase3GuildData();
   return {
     sourceFormatVersion: candidate.formatVersion,
-    formatVersion: 6,
+    formatVersion: 7,
     guildId,
     exportedAt,
     metadata: candidate.metadata as GuildRecord,
@@ -180,6 +197,7 @@ export function parseGuildDataExport(
     metrics,
     ...operational,
     ...restrictedPings,
+    ...phase3,
   };
 }
 
@@ -507,6 +525,8 @@ export function insertImportedOperationalData(
   insertPhase2OperationalData(db, guildId, imported);
   insertRestrictedPingGuildData(db, guildId, imported);
 }
+
+export { insertPhase3GuildData };
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {

@@ -9,8 +9,10 @@ import {
   parseLegacyGuildSettingsV2Json,
 } from "./guild-settings-v2.js";
 import { isActiveMetricKey } from "./metric-keys.js";
+import { validateModerationCaseMetadata } from "./moderation-case-metadata.js";
 
-export const CURRENT_SCHEMA_VERSION = 8 as const;
+export const CURRENT_SCHEMA_VERSION = 9 as const;
+export const LEGACY_V8_SCHEMA_VERSION = 8 as const;
 export const LEGACY_V7_SCHEMA_VERSION = 7 as const;
 export const LEGACY_V6_SCHEMA_VERSION = 6 as const;
 export const LEGACY_V5_SCHEMA_VERSION = 5 as const;
@@ -54,7 +56,8 @@ export type DatabaseSchemaKind =
   | "legacy-v5"
   | "legacy-v6"
   | "legacy-v7"
-  | "current-v8"
+  | "legacy-v8"
+  | "current-v9"
   | "unknown";
 
 export const SCHEMA_MIGRATIONS_TABLE_SQL = `
@@ -1590,6 +1593,430 @@ const V8_INDEX_SQL: Record<(typeof V8_EXPLICIT_INDEX_NAMES)[number], string> = {
   ...V7_INDEX_SQL,
 };
 
+export const V9_DELEGATED_CAPABILITY_GRANTS_TABLE_SQL = `
+CREATE TABLE delegated_capability_grants (
+  guild_id TEXT NOT NULL,
+  principal_type TEXT NOT NULL CHECK (principal_type = 'role'),
+  principal_id TEXT NOT NULL CHECK (length(principal_id) BETWEEN 17 AND 20 AND principal_id NOT GLOB '*[^0-9]*'),
+  capability TEXT NOT NULL CHECK (capability IN (
+    'panels.manage', 'tickets.configure', 'tickets.manage',
+    'suggestions.configure', 'suggestions.review',
+    'applications.configure', 'applications.review',
+    'moderation.configure', 'moderation.manage', 'reports.review', 'appeals.review'
+  )),
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  granted_by TEXT NOT NULL CHECK (length(granted_by) BETWEEN 17 AND 20 AND granted_by NOT GLOB '*[^0-9]*'),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, principal_type, principal_id, capability),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const V9_POSTED_PANELS_TABLE_SQL = `
+CREATE TABLE posted_panels (
+  guild_id TEXT NOT NULL,
+  panel_id TEXT NOT NULL CHECK (length(panel_id) BETWEEN 8 AND 24 AND panel_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  preset TEXT NOT NULL CHECK (preset IN ('help', 'server-info', 'resources', 'tickets', 'suggestions', 'applications', 'safety')),
+  channel_id TEXT NOT NULL CHECK (length(channel_id) BETWEEN 17 AND 20 AND channel_id NOT GLOB '*[^0-9]*'),
+  message_id TEXT NOT NULL CHECK (length(message_id) BETWEEN 17 AND 20 AND message_id NOT GLOB '*[^0-9]*'),
+  configuration_json TEXT NOT NULL DEFAULT '{}' CHECK (length(CAST(configuration_json AS BLOB)) BETWEEN 2 AND 16000 AND json_valid(configuration_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, panel_id),
+  UNIQUE (guild_id, preset, channel_id),
+  UNIQUE (guild_id, channel_id, message_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const MODERATION_CONFIGURATIONS_TABLE_SQL = `
+CREATE TABLE moderation_configurations (
+  guild_id TEXT NOT NULL PRIMARY KEY,
+  cases_enabled INTEGER NOT NULL DEFAULT 0 CHECK (cases_enabled IN (0, 1)),
+  moderation_log_channel_id TEXT CHECK (moderation_log_channel_id IS NULL OR (length(moderation_log_channel_id) BETWEEN 17 AND 20 AND moderation_log_channel_id NOT GLOB '*[^0-9]*')),
+  moderation_log_verified_at TEXT,
+  reports_enabled INTEGER NOT NULL DEFAULT 0 CHECK (reports_enabled IN (0, 1)),
+  report_review_channel_id TEXT CHECK (report_review_channel_id IS NULL OR (length(report_review_channel_id) BETWEEN 17 AND 20 AND report_review_channel_id NOT GLOB '*[^0-9]*')),
+  report_reviewer_role_id TEXT CHECK (report_reviewer_role_id IS NULL OR (length(report_reviewer_role_id) BETWEEN 17 AND 20 AND report_reviewer_role_id NOT GLOB '*[^0-9]*')),
+  report_bindings_verified_at TEXT,
+  appeals_enabled INTEGER NOT NULL DEFAULT 0 CHECK (appeals_enabled IN (0, 1)),
+  appeal_review_channel_id TEXT CHECK (appeal_review_channel_id IS NULL OR (length(appeal_review_channel_id) BETWEEN 17 AND 20 AND appeal_review_channel_id NOT GLOB '*[^0-9]*')),
+  appeal_reviewer_role_id TEXT CHECK (appeal_reviewer_role_id IS NULL OR (length(appeal_reviewer_role_id) BETWEEN 17 AND 20 AND appeal_reviewer_role_id NOT GLOB '*[^0-9]*')),
+  appeal_bindings_verified_at TEXT,
+  anti_spam_enabled INTEGER NOT NULL DEFAULT 0 CHECK (anti_spam_enabled IN (0, 1)),
+  report_cooldown_limit INTEGER NOT NULL DEFAULT 3 CHECK (report_cooldown_limit BETWEEN 1 AND 10),
+  report_cooldown_window_seconds INTEGER NOT NULL DEFAULT 1800 CHECK (report_cooldown_window_seconds BETWEEN 60 AND 86400),
+  created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 17 AND 20 AND created_by NOT GLOB '*[^0-9]*'),
+  updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 17 AND 20 AND updated_by NOT GLOB '*[^0-9]*'),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (moderation_log_verified_at IS NULL OR moderation_log_channel_id IS NOT NULL),
+  CHECK (reports_enabled = 0 OR (report_review_channel_id IS NOT NULL AND report_reviewer_role_id IS NOT NULL AND report_bindings_verified_at IS NOT NULL)),
+  CHECK (appeals_enabled = 0 OR (appeal_review_channel_id IS NOT NULL AND appeal_reviewer_role_id IS NOT NULL AND appeal_bindings_verified_at IS NOT NULL)),
+  CHECK (report_reviewer_role_id IS NULL OR report_reviewer_role_id <> guild_id),
+  CHECK (appeal_reviewer_role_id IS NULL OR appeal_reviewer_role_id <> guild_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const MODERATION_CASES_TABLE_SQL = `
+CREATE TABLE moderation_cases (
+  guild_id TEXT NOT NULL,
+  case_id TEXT NOT NULL CHECK (length(case_id) BETWEEN 8 AND 24 AND case_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  case_number INTEGER NOT NULL CHECK (case_number BETWEEN 1 AND 2147483647),
+  target_user_id TEXT NOT NULL CHECK (length(target_user_id) BETWEEN 17 AND 20 AND target_user_id NOT GLOB '*[^0-9]*'),
+  actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 17 AND 20 AND actor_id NOT GLOB '*[^0-9]*'),
+  action_type TEXT NOT NULL CHECK (action_type IN ('warning', 'note', 'timeout', 'timeout-removed', 'kick', 'ban', 'unban', 'automod-warning', 'automod-timeout')),
+  source TEXT NOT NULL CHECK (source IN ('moderation-command', 'superior-command', 'anti-spam', 'appeal-review', 'import')),
+  public_reason TEXT NOT NULL CHECK (length(public_reason) BETWEEN 1 AND 500),
+  private_note TEXT CHECK (private_note IS NULL OR length(private_note) BETWEEN 1 AND 1000),
+  discord_action_metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (length(CAST(discord_action_metadata_json AS BLOB)) BETWEEN 2 AND 8000 AND json_valid(discord_action_metadata_json)),
+  status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'voided', 'overturned', 'failed')),
+  related_case_id TEXT CHECK (related_case_id IS NULL OR (length(related_case_id) BETWEEN 8 AND 24 AND related_case_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+  voided_by TEXT CHECK (voided_by IS NULL OR (length(voided_by) BETWEEN 17 AND 20 AND voided_by NOT GLOB '*[^0-9]*')),
+  voided_at TEXT,
+  void_reason TEXT CHECK (void_reason IS NULL OR length(void_reason) BETWEEN 1 AND 1000),
+  overturned_by TEXT CHECK (overturned_by IS NULL OR (length(overturned_by) BETWEEN 17 AND 20 AND overturned_by NOT GLOB '*[^0-9]*')),
+  overturned_at TEXT,
+  overturn_reason TEXT CHECK (overturn_reason IS NULL OR length(overturn_reason) BETWEEN 1 AND 1000),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, case_id),
+  UNIQUE (guild_id, case_number),
+  CHECK (related_case_id IS NULL OR related_case_id <> case_id),
+  CHECK ((status = 'voided') = (voided_by IS NOT NULL AND voided_at IS NOT NULL AND void_reason IS NOT NULL)),
+  CHECK ((status = 'overturned') = (overturned_by IS NOT NULL AND overturned_at IS NOT NULL AND overturn_reason IS NOT NULL)),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, related_case_id) REFERENCES moderation_cases(guild_id, case_id)
+)
+`;
+
+export const MODERATION_CASE_EVENTS_TABLE_SQL = `
+CREATE TABLE moderation_case_events (
+  guild_id TEXT NOT NULL,
+  case_id TEXT NOT NULL,
+  event_id TEXT NOT NULL CHECK (length(event_id) BETWEEN 8 AND 24 AND event_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  event_number INTEGER NOT NULL CHECK (event_number BETWEEN 1 AND 2147483647),
+  event_type TEXT NOT NULL CHECK (event_type IN ('created', 'action-reserved', 'action-confirmed-pending', 'action-confirmed', 'action-failed', 'amended', 'completed', 'voided', 'overturned', 'log-delivered', 'log-failed', 'timeout-expired', 'recovery-noted')),
+  actor_id TEXT CHECK (actor_id IS NULL OR (length(actor_id) BETWEEN 17 AND 20 AND actor_id NOT GLOB '*[^0-9]*')),
+  details_json TEXT NOT NULL DEFAULT '{}' CHECK (length(CAST(details_json AS BLOB)) BETWEEN 2 AND 4000 AND json_valid(details_json)),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, case_id, event_id),
+  UNIQUE (guild_id, case_id, event_number),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, case_id) REFERENCES moderation_cases(guild_id, case_id) ON DELETE CASCADE
+)
+`;
+
+export const MODERATION_LOG_DELIVERIES_TABLE_SQL = `
+CREATE TABLE moderation_log_deliveries (
+  guild_id TEXT NOT NULL,
+  case_id TEXT NOT NULL,
+  delivery_state TEXT NOT NULL DEFAULT 'pending' CHECK (delivery_state IN ('pending', 'delivered', 'failed', 'missing')),
+  channel_id TEXT CHECK (channel_id IS NULL OR (length(channel_id) BETWEEN 17 AND 20 AND channel_id NOT GLOB '*[^0-9]*')),
+  message_id TEXT CHECK (message_id IS NULL OR (length(message_id) BETWEEN 17 AND 20 AND message_id NOT GLOB '*[^0-9]*')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 1000),
+  last_failure_code TEXT CHECK (last_failure_code IS NULL OR length(last_failure_code) BETWEEN 1 AND 100),
+  delivery_claim_id TEXT CHECK (delivery_claim_id IS NULL OR (length(delivery_claim_id) BETWEEN 8 AND 24 AND delivery_claim_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+  delivery_claim_expires_at TEXT,
+  delivery_attempt_id TEXT CHECK (delivery_attempt_id IS NULL OR (length(delivery_attempt_id) BETWEEN 8 AND 24 AND delivery_attempt_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+  delivery_attempt_channel_id TEXT CHECK (delivery_attempt_channel_id IS NULL OR (length(delivery_attempt_channel_id) BETWEEN 17 AND 20 AND delivery_attempt_channel_id NOT GLOB '*[^0-9]*')),
+  delivery_attempt_started_at TEXT,
+  delivered_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, case_id),
+  CHECK ((message_id IS NULL) = (delivered_at IS NULL)),
+  CHECK (message_id IS NULL OR channel_id IS NOT NULL),
+  CHECK (delivery_state <> 'delivered' OR message_id IS NOT NULL),
+  CHECK (delivery_state NOT IN ('pending', 'failed') OR message_id IS NULL),
+  CHECK ((delivery_claim_id IS NULL) = (delivery_claim_expires_at IS NULL)),
+  CHECK (delivery_state <> 'delivered' OR delivery_claim_id IS NULL),
+  CHECK ((delivery_attempt_id IS NULL) = (delivery_attempt_channel_id IS NULL) AND (delivery_attempt_id IS NULL) = (delivery_attempt_started_at IS NULL)),
+  CHECK (delivery_attempt_id IS NULL OR delivery_claim_id IS NOT NULL),
+  CHECK (delivery_state <> 'delivered' OR delivery_attempt_id IS NULL),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, case_id) REFERENCES moderation_cases(guild_id, case_id) ON DELETE CASCADE
+)
+`;
+
+export const MEMBER_REPORTS_TABLE_SQL = `
+CREATE TABLE member_reports (
+  guild_id TEXT NOT NULL,
+  report_id TEXT NOT NULL CHECK (length(report_id) BETWEEN 8 AND 24 AND report_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  report_number INTEGER NOT NULL CHECK (report_number BETWEEN 1 AND 2147483647),
+  reporter_id TEXT NOT NULL CHECK (length(reporter_id) BETWEEN 17 AND 20 AND reporter_id NOT GLOB '*[^0-9]*'),
+  target_user_id TEXT NOT NULL CHECK (length(target_user_id) BETWEEN 17 AND 20 AND target_user_id NOT GLOB '*[^0-9]*'),
+  category TEXT NOT NULL CHECK (category IN ('harassment', 'spam', 'scam', 'safety', 'other')),
+  explanation TEXT NOT NULL CHECK (length(explanation) BETWEEN 10 AND 2000),
+  evidence_guild_id TEXT CHECK (evidence_guild_id IS NULL OR evidence_guild_id = guild_id),
+  evidence_channel_id TEXT CHECK (evidence_channel_id IS NULL OR (length(evidence_channel_id) BETWEEN 17 AND 20 AND evidence_channel_id NOT GLOB '*[^0-9]*')),
+  evidence_message_id TEXT CHECK (evidence_message_id IS NULL OR (length(evidence_message_id) BETWEEN 17 AND 20 AND evidence_message_id NOT GLOB '*[^0-9]*')),
+  state TEXT NOT NULL DEFAULT 'submitted' CHECK (state IN ('submitted', 'under-review', 'resolved', 'dismissed', 'withdrawn')),
+  delivery_state TEXT NOT NULL DEFAULT 'reserved' CHECK (delivery_state IN ('reserved', 'posted', 'failed', 'missing')),
+  review_channel_id TEXT CHECK (review_channel_id IS NULL OR (length(review_channel_id) BETWEEN 17 AND 20 AND review_channel_id NOT GLOB '*[^0-9]*')),
+  review_message_id TEXT CHECK (review_message_id IS NULL OR (length(review_message_id) BETWEEN 17 AND 20 AND review_message_id NOT GLOB '*[^0-9]*')),
+  claimed_by TEXT CHECK (claimed_by IS NULL OR (length(claimed_by) BETWEEN 17 AND 20 AND claimed_by NOT GLOB '*[^0-9]*')),
+  claimed_at TEXT,
+  decision_by TEXT CHECK (decision_by IS NULL OR (length(decision_by) BETWEEN 17 AND 20 AND decision_by NOT GLOB '*[^0-9]*')),
+  decision_reason TEXT CHECK (decision_reason IS NULL OR length(decision_reason) BETWEEN 1 AND 1000),
+  decided_at TEXT,
+  linked_case_id TEXT,
+  withdrawn_at TEXT,
+  failure_code TEXT CHECK (failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 100),
+  delivery_claim_id TEXT CHECK (delivery_claim_id IS NULL OR (length(delivery_claim_id) BETWEEN 8 AND 24 AND delivery_claim_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+  delivery_claim_expires_at TEXT,
+  delivery_attempt_id TEXT CHECK (delivery_attempt_id IS NULL OR (length(delivery_attempt_id) BETWEEN 8 AND 24 AND delivery_attempt_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+  delivery_attempt_channel_id TEXT CHECK (delivery_attempt_channel_id IS NULL OR (length(delivery_attempt_channel_id) BETWEEN 17 AND 20 AND delivery_attempt_channel_id NOT GLOB '*[^0-9]*')),
+  delivery_attempt_started_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, report_id),
+  UNIQUE (guild_id, report_number),
+  CHECK (reporter_id <> target_user_id),
+  CHECK ((evidence_guild_id IS NULL) = (evidence_channel_id IS NULL) AND (evidence_guild_id IS NULL) = (evidence_message_id IS NULL)),
+  CHECK ((review_channel_id IS NULL) = (review_message_id IS NULL)),
+  CHECK ((delivery_state IN ('posted', 'missing')) = (review_message_id IS NOT NULL)),
+  CHECK ((delivery_claim_id IS NULL) = (delivery_claim_expires_at IS NULL)),
+  CHECK (delivery_state <> 'posted' OR delivery_claim_id IS NULL),
+  CHECK ((delivery_attempt_id IS NULL) = (delivery_attempt_channel_id IS NULL) AND (delivery_attempt_id IS NULL) = (delivery_attempt_started_at IS NULL)),
+  CHECK (delivery_attempt_id IS NULL OR delivery_claim_id IS NOT NULL),
+  CHECK (delivery_state <> 'posted' OR delivery_attempt_id IS NULL),
+  CHECK ((claimed_by IS NULL) = (claimed_at IS NULL)),
+  CHECK (state != 'under-review' OR claimed_by IS NOT NULL),
+  CHECK ((state IN ('resolved', 'dismissed')) = (decision_by IS NOT NULL AND decision_reason IS NOT NULL AND decided_at IS NOT NULL)),
+  CHECK ((state = 'withdrawn') = (withdrawn_at IS NOT NULL)),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, linked_case_id) REFERENCES moderation_cases(guild_id, case_id)
+)
+`;
+
+export const MEMBER_REPORT_EVENTS_TABLE_SQL = `
+CREATE TABLE member_report_events (
+  guild_id TEXT NOT NULL, report_id TEXT NOT NULL,
+  event_id TEXT NOT NULL CHECK (length(event_id) BETWEEN 8 AND 24 AND event_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  event_number INTEGER NOT NULL CHECK (event_number BETWEEN 1 AND 2147483647),
+  event_type TEXT NOT NULL CHECK (event_type IN ('submission-reserved', 'submission-posted', 'submission-failed', 'claimed', 'claim-reassigned', 'claim-released', 'decision-recorded', 'withdrawn', 'rebound', 'recovery-noted')),
+  actor_id TEXT CHECK (actor_id IS NULL OR (length(actor_id) BETWEEN 17 AND 20 AND actor_id NOT GLOB '*[^0-9]*')),
+  details_json TEXT NOT NULL DEFAULT '{}' CHECK (length(CAST(details_json AS BLOB)) BETWEEN 2 AND 4000 AND json_valid(details_json)),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, report_id, event_id), UNIQUE (guild_id, report_id, event_number),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, report_id) REFERENCES member_reports(guild_id, report_id) ON DELETE CASCADE
+)
+`;
+
+export const CASE_APPEALS_TABLE_SQL = `
+CREATE TABLE case_appeals (
+  guild_id TEXT NOT NULL,
+  appeal_id TEXT NOT NULL CHECK (length(appeal_id) BETWEEN 8 AND 24 AND appeal_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  appeal_number INTEGER NOT NULL CHECK (appeal_number BETWEEN 1 AND 2147483647),
+  case_id TEXT NOT NULL,
+  appellant_id TEXT NOT NULL CHECK (length(appellant_id) BETWEEN 17 AND 20 AND appellant_id NOT GLOB '*[^0-9]*'),
+  explanation TEXT NOT NULL CHECK (length(explanation) BETWEEN 10 AND 2000),
+  state TEXT NOT NULL DEFAULT 'submitted' CHECK (state IN ('submitted', 'under-review', 'upheld', 'overturned', 'withdrawn')),
+  delivery_state TEXT NOT NULL DEFAULT 'reserved' CHECK (delivery_state IN ('reserved', 'posted', 'failed', 'missing')),
+  review_channel_id TEXT CHECK (review_channel_id IS NULL OR (length(review_channel_id) BETWEEN 17 AND 20 AND review_channel_id NOT GLOB '*[^0-9]*')),
+  review_message_id TEXT CHECK (review_message_id IS NULL OR (length(review_message_id) BETWEEN 17 AND 20 AND review_message_id NOT GLOB '*[^0-9]*')),
+  claimed_by TEXT CHECK (claimed_by IS NULL OR (length(claimed_by) BETWEEN 17 AND 20 AND claimed_by NOT GLOB '*[^0-9]*')),
+  claimed_at TEXT, decision_by TEXT CHECK (decision_by IS NULL OR (length(decision_by) BETWEEN 17 AND 20 AND decision_by NOT GLOB '*[^0-9]*')), decision_reason TEXT CHECK (decision_reason IS NULL OR length(decision_reason) BETWEEN 1 AND 1000), decided_at TEXT,
+  reversal_case_id TEXT CHECK (reversal_case_id IS NULL OR (length(reversal_case_id) BETWEEN 8 AND 24 AND reversal_case_id NOT GLOB '*[^A-Za-z0-9_-]*')), withdrawn_at TEXT,
+  failure_code TEXT CHECK (failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 100),
+  delivery_claim_id TEXT CHECK (delivery_claim_id IS NULL OR (length(delivery_claim_id) BETWEEN 8 AND 24 AND delivery_claim_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+  delivery_claim_expires_at TEXT,
+  delivery_attempt_id TEXT CHECK (delivery_attempt_id IS NULL OR (length(delivery_attempt_id) BETWEEN 8 AND 24 AND delivery_attempt_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+  delivery_attempt_channel_id TEXT CHECK (delivery_attempt_channel_id IS NULL OR (length(delivery_attempt_channel_id) BETWEEN 17 AND 20 AND delivery_attempt_channel_id NOT GLOB '*[^0-9]*')),
+  delivery_attempt_started_at TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, appeal_id), UNIQUE (guild_id, appeal_number), UNIQUE (guild_id, case_id),
+  CHECK ((review_channel_id IS NULL) = (review_message_id IS NULL)),
+  CHECK ((delivery_state IN ('posted', 'missing')) = (review_message_id IS NOT NULL)),
+  CHECK ((delivery_claim_id IS NULL) = (delivery_claim_expires_at IS NULL)),
+  CHECK (delivery_state <> 'posted' OR delivery_claim_id IS NULL),
+  CHECK ((delivery_attempt_id IS NULL) = (delivery_attempt_channel_id IS NULL) AND (delivery_attempt_id IS NULL) = (delivery_attempt_started_at IS NULL)),
+  CHECK (delivery_attempt_id IS NULL OR delivery_claim_id IS NOT NULL),
+  CHECK (delivery_state <> 'posted' OR delivery_attempt_id IS NULL),
+  CHECK ((claimed_by IS NULL) = (claimed_at IS NULL)),
+  CHECK (state != 'under-review' OR claimed_by IS NOT NULL),
+  CHECK ((state IN ('upheld', 'overturned')) = (decision_by IS NOT NULL AND decision_reason IS NOT NULL AND decided_at IS NOT NULL)),
+  CHECK ((state = 'withdrawn') = (withdrawn_at IS NOT NULL)),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, case_id) REFERENCES moderation_cases(guild_id, case_id),
+  FOREIGN KEY (guild_id, reversal_case_id) REFERENCES moderation_cases(guild_id, case_id)
+)
+`;
+
+export const CASE_APPEAL_EVENTS_TABLE_SQL = `
+CREATE TABLE case_appeal_events (
+  guild_id TEXT NOT NULL, appeal_id TEXT NOT NULL,
+  event_id TEXT NOT NULL CHECK (length(event_id) BETWEEN 8 AND 24 AND event_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  event_number INTEGER NOT NULL CHECK (event_number BETWEEN 1 AND 2147483647),
+  event_type TEXT NOT NULL CHECK (event_type IN ('submission-reserved', 'submission-posted', 'submission-failed', 'claimed', 'claim-reassigned', 'claim-released', 'decision-recorded', 'withdrawn', 'rebound', 'recovery-noted')),
+  actor_id TEXT CHECK (actor_id IS NULL OR (length(actor_id) BETWEEN 17 AND 20 AND actor_id NOT GLOB '*[^0-9]*')),
+  details_json TEXT NOT NULL DEFAULT '{}' CHECK (length(CAST(details_json AS BLOB)) BETWEEN 2 AND 4000 AND json_valid(details_json)), created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, appeal_id, event_id), UNIQUE (guild_id, appeal_id, event_number),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, appeal_id) REFERENCES case_appeals(guild_id, appeal_id) ON DELETE CASCADE
+)
+`;
+
+export const ANTI_SPAM_RULES_TABLE_SQL = `
+CREATE TABLE anti_spam_rules (
+  guild_id TEXT NOT NULL, rule_type TEXT NOT NULL CHECK (rule_type IN ('burst', 'duplicate', 'mention')),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)), threshold INTEGER NOT NULL CHECK (threshold BETWEEN 2 AND 100),
+  window_seconds INTEGER CHECK (window_seconds IS NULL OR window_seconds BETWEEN 1 AND 300),
+  action TEXT NOT NULL CHECK (action IN ('delete', 'delete-and-warn', 'delete-and-timeout')),
+  timeout_seconds INTEGER CHECK (timeout_seconds IS NULL OR timeout_seconds BETWEEN 60 AND 2419200),
+  cooldown_seconds INTEGER NOT NULL CHECK (cooldown_seconds BETWEEN 1 AND 86400),
+  created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 17 AND 20 AND created_by NOT GLOB '*[^0-9]*'),
+  updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 17 AND 20 AND updated_by NOT GLOB '*[^0-9]*'), created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, rule_type),
+  CHECK ((rule_type = 'mention') = (window_seconds IS NULL)),
+  CHECK ((action = 'delete-and-timeout') = (timeout_seconds IS NOT NULL)),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const ANTI_SPAM_EXEMPT_ROLES_TABLE_SQL = `
+CREATE TABLE anti_spam_exempt_roles (
+  guild_id TEXT NOT NULL, role_id TEXT NOT NULL CHECK (length(role_id) BETWEEN 17 AND 20 AND role_id NOT GLOB '*[^0-9]*'),
+  created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 17 AND 20 AND created_by NOT GLOB '*[^0-9]*'), created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, role_id), CHECK (role_id <> guild_id), FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+export const ANTI_SPAM_EXEMPT_CHANNELS_TABLE_SQL = `
+CREATE TABLE anti_spam_exempt_channels (
+  guild_id TEXT NOT NULL, channel_id TEXT NOT NULL CHECK (length(channel_id) BETWEEN 17 AND 20 AND channel_id NOT GLOB '*[^0-9]*'),
+  created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 17 AND 20 AND created_by NOT GLOB '*[^0-9]*'), created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, channel_id), FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const ANTI_SPAM_ENFORCEMENTS_TABLE_SQL = `
+CREATE TABLE anti_spam_enforcements (
+  guild_id TEXT NOT NULL,
+  enforcement_id TEXT NOT NULL CHECK (length(enforcement_id) BETWEEN 8 AND 24 AND enforcement_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  rule_type TEXT NOT NULL CHECK (rule_type IN ('burst', 'duplicate', 'mention')),
+  message_id TEXT NOT NULL CHECK (length(message_id) BETWEEN 17 AND 20 AND message_id NOT GLOB '*[^0-9]*'),
+  member_id TEXT NOT NULL CHECK (length(member_id) BETWEEN 17 AND 20 AND member_id NOT GLOB '*[^0-9]*'),
+  channel_id TEXT NOT NULL CHECK (length(channel_id) BETWEEN 17 AND 20 AND channel_id NOT GLOB '*[^0-9]*'),
+  observed_count INTEGER NOT NULL CHECK (observed_count BETWEEN 1 AND 1000),
+  enforcement_state TEXT NOT NULL CHECK (enforcement_state IN ('reserved', 'deleted', 'warned', 'timed-out', 'failed', 'skipped')),
+  reservation_id TEXT CHECK (reservation_id IS NULL OR (length(reservation_id) BETWEEN 8 AND 24 AND reservation_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+  case_id TEXT, failure_code TEXT CHECK (failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 100),
+  reservation_expires_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, enforcement_id), UNIQUE (guild_id, rule_type, message_id, member_id),
+  CHECK ((enforcement_state = 'reserved') = (reservation_id IS NOT NULL AND reservation_expires_at IS NOT NULL AND completed_at IS NULL)),
+  CHECK (enforcement_state = 'reserved' OR (reservation_id IS NULL AND reservation_expires_at IS NULL AND completed_at IS NOT NULL)),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, rule_type) REFERENCES anti_spam_rules(guild_id, rule_type),
+  FOREIGN KEY (guild_id, case_id) REFERENCES moderation_cases(guild_id, case_id)
+)
+`;
+
+export const ANTI_SPAM_EVENTS_TABLE_SQL = `
+CREATE TABLE anti_spam_events (
+  guild_id TEXT NOT NULL, event_id TEXT NOT NULL CHECK (length(event_id) BETWEEN 8 AND 24 AND event_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  event_number INTEGER NOT NULL CHECK (event_number BETWEEN 1 AND 2147483647), rule_type TEXT NOT NULL CHECK (rule_type IN ('burst', 'duplicate', 'mention')),
+  message_id TEXT NOT NULL CHECK (length(message_id) BETWEEN 17 AND 20 AND message_id NOT GLOB '*[^0-9]*'), member_id TEXT NOT NULL CHECK (length(member_id) BETWEEN 17 AND 20 AND member_id NOT GLOB '*[^0-9]*'), channel_id TEXT NOT NULL CHECK (length(channel_id) BETWEEN 17 AND 20 AND channel_id NOT GLOB '*[^0-9]*'), observed_count INTEGER NOT NULL CHECK (observed_count BETWEEN 1 AND 1000),
+  outcome TEXT NOT NULL CHECK (outcome IN ('deleted', 'warned', 'timed-out', 'failed', 'skipped')), case_id TEXT,
+  failure_code TEXT CHECK (failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 100), created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, event_id), UNIQUE (guild_id, event_number),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, case_id) REFERENCES moderation_cases(guild_id, case_id)
+)
+`;
+
+export const V9_TABLE_NAMES = [
+  ...V8_TABLE_NAMES,
+  "moderation_configurations",
+  "moderation_cases",
+  "moderation_case_events",
+  "moderation_log_deliveries",
+  "member_reports",
+  "member_report_events",
+  "case_appeals",
+  "case_appeal_events",
+  "anti_spam_rules",
+  "anti_spam_exempt_roles",
+  "anti_spam_exempt_channels",
+  "anti_spam_enforcements",
+  "anti_spam_events",
+] as const;
+
+export const V9_EXPLICIT_INDEX_NAMES = [
+  ...V8_EXPLICIT_INDEX_NAMES,
+  "idx_moderation_cases_guild_target",
+  "idx_moderation_cases_guild_status",
+  "idx_moderation_case_events_parent",
+  "idx_moderation_log_delivery_state",
+  "idx_member_reports_guild_state",
+  "idx_member_reports_reporter_created",
+  "idx_member_reports_review_message",
+  "idx_member_report_events_parent",
+  "idx_case_appeals_guild_state",
+  "idx_case_appeals_appellant",
+  "idx_case_appeals_review_message",
+  "idx_case_appeal_events_parent",
+  "idx_anti_spam_enforcements_member",
+  "idx_anti_spam_enforcements_reservation",
+  "idx_anti_spam_events_guild_number",
+] as const;
+
+const V9_TABLE_SQL: Record<(typeof V9_TABLE_NAMES)[number], string> = {
+  ...V8_TABLE_SQL,
+  delegated_capability_grants: V9_DELEGATED_CAPABILITY_GRANTS_TABLE_SQL,
+  posted_panels: V9_POSTED_PANELS_TABLE_SQL,
+  moderation_configurations: MODERATION_CONFIGURATIONS_TABLE_SQL,
+  moderation_cases: MODERATION_CASES_TABLE_SQL,
+  moderation_case_events: MODERATION_CASE_EVENTS_TABLE_SQL,
+  moderation_log_deliveries: MODERATION_LOG_DELIVERIES_TABLE_SQL,
+  member_reports: MEMBER_REPORTS_TABLE_SQL,
+  member_report_events: MEMBER_REPORT_EVENTS_TABLE_SQL,
+  case_appeals: CASE_APPEALS_TABLE_SQL,
+  case_appeal_events: CASE_APPEAL_EVENTS_TABLE_SQL,
+  anti_spam_rules: ANTI_SPAM_RULES_TABLE_SQL,
+  anti_spam_exempt_roles: ANTI_SPAM_EXEMPT_ROLES_TABLE_SQL,
+  anti_spam_exempt_channels: ANTI_SPAM_EXEMPT_CHANNELS_TABLE_SQL,
+  anti_spam_enforcements: ANTI_SPAM_ENFORCEMENTS_TABLE_SQL,
+  anti_spam_events: ANTI_SPAM_EVENTS_TABLE_SQL,
+};
+
+const V9_INDEX_SQL: Record<(typeof V9_EXPLICIT_INDEX_NAMES)[number], string> = {
+  ...V8_INDEX_SQL,
+  idx_moderation_cases_guild_target:
+    "CREATE INDEX idx_moderation_cases_guild_target ON moderation_cases (guild_id, target_user_id, status, action_type, case_number DESC)",
+  idx_moderation_cases_guild_status:
+    "CREATE INDEX idx_moderation_cases_guild_status ON moderation_cases (guild_id, status, case_number DESC)",
+  idx_moderation_case_events_parent:
+    "CREATE INDEX idx_moderation_case_events_parent ON moderation_case_events (guild_id, case_id, event_number)",
+  idx_moderation_log_delivery_state:
+    "CREATE INDEX idx_moderation_log_delivery_state ON moderation_log_deliveries (guild_id, delivery_state, updated_at)",
+  idx_member_reports_guild_state:
+    "CREATE INDEX idx_member_reports_guild_state ON member_reports (guild_id, state, report_number DESC)",
+  idx_member_reports_reporter_created:
+    "CREATE INDEX idx_member_reports_reporter_created ON member_reports (guild_id, reporter_id, created_at DESC)",
+  idx_member_reports_review_message:
+    "CREATE UNIQUE INDEX idx_member_reports_review_message ON member_reports (guild_id, review_channel_id, review_message_id) WHERE review_message_id IS NOT NULL",
+  idx_member_report_events_parent:
+    "CREATE INDEX idx_member_report_events_parent ON member_report_events (guild_id, report_id, event_number)",
+  idx_case_appeals_guild_state:
+    "CREATE INDEX idx_case_appeals_guild_state ON case_appeals (guild_id, state, appeal_number DESC)",
+  idx_case_appeals_appellant:
+    "CREATE INDEX idx_case_appeals_appellant ON case_appeals (guild_id, appellant_id, appeal_number DESC)",
+  idx_case_appeals_review_message:
+    "CREATE UNIQUE INDEX idx_case_appeals_review_message ON case_appeals (guild_id, review_channel_id, review_message_id) WHERE review_message_id IS NOT NULL",
+  idx_case_appeal_events_parent:
+    "CREATE INDEX idx_case_appeal_events_parent ON case_appeal_events (guild_id, appeal_id, event_number)",
+  idx_anti_spam_enforcements_member:
+    "CREATE INDEX idx_anti_spam_enforcements_member ON anti_spam_enforcements (guild_id, rule_type, member_id, updated_at DESC)",
+  idx_anti_spam_enforcements_reservation:
+    "CREATE UNIQUE INDEX idx_anti_spam_enforcements_reservation ON anti_spam_enforcements (guild_id, reservation_id) WHERE reservation_id IS NOT NULL",
+  idx_anti_spam_events_guild_number:
+    "CREATE INDEX idx_anti_spam_events_guild_number ON anti_spam_events (guild_id, event_number DESC)",
+};
+
 export const V1_TABLE_NAMES = [
   "kv",
   "posts",
@@ -1899,7 +2326,7 @@ export function createV7Objects(db: Database.Database): void {
   createV7OperationalObjects(db);
 }
 
-/** Creates the active schema-v8 layout for a new, empty database. */
+/** Creates the frozen schema-v8 layout used by legacy migration tests. */
 export function createV8Objects(db: Database.Database): void {
   for (const table of V8_TABLE_NAMES) {
     db.exec(V8_TABLE_SQL[table]);
@@ -1907,6 +2334,38 @@ export function createV8Objects(db: Database.Database): void {
   for (const index of V8_EXPLICIT_INDEX_NAMES) {
     db.exec(V8_INDEX_SQL[index]);
   }
+}
+
+/** Adds only schema-v9 objects after the two enum-bound v8 tables are rebuilt. */
+export function createV9OperationalObjects(db: Database.Database): void {
+  for (const table of V9_TABLE_NAMES) {
+    if (!(V8_TABLE_NAMES as readonly string[]).includes(table)) {
+      db.exec(V9_TABLE_SQL[table]);
+    }
+  }
+  for (const index of V9_EXPLICIT_INDEX_NAMES) {
+    if (!(V8_EXPLICIT_INDEX_NAMES as readonly string[]).includes(index)) {
+      db.exec(V9_INDEX_SQL[index]);
+    }
+  }
+}
+
+/** Recreates the two v8 enum-bound tables and their existing indexes for v9. */
+export function createV9ReplacementObjects(db: Database.Database): void {
+  db.exec(V9_DELEGATED_CAPABILITY_GRANTS_TABLE_SQL);
+  db.exec(V9_POSTED_PANELS_TABLE_SQL);
+  for (const index of [
+    "idx_capability_grants_guild_capability",
+    "idx_capability_grants_guild_principal",
+    "idx_posted_panels_guild_preset",
+  ] as const) {
+    db.exec(V9_INDEX_SQL[index]);
+  }
+}
+
+export function createV9Objects(db: Database.Database): void {
+  for (const table of V9_TABLE_NAMES) db.exec(V9_TABLE_SQL[table]);
+  for (const index of V9_EXPLICIT_INDEX_NAMES) db.exec(V9_INDEX_SQL[index]);
 }
 
 /** Creates the v8 settings table after the frozen v7 table was renamed. */
@@ -1957,6 +2416,15 @@ export function recordCurrentSchemaVersion(
   db.prepare(
     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
   ).run(CURRENT_SCHEMA_VERSION, appliedAt);
+}
+
+export function recordV8SchemaVersion(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  db.prepare(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+  ).run(LEGACY_V8_SCHEMA_VERSION, appliedAt);
 }
 
 export function initializeV3Schema(
@@ -2042,8 +2510,23 @@ export function initializeV8Schema(
 ): void {
   const initialize = db.transaction(() => {
     createV8Objects(db);
-    recordCurrentSchemaVersion(db, appliedAt);
+    recordV8SchemaVersion(db, appliedAt);
     const issues = validateV8Schema(db);
+    if (issues.length > 0) {
+      throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
+    }
+  });
+  initialize.immediate();
+}
+
+export function initializeV9Schema(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  const initialize = db.transaction(() => {
+    createV9Objects(db);
+    recordCurrentSchemaVersion(db, appliedAt);
+    const issues = validateV9Schema(db);
     if (issues.length > 0) {
       throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
     }
@@ -2071,8 +2554,12 @@ export function detectDatabaseSchema(
     .map((row) => row.name)
     .sort();
 
+  if (sameStrings(tables, [...V9_TABLE_NAMES].sort())) {
+    return validateV9Schema(db).length === 0 ? "current-v9" : "unknown";
+  }
+
   if (sameStrings(tables, [...V8_TABLE_NAMES].sort())) {
-    if (validateV8Schema(db).length === 0) return "current-v8";
+    if (validateV8Schema(db).length === 0) return "legacy-v8";
     if (validateV7Schema(db).length === 0) return "legacy-v7";
     return "unknown";
   }
@@ -2475,25 +2962,25 @@ export function validateV8Schema(db: Database.Database): string[] {
     .all() as Array<{ version: number; applied_at: string }>;
   const versionNumbers = versions.map((row) => row.version);
   const validVersionSequence = [
-    [CURRENT_SCHEMA_VERSION],
-    [LEGACY_V7_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION],
+    [LEGACY_V8_SCHEMA_VERSION],
+    [LEGACY_V7_SCHEMA_VERSION, LEGACY_V8_SCHEMA_VERSION],
     [
       LEGACY_V6_SCHEMA_VERSION,
       LEGACY_V7_SCHEMA_VERSION,
-      CURRENT_SCHEMA_VERSION,
+      LEGACY_V8_SCHEMA_VERSION,
     ],
     [
       LEGACY_V5_SCHEMA_VERSION,
       LEGACY_V6_SCHEMA_VERSION,
       LEGACY_V7_SCHEMA_VERSION,
-      CURRENT_SCHEMA_VERSION,
+      LEGACY_V8_SCHEMA_VERSION,
     ],
     [
       LEGACY_V4_SCHEMA_VERSION,
       LEGACY_V5_SCHEMA_VERSION,
       LEGACY_V6_SCHEMA_VERSION,
       LEGACY_V7_SCHEMA_VERSION,
-      CURRENT_SCHEMA_VERSION,
+      LEGACY_V8_SCHEMA_VERSION,
     ],
     [
       LEGACY_V3_SCHEMA_VERSION,
@@ -2501,7 +2988,7 @@ export function validateV8Schema(db: Database.Database): string[] {
       LEGACY_V5_SCHEMA_VERSION,
       LEGACY_V6_SCHEMA_VERSION,
       LEGACY_V7_SCHEMA_VERSION,
-      CURRENT_SCHEMA_VERSION,
+      LEGACY_V8_SCHEMA_VERSION,
     ],
   ].some(
     (expected) =>
@@ -2521,6 +3008,48 @@ export function validateV8Schema(db: Database.Database): string[] {
   validateV5Data(db, issues);
   validateV6Data(db, issues);
   validateV7Data(db, issues);
+  validateDatabaseHealth(db, issues);
+  return issues;
+}
+
+export function validateV9Schema(db: Database.Database): string[] {
+  const issues = validateExactObjects(
+    db,
+    [...V9_TABLE_NAMES],
+    [...V9_EXPLICIT_INDEX_NAMES],
+  );
+  if (issues.length > 0) return issues;
+
+  validateSqlDefinitions(db, V9_TABLE_SQL, "table", issues);
+  validateSqlDefinitions(db, V9_INDEX_SQL, "index", issues);
+  const versions = db
+    .prepare(
+      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
+    )
+    .all() as Array<{ version: number; applied_at: string }>;
+  const numbers = versions.map((row) => row.version);
+  const valid =
+    numbers.length >= 1 &&
+    numbers.at(-1) === CURRENT_SCHEMA_VERSION &&
+    numbers.every(
+      (version, index) =>
+        Number.isInteger(version) &&
+        version >= 3 &&
+        version <= CURRENT_SCHEMA_VERSION &&
+        (index === 0 || version === numbers[index - 1]! + 1),
+    ) &&
+    versions.every((row) => isValidTimestamp(row.applied_at));
+  if (!valid) {
+    issues.push(
+      "schema_migrations must contain version 9, optionally following a complete supported sequence ending at version 8",
+    );
+  }
+
+  validateV8CoreData(db, issues);
+  validateV5Data(db, issues);
+  validateV6Data(db, issues);
+  validateV7Data(db, issues);
+  validateV9Data(db, issues);
   validateDatabaseHealth(db, issues);
   return issues;
 }
@@ -3458,6 +3987,445 @@ function validateV7Data(db: Database.Database, issues: string[]): void {
     "mudae_watch_deliveries exceeds the per-guild record limit",
     issues,
   );
+}
+
+function validateV9Data(db: Database.Database, issues: string[]): void {
+  const textColumns: ReadonlyArray<
+    readonly [string, readonly string[], readonly string[]]
+  > = [
+    [
+      "moderation_configurations",
+      ["guild_id", "created_by", "updated_by", "created_at", "updated_at"],
+      [
+        "moderation_log_channel_id",
+        "moderation_log_verified_at",
+        "report_review_channel_id",
+        "report_reviewer_role_id",
+        "report_bindings_verified_at",
+        "appeal_review_channel_id",
+        "appeal_reviewer_role_id",
+        "appeal_bindings_verified_at",
+      ],
+    ],
+    [
+      "moderation_cases",
+      [
+        "guild_id",
+        "case_id",
+        "target_user_id",
+        "actor_id",
+        "action_type",
+        "source",
+        "public_reason",
+        "discord_action_metadata_json",
+        "status",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "private_note",
+        "related_case_id",
+        "voided_by",
+        "voided_at",
+        "void_reason",
+        "overturned_by",
+        "overturned_at",
+        "overturn_reason",
+      ],
+    ],
+    [
+      "moderation_case_events",
+      [
+        "guild_id",
+        "case_id",
+        "event_id",
+        "event_type",
+        "details_json",
+        "created_at",
+      ],
+      ["actor_id"],
+    ],
+    [
+      "moderation_log_deliveries",
+      ["guild_id", "case_id", "delivery_state", "created_at", "updated_at"],
+      [
+        "channel_id",
+        "message_id",
+        "last_failure_code",
+        "delivery_claim_id",
+        "delivery_claim_expires_at",
+        "delivery_attempt_id",
+        "delivery_attempt_channel_id",
+        "delivery_attempt_started_at",
+        "delivered_at",
+      ],
+    ],
+    [
+      "member_reports",
+      [
+        "guild_id",
+        "report_id",
+        "reporter_id",
+        "target_user_id",
+        "category",
+        "explanation",
+        "state",
+        "delivery_state",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "evidence_guild_id",
+        "evidence_channel_id",
+        "evidence_message_id",
+        "review_channel_id",
+        "review_message_id",
+        "claimed_by",
+        "claimed_at",
+        "decision_by",
+        "decision_reason",
+        "decided_at",
+        "linked_case_id",
+        "withdrawn_at",
+        "failure_code",
+        "delivery_claim_id",
+        "delivery_claim_expires_at",
+        "delivery_attempt_id",
+        "delivery_attempt_channel_id",
+        "delivery_attempt_started_at",
+      ],
+    ],
+    [
+      "member_report_events",
+      [
+        "guild_id",
+        "report_id",
+        "event_id",
+        "event_type",
+        "details_json",
+        "created_at",
+      ],
+      ["actor_id"],
+    ],
+    [
+      "case_appeals",
+      [
+        "guild_id",
+        "appeal_id",
+        "case_id",
+        "appellant_id",
+        "explanation",
+        "state",
+        "delivery_state",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "review_channel_id",
+        "review_message_id",
+        "claimed_by",
+        "claimed_at",
+        "decision_by",
+        "decision_reason",
+        "decided_at",
+        "reversal_case_id",
+        "withdrawn_at",
+        "failure_code",
+        "delivery_claim_id",
+        "delivery_claim_expires_at",
+        "delivery_attempt_id",
+        "delivery_attempt_channel_id",
+        "delivery_attempt_started_at",
+      ],
+    ],
+    [
+      "case_appeal_events",
+      [
+        "guild_id",
+        "appeal_id",
+        "event_id",
+        "event_type",
+        "details_json",
+        "created_at",
+      ],
+      ["actor_id"],
+    ],
+    [
+      "anti_spam_rules",
+      [
+        "guild_id",
+        "rule_type",
+        "action",
+        "created_by",
+        "updated_by",
+        "created_at",
+        "updated_at",
+      ],
+      [],
+    ],
+    [
+      "anti_spam_exempt_roles",
+      ["guild_id", "role_id", "created_by", "created_at"],
+      [],
+    ],
+    [
+      "anti_spam_exempt_channels",
+      ["guild_id", "channel_id", "created_by", "created_at"],
+      [],
+    ],
+    [
+      "anti_spam_enforcements",
+      [
+        "guild_id",
+        "enforcement_id",
+        "rule_type",
+        "message_id",
+        "member_id",
+        "channel_id",
+        "enforcement_state",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "reservation_id",
+        "case_id",
+        "failure_code",
+        "reservation_expires_at",
+        "completed_at",
+      ],
+    ],
+    [
+      "anti_spam_events",
+      [
+        "guild_id",
+        "event_id",
+        "rule_type",
+        "message_id",
+        "member_id",
+        "channel_id",
+        "outcome",
+        "created_at",
+      ],
+      ["case_id", "failure_code"],
+    ],
+  ];
+  for (const [table, required, nullable] of textColumns) {
+    validateTextColumnTypes(db, table, required, nullable, issues);
+  }
+
+  const timestamps: ReadonlyArray<
+    readonly [string, readonly string[], readonly string[]]
+  > = [
+    [
+      "moderation_configurations",
+      ["created_at", "updated_at"],
+      [
+        "moderation_log_verified_at",
+        "report_bindings_verified_at",
+        "appeal_bindings_verified_at",
+      ],
+    ],
+    [
+      "moderation_cases",
+      ["created_at", "updated_at"],
+      ["voided_at", "overturned_at"],
+    ],
+    ["moderation_case_events", ["created_at"], []],
+    [
+      "moderation_log_deliveries",
+      ["created_at", "updated_at"],
+      [
+        "delivery_claim_expires_at",
+        "delivery_attempt_started_at",
+        "delivered_at",
+      ],
+    ],
+    [
+      "member_reports",
+      ["created_at", "updated_at"],
+      [
+        "claimed_at",
+        "decided_at",
+        "withdrawn_at",
+        "delivery_claim_expires_at",
+        "delivery_attempt_started_at",
+      ],
+    ],
+    ["member_report_events", ["created_at"], []],
+    [
+      "case_appeals",
+      ["created_at", "updated_at"],
+      [
+        "claimed_at",
+        "decided_at",
+        "withdrawn_at",
+        "delivery_claim_expires_at",
+        "delivery_attempt_started_at",
+      ],
+    ],
+    ["case_appeal_events", ["created_at"], []],
+    ["anti_spam_rules", ["created_at", "updated_at"], []],
+    ["anti_spam_exempt_roles", ["created_at"], []],
+    ["anti_spam_exempt_channels", ["created_at"], []],
+    [
+      "anti_spam_enforcements",
+      ["created_at", "updated_at"],
+      ["reservation_expires_at", "completed_at"],
+    ],
+    ["anti_spam_events", ["created_at"], []],
+  ];
+  for (const [table, required, nullable] of timestamps) {
+    validateTimestampColumns(db, table, required, nullable, issues);
+  }
+
+  for (const [table, column, maximum] of [
+    ["moderation_cases", "discord_action_metadata_json", 8_000],
+    ["moderation_case_events", "details_json", 4_000],
+    ["member_report_events", "details_json", 4_000],
+    ["case_appeal_events", "details_json", 4_000],
+  ] as const) {
+    validateNoMatchingRows(
+      db,
+      `SELECT 1 FROM ${quoteIdentifier(table)}
+       WHERE json_valid(${quoteIdentifier(column)}) = 0
+          OR length(CAST(${quoteIdentifier(column)} AS BLOB)) NOT BETWEEN 2 AND ${maximum}
+       LIMIT 1`,
+      `${table} contains invalid or oversized JSON`,
+      issues,
+    );
+  }
+
+  const antiSpamCaseMetadataRows = db
+    .prepare(
+      `SELECT action_type, discord_action_metadata_json
+       FROM moderation_cases WHERE source = 'anti-spam'
+       ORDER BY guild_id, case_number LIMIT 100001`,
+    )
+    .all() as Array<{
+    action_type: string;
+    discord_action_metadata_json: string;
+  }>;
+  for (const row of antiSpamCaseMetadataRows) {
+    try {
+      validateModerationCaseMetadata(
+        JSON.parse(row.discord_action_metadata_json) as unknown,
+        "anti-spam",
+        row.action_type as Parameters<typeof validateModerationCaseMetadata>[2],
+      );
+    } catch {
+      issues.push("moderation_cases contains unsafe anti-spam metadata");
+      break;
+    }
+  }
+
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM member_reports AS report
+     LEFT JOIN moderation_cases AS linked
+       ON linked.guild_id = report.guild_id
+      AND linked.case_id = report.linked_case_id
+     WHERE report.linked_case_id IS NOT NULL
+       AND (report.state <> 'resolved'
+         OR linked.case_id IS NULL
+         OR linked.target_user_id <> report.target_user_id
+         OR linked.status NOT IN ('active', 'completed')
+         OR linked.action_type NOT IN ('warning', 'timeout', 'kick', 'ban', 'automod-warning', 'automod-timeout')
+         OR julianday(linked.created_at) < julianday(report.created_at))
+     LIMIT 1`,
+    "member_reports contains an invalid linked moderation case",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM case_appeals AS appeal
+     LEFT JOIN moderation_cases AS original
+       ON original.guild_id = appeal.guild_id
+      AND original.case_id = appeal.case_id
+     LEFT JOIN moderation_cases AS reversal
+       ON reversal.guild_id = appeal.guild_id
+      AND reversal.case_id = appeal.reversal_case_id
+     WHERE original.case_id IS NULL
+        OR original.target_user_id <> appeal.appellant_id
+        OR original.action_type NOT IN ('warning', 'timeout', 'kick', 'ban')
+        OR (appeal.state <> 'overturned' AND appeal.reversal_case_id IS NOT NULL)
+        OR (appeal.state = 'overturned' AND original.status <> 'overturned')
+        OR (appeal.state = 'overturned' AND original.action_type IN ('warning', 'kick')
+            AND appeal.reversal_case_id IS NOT NULL)
+        OR (appeal.state = 'overturned' AND original.action_type = 'timeout'
+            AND (reversal.case_id IS NULL
+              OR reversal.action_type <> 'timeout-removed'
+              OR reversal.status <> 'completed'
+              OR reversal.target_user_id <> original.target_user_id
+              OR reversal.related_case_id IS NOT original.case_id
+              OR original.related_case_id IS NOT reversal.case_id))
+        OR (appeal.state = 'overturned' AND original.action_type = 'ban'
+            AND (reversal.case_id IS NULL
+              OR reversal.action_type <> 'unban'
+              OR reversal.status <> 'completed'
+              OR reversal.target_user_id <> original.target_user_id
+              OR reversal.related_case_id IS NOT original.case_id
+              OR original.related_case_id IS NOT reversal.case_id))
+     LIMIT 1`,
+    "case_appeals contains invalid original or reversal case linkage",
+    issues,
+  );
+
+  for (const table of [
+    "moderation_configurations",
+    "moderation_cases",
+    "moderation_case_events",
+    "moderation_log_deliveries",
+    "member_reports",
+    "member_report_events",
+    "case_appeals",
+    "case_appeal_events",
+    "anti_spam_rules",
+    "anti_spam_exempt_roles",
+    "anti_spam_exempt_channels",
+    "anti_spam_enforcements",
+    "anti_spam_events",
+  ]) {
+    validateNoMatchingRows(
+      db,
+      `SELECT 1 FROM ${quoteIdentifier(table)} AS row
+       LEFT JOIN guilds AS guild ON guild.guild_id = row.guild_id
+       WHERE guild.guild_id IS NULL LIMIT 1`,
+      `${table} contains a row without its guild`,
+      issues,
+    );
+  }
+  for (const [table, maximum] of [
+    ["moderation_cases", 100_000],
+    ["moderation_case_events", 10_000_000],
+    ["member_reports", 50_000],
+    ["member_report_events", 5_000_000],
+    ["case_appeals", 50_000],
+    ["case_appeal_events", 5_000_000],
+    ["anti_spam_rules", 3],
+    ["anti_spam_exempt_roles", 250],
+    ["anti_spam_exempt_channels", 250],
+    ["anti_spam_enforcements", 100_000],
+    ["anti_spam_events", 100_000],
+  ] as const) {
+    validateNoMatchingRows(
+      db,
+      `SELECT 1 FROM ${quoteIdentifier(table)} GROUP BY guild_id HAVING COUNT(*) > ${maximum} LIMIT 1`,
+      `${table} exceeds the per-guild record limit`,
+      issues,
+    );
+  }
+  for (const [table, parent] of [
+    ["moderation_case_events", "case_id"],
+    ["member_report_events", "report_id"],
+    ["case_appeal_events", "appeal_id"],
+  ] as const) {
+    validateNoMatchingRows(
+      db,
+      `SELECT 1 FROM ${quoteIdentifier(table)} GROUP BY guild_id, ${quoteIdentifier(parent)} HAVING COUNT(*) > 100 LIMIT 1`,
+      `${table} exceeds the per-record audit limit`,
+      issues,
+    );
+  }
 }
 
 function validateTextColumnTypes(

@@ -84,7 +84,9 @@ function createHarness(
     guildId: GUILD_ID,
     guild: {
       id: GUILD_ID,
-      members: { me: { id: "bot", guild: { id: GUILD_ID } } },
+      members: {
+        fetchMe: vi.fn(async () => ({ id: "bot", guild: { id: GUILD_ID } })),
+      },
     },
     channel,
     user: { id: USER_ID, tag: "member_name" },
@@ -443,7 +445,13 @@ describe("channel and timeout safety", () => {
       guildId: GUILD_ID,
       settings: { channels: { log: null } },
       isCurrent: vi.fn(() => true),
-      storage: { recordCommandMetric: vi.fn() },
+      storage: {
+        recordCommandMetric: vi.fn(),
+        getModerationConfiguration: vi.fn(() => ({
+          guildId: GUILD_ID,
+          casesEnabled: true,
+        })),
+      },
     } as unknown as GuildRuntime;
     const makeInteraction = (subcommand: "lock" | "unlock") => {
       const interaction: Record<string, unknown> = {
@@ -451,7 +459,12 @@ describe("channel and timeout safety", () => {
         guild: {
           id: GUILD_ID,
           roles: { everyone },
-          members: { me: { id: "bot", guild: { id: GUILD_ID } } },
+          members: {
+            fetchMe: vi.fn(async () => ({
+              id: "bot",
+              guild: { id: GUILD_ID },
+            })),
+          },
         },
         channel,
         user: { id: USER_ID },
@@ -532,7 +545,7 @@ describe("channel and timeout safety", () => {
       guild: {
         id: GUILD_ID,
         members: {
-          me: bot,
+          fetchMe: vi.fn(async () => bot),
           fetch: vi.fn(async () => target),
         },
       },
@@ -554,7 +567,13 @@ describe("channel and timeout safety", () => {
     const runtime = {
       guildId: GUILD_ID,
       isCurrent: vi.fn(() => true),
-      storage: { recordCommandMetric: vi.fn() },
+      storage: {
+        recordCommandMetric: vi.fn(),
+        getModerationConfiguration: vi.fn(() => ({
+          guildId: GUILD_ID,
+          casesEnabled: true,
+        })),
+      },
     } as unknown as GuildRuntime;
 
     await handleModerationCommand(
@@ -571,6 +590,118 @@ describe("channel and timeout safety", () => {
     );
   });
 
+  it("records a timeout case only after Discord confirms the action", async () => {
+    let timedOut = false;
+    const timeout = vi.fn(async () => {
+      timedOut = true;
+    });
+    const reservedCase = {
+      caseId: "case_token",
+      caseNumber: 12,
+      actionType: "timeout",
+      updatedAt: "2026-08-13T00:00:00.000Z",
+    };
+    const reserveModerationCaseAttempt = vi.fn(() => reservedCase);
+    const confirmModerationCase = vi.fn(() => ({
+      status: "changed",
+      case: { ...reservedCase, status: "active" },
+    }));
+    const actor = {
+      id: USER_ID,
+      guild: { id: GUILD_ID, ownerId: USER_ID },
+      roles: { highest: { comparePositionTo: vi.fn(() => 1) } },
+      permissions: { has: vi.fn(() => true) },
+    };
+    const target = {
+      id: "623456789012345678",
+      displayName: "Target Member",
+      guild: { id: GUILD_ID, ownerId: "923456789012345678" },
+      roles: { highest: {} },
+      moderatable: true,
+      isCommunicationDisabled: vi.fn(() => timedOut),
+      communicationDisabledUntil: new Date("2026-08-13T00:15:00.000Z"),
+      timeout,
+    };
+    const bot = { id: "323456789012345678", guild: { id: GUILD_ID } };
+    const interaction: Record<string, unknown> = {
+      guildId: GUILD_ID,
+      guild: {
+        id: GUILD_ID,
+        ownerId: USER_ID,
+        members: {
+          fetchMe: vi.fn(async () => bot),
+          fetch: vi.fn(async (input: string | { user: string }) =>
+            (typeof input === "string" ? input : input.user) === USER_ID
+              ? actor
+              : target,
+          ),
+        },
+      },
+      user: { id: USER_ID },
+      options: {
+        getSubcommand: vi.fn(() => "timeout"),
+        getUser: vi.fn(() => ({ id: target.id })),
+        getInteger: vi.fn(() => 15),
+        getString: vi.fn(() => "Repeated disruption"),
+      },
+      deferred: false,
+      replied: false,
+      editReply: vi.fn(async () => undefined),
+      reply: vi.fn(async () => undefined),
+      followUp: vi.fn(async () => undefined),
+    };
+    interaction.deferReply = vi.fn(async () => {
+      interaction.deferred = true;
+    });
+    const runtime = {
+      guildId: GUILD_ID,
+      isCurrent: vi.fn(() => true),
+      storage: {
+        recordCommandMetric: vi.fn(),
+        getModerationConfiguration: vi.fn(() => ({
+          guildId: GUILD_ID,
+          casesEnabled: true,
+        })),
+        reserveModerationCaseAttempt,
+        confirmModerationCase,
+        failModerationCaseAttempt: vi.fn(),
+        listModerationCases: vi.fn(() => []),
+        findUniqueActiveModerationCase: vi.fn(() => ({
+          status: "none",
+          case: null,
+        })),
+      },
+    } as unknown as GuildRuntime;
+
+    await handleModerationCommand(
+      interaction as never,
+      runtime,
+      actor as never,
+    );
+
+    expect(timeout).toHaveBeenCalledWith(15 * 60_000, "Repeated disruption");
+    expect(reserveModerationCaseAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetUserId: target.id,
+        actorId: USER_ID,
+        actionType: "timeout",
+        source: "superior-command",
+        publicReason: "Repeated disruption",
+      }),
+    );
+    expect(
+      reserveModerationCaseAttempt.mock.invocationCallOrder[0],
+    ).toBeLessThan(timeout.mock.invocationCallOrder[0]!);
+    expect(timeout.mock.invocationCallOrder[0]).toBeLessThan(
+      confirmModerationCase.mock.invocationCallOrder[0]!,
+    );
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("Case **#12** was recorded"),
+      }),
+    );
+  });
+
   it("stops a bulk timeout between members when configuration changes", async () => {
     let current = true;
     const firstTimeout = vi.fn(async () => {
@@ -583,6 +714,7 @@ describe("channel and timeout safety", () => {
       guild: { id: GUILD_ID, ownerId: "923456789012345678" },
       roles: { highest: {} },
       moderatable: true,
+      isCommunicationDisabled: vi.fn(() => false),
       timeout,
     });
     const targets = new Map([
@@ -591,8 +723,9 @@ describe("channel and timeout safety", () => {
     ]);
     const actor = {
       id: USER_ID,
-      guild: { id: GUILD_ID },
+      guild: { id: GUILD_ID, ownerId: USER_ID },
       roles: { highest: { comparePositionTo: vi.fn(() => 1) } },
+      permissions: { has: vi.fn(() => true) },
     };
     const bot = {
       id: "bot",
@@ -606,9 +739,13 @@ describe("channel and timeout safety", () => {
       guildId: GUILD_ID,
       guild: {
         id: GUILD_ID,
+        ownerId: USER_ID,
         members: {
-          me: bot,
-          fetch: vi.fn(async (id: string) => targets.get(id) ?? null),
+          fetchMe: vi.fn(async () => bot),
+          fetch: vi.fn(async (input: string | { user: string }) => {
+            const id = typeof input === "string" ? input : input.user;
+            return id === USER_ID ? actor : (targets.get(id) ?? null);
+          }),
         },
       },
       user: { id: USER_ID },
@@ -634,7 +771,29 @@ describe("channel and timeout safety", () => {
       guildId: GUILD_ID,
       settings: { limits: { bulkModerationTargetCap: 100 } },
       isCurrent: vi.fn(() => current),
-      storage: { recordCommandMetric },
+      storage: {
+        recordCommandMetric,
+        getModerationConfiguration: vi.fn(() => ({
+          guildId: GUILD_ID,
+          casesEnabled: true,
+        })),
+        reserveModerationCaseAttempt: vi.fn(() => ({
+          caseId: "case_token",
+          caseNumber: 12,
+          actionType: "timeout",
+          updatedAt: "2026-08-13T00:00:00.000Z",
+        })),
+        confirmModerationCase: vi.fn(() => ({
+          status: "changed",
+          case: { caseId: "case_token", caseNumber: 12, actionType: "timeout" },
+        })),
+        failModerationCaseAttempt: vi.fn(),
+        listModerationCases: vi.fn(() => []),
+        findUniqueActiveModerationCase: vi.fn(() => ({
+          status: "none",
+          case: null,
+        })),
+      },
     } as unknown as GuildRuntime;
 
     await handleModerationCommand(
@@ -650,4 +809,53 @@ describe("channel and timeout safety", () => {
     );
     expect(recordCommandMetric).not.toHaveBeenCalled();
   });
+
+  it.each([null, { guildId: GUILD_ID, casesEnabled: false }])(
+    "fails closed before a legacy member timeout when case actions are disabled (%j)",
+    async (configuration) => {
+      const targetFetch = vi.fn();
+      const timeout = vi.fn();
+      const reserveModerationCaseAttempt = vi.fn();
+      const interaction: Record<string, unknown> = {
+        guildId: GUILD_ID,
+        guild: {
+          id: GUILD_ID,
+          members: { fetch: targetFetch, fetchMe: vi.fn() },
+        },
+        user: { id: USER_ID },
+        options: { getSubcommand: vi.fn(() => "timeout") },
+        deferred: false,
+        replied: false,
+        editReply: vi.fn(async () => undefined),
+        reply: vi.fn(async () => undefined),
+        followUp: vi.fn(async () => undefined),
+      };
+      interaction.deferReply = vi.fn(async () => {
+        interaction.deferred = true;
+      });
+      const runtime = {
+        guildId: GUILD_ID,
+        storage: {
+          getModerationConfiguration: vi.fn(() => configuration),
+          reserveModerationCaseAttempt,
+          recordCommandMetric: vi.fn(),
+        },
+      } as unknown as GuildRuntime;
+
+      await handleModerationCommand(interaction as never, runtime, {
+        timeout,
+      } as never);
+
+      expect(targetFetch).not.toHaveBeenCalled();
+      expect(timeout).not.toHaveBeenCalled();
+      expect(reserveModerationCaseAttempt).not.toHaveBeenCalled();
+      expect(interaction.editReply).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining(
+            "No member timeout action was taken",
+          ),
+        }),
+      );
+    },
+  );
 });

@@ -34,7 +34,10 @@ import {
   handlePanelModal,
 } from "./panels.js";
 import { buildPanelCommandDefinition } from "./panel-command.js";
-import { handlePresetPanelCommand } from "./preset-panels.js";
+import {
+  handlePresetPanelCommand,
+  panelCapabilityForOperation,
+} from "./preset-panels.js";
 import {
   buildConfigCommandDefinition,
   buildDataCommandDefinition,
@@ -64,7 +67,10 @@ import {
   handleApplicationModal,
   handleApplicationSelect,
 } from "./application-interactions.js";
-import { authorizeCapability } from "./authorization.js";
+import {
+  authorizeCapability,
+  fetchVerifiedGuildMember,
+} from "./authorization.js";
 import type { GuildCapability } from "./capabilities.js";
 import { getInteractionLifecycle } from "./interaction-lifecycle.js";
 import { evaluateGuildManagement } from "./ticket-authorization.js";
@@ -86,6 +92,22 @@ import {
   handlePingRoleCommand,
   handleRestrictedPingCommand,
 } from "./restricted-ping-commands-handler.js";
+import { buildModerationCommandDefinition } from "./moderation-command.js";
+import { handleModerationCaseCommand } from "./moderation-commands-handler.js";
+import { buildReportCommandDefinition } from "./report-command.js";
+import { handleReportCommand } from "./report-commands-handler.js";
+import {
+  handleReportButton,
+  handleReportModal,
+} from "./report-interactions.js";
+import { buildAppealCommandDefinition } from "./appeal-command.js";
+import { handleAppealCommand } from "./appeal-commands-handler.js";
+import {
+  handleAppealButton,
+  handleAppealModal,
+} from "./appeal-interactions.js";
+import { buildAutomodCommandDefinition } from "./automod-command.js";
+import { handleAutomodCommand } from "./automod-commands-handler.js";
 
 const SUPERIOR_SUBCOMMANDS = [
   "say",
@@ -229,6 +251,10 @@ export function buildCommandDefinitions(): Array<
     buildTicketCommandDefinition(),
     buildSuggestionCommandDefinition(),
     buildApplicationCommandDefinition(),
+    buildModerationCommandDefinition(),
+    buildReportCommandDefinition(),
+    buildAppealCommandDefinition(),
+    buildAutomodCommandDefinition(),
     buildAccessCommandDefinition(),
     buildPingRoleCommandDefinition(),
     buildRestrictedPingCommandDefinition(),
@@ -614,6 +640,22 @@ export async function handleChatInputCommand(
     await handleApplicationCommand(interaction, guildRuntime);
     return;
   }
+  if (command === "report") {
+    await handleReportCommand(interaction, guildRuntime);
+    return;
+  }
+  if (command === "appeal") {
+    await handleAppealCommand(interaction, guildRuntime);
+    return;
+  }
+  if (command === "moderation") {
+    await handleModerationCaseCommand(interaction, guildRuntime);
+    return;
+  }
+  if (command === "automod") {
+    await handleAutomodCommand(interaction, guildRuntime);
+    return;
+  }
   if (command === "utility") {
     await handleUtilityCommand(interaction, guildRuntime);
     return;
@@ -634,7 +676,14 @@ export async function handleChatInputCommand(
   if (command === "panel" || command === "ticket") {
     await deferPrivate(interaction);
     const capability: GuildCapability =
-      command === "panel" ? "panels.manage" : "tickets.configure";
+      command === "panel"
+        ? panelCapabilityForOperation(
+            subcommand,
+            subcommand === "post"
+              ? interaction.options.getString("preset", false)
+              : null,
+          )
+        : "tickets.configure";
     const actor = await requireCapability(
       interaction,
       guildRuntime,
@@ -720,6 +769,8 @@ export async function handleButtonInteraction(
 ): Promise<void> {
   const guildRuntime = await getCurrentComponentRuntime(interaction, runtime);
   if (!guildRuntime) return;
+  if (await handleReportButton(interaction, guildRuntime)) return;
+  if (await handleAppealButton(interaction, guildRuntime)) return;
   if (await handleApplicationButton(interaction, guildRuntime)) return;
   if (await handleSuggestionButton(interaction, guildRuntime)) return;
   if (await handleTicketButton(interaction, guildRuntime)) return;
@@ -736,6 +787,8 @@ export async function handleModalSubmitInteraction(
 ): Promise<void> {
   const guildRuntime = await getCurrentComponentRuntime(interaction, runtime);
   if (!guildRuntime) return;
+  if (await handleReportModal(interaction, guildRuntime)) return;
+  if (await handleAppealModal(interaction, guildRuntime)) return;
   if (await handleApplicationModal(interaction, guildRuntime)) return;
   if (await handleSuggestionModal(interaction, guildRuntime)) return;
   if (await handleTicketModal(interaction, guildRuntime)) return;
@@ -799,10 +852,9 @@ async function requireAdministrator(
 ): Promise<GuildMember | null> {
   const guild = interaction.guild;
   if (!guild || guild.id !== runtime.guildId) return null;
-  const actor = await guild.members
-    .fetch(interaction.user.id)
-    .catch(() => null);
-  if (!actor || actor.guild.id !== runtime.guildId) {
+  const verified = await fetchVerifiedGuildMember(guild, interaction.user.id);
+  const actor = verified.member;
+  if (!verified.valid || !actor || actor.guild.id !== runtime.guildId) {
     logInteractionRejection(interaction, "administrator", "member-unavailable");
     await replyPrivate(interaction, "Could not verify your server membership.");
     return null;
@@ -857,12 +909,16 @@ export function buildSuperiorCommandGuide(): string {
     "`/pingrole role:@Role` - safely notify a configured role in its allowed channel",
     "`/restrictedping` - owner/Administrator restricted-role mapping and cooldown configuration",
     "`/config` — optional Administrator settings and explicit emergency bot-state control",
-    "`/data` — owner-controlled format-6 export, import, and purge",
+    "`/data` — owner-controlled format-7 export, import, and purge",
     "`/access` — owner/Administrator grants and status for delegated role capabilities",
-    "`/panel` — fixed help, server, resource, ticket, suggestion, and application panels",
+    "`/panel` — fixed help, server, resource, workflow, and safety panels",
     "`/ticket` — delegated department, form, routing, launcher, health, and recovery tools",
     "`/suggestion` — member submissions, status, withdrawal, configuration, review, panels, and recovery",
     "`/application` — private submissions, status, and withdrawal plus delegated forms, review, panels, and recovery",
+    "`/moderation` — persistent cases, member sanctions, history, configuration, and log recovery",
+    "`/report` — private member reports, status, withdrawal, and authorized recovery",
+    "`/appeal` — in-guild case appeals, status, withdrawal, and authorized recovery",
+    "`/automod` — narrow configurable anti-spam rules, exemptions, and safe synthetic tests",
     "`/superior` — announcements, safe panels, moderation, backfill, and this help",
     "`/utility` — private member/server/role/channel/ID/time information",
     "`/fun` — battles and aggregate activity statistics",

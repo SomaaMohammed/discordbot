@@ -12,6 +12,7 @@ import type { GuildRuntime } from "../runtime.js";
 import { createOpaqueStorageId } from "../storage/operational-repository.js";
 import type {
   ApplicationForm,
+  ModerationConfiguration,
   SuggestionConfiguration,
   TicketConfiguration,
   TicketDepartment,
@@ -41,6 +42,9 @@ import {
   inspectSuggestionResources,
   isConfiguredDepartment,
 } from "./phase2-permissions.js";
+import { inspectSafetyWorkflowResources } from "./safety-permissions.js";
+import { authorizeCapability } from "./authorization.js";
+import type { GuildCapability } from "./capabilities.js";
 
 const panelPostQueue = new KeyedSerialQueue();
 
@@ -49,6 +53,21 @@ interface PostPanelOptions {
   channel: GuildTextBasedChannel;
   replaceExisting: boolean;
   resource?: NormalizedResourcePanel;
+}
+
+interface SafetyPanelReadiness {
+  reportsEnabled: boolean;
+  appealsEnabled: boolean;
+  unavailableWorkflows: Array<"reports" | "appeals">;
+}
+
+export function panelCapabilityForOperation(
+  subcommand: string,
+  preset: string | null,
+): GuildCapability {
+  return subcommand === "post" && preset === "safety"
+    ? "moderation.configure"
+    : "panels.manage";
 }
 
 export async function handlePresetPanelCommand(
@@ -92,7 +111,7 @@ export async function postFeatureLauncher(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
   actor: GuildMember,
-  preset: "tickets" | "suggestions" | "applications",
+  preset: "tickets" | "suggestions" | "applications" | "safety",
 ): Promise<void> {
   const channel = getSelectedPanelChannel(interaction, runtime, "channel");
   if (!channel) {
@@ -261,6 +280,22 @@ async function postSuperiorPanelSerial(
       return;
     }
   }
+  let safetyReadiness: SafetyPanelReadiness | null = null;
+  if (options.preset === "safety") {
+    const configuration = getModerationConfigurationSafely(runtime);
+    safetyReadiness = await inspectSafetyPanelReadiness(
+      guild,
+      runtime,
+      configuration,
+    );
+    if (!safetyReadiness.reportsEnabled && !safetyReadiness.appealsEnabled) {
+      await replyPrivate(
+        interaction,
+        "Configure and verify private report or appeal review bindings before posting the safety panel.",
+      );
+      return;
+    }
+  }
   if (!runtime.isCurrent()) {
     await replyPrivate(
       interaction,
@@ -279,7 +314,45 @@ async function postSuperiorPanelSerial(
     panelId,
     runtime,
     enabledDepartments.length > 0 || Boolean(ticketConfiguration?.enabled),
+    safetyReadiness,
   );
+  if (options.preset === "safety") {
+    const authorization = await authorizeCapability({
+      guild,
+      userId: actor.id,
+      capability: "moderation.configure",
+      grants: runtime.storage,
+    });
+    if (
+      !authorization.allowed ||
+      authorization.member.id !== actor.id ||
+      !runtime.isCurrent()
+    ) {
+      await replyPrivate(
+        interaction,
+        "Your moderation configuration authority changed before the safety panel could be posted.",
+      );
+      return;
+    }
+    const finalReadiness = await inspectSafetyPanelReadiness(
+      guild,
+      runtime,
+      getModerationConfigurationSafely(runtime),
+    );
+    if (
+      !safetyReadiness ||
+      finalReadiness.reportsEnabled !== safetyReadiness.reportsEnabled ||
+      finalReadiness.appealsEnabled !== safetyReadiness.appealsEnabled ||
+      (!finalReadiness.reportsEnabled && !finalReadiness.appealsEnabled) ||
+      !runtime.isCurrent()
+    ) {
+      await replyPrivate(
+        interaction,
+        "The verified report or appeal resources changed before the safety panel could be posted.",
+      );
+      return;
+    }
+  }
   let messageId: string | null = null;
   let replaced = false;
   let restorePrior: (() => Promise<boolean>) | null = null;
@@ -358,7 +431,7 @@ async function postSuperiorPanelSerial(
   }
   await replyPrivate(
     interaction,
-    `${replaced ? "Refreshed" : "Posted"} the **${escapeMarkdown(options.preset)}** panel in <#${options.channel.id}>.`,
+    `${replaced ? "Refreshed" : "Posted"} the **${escapeMarkdown(options.preset)}** panel in <#${options.channel.id}>.${safetyReadiness?.unavailableWorkflows.length ? ` Unavailable ${safetyReadiness.unavailableWorkflows.join(" and ")} controls stayed disabled.` : ""}`,
   );
   logDomainOutcome(
     "panel",
@@ -408,6 +481,7 @@ function buildPanelPayload(
   panelId: string,
   runtime: GuildRuntime,
   ticketsEnabled: boolean,
+  safetyReadiness: SafetyPanelReadiness | null,
 ): SuperiorPanelPayload {
   switch (options.preset) {
     case "help":
@@ -439,7 +513,67 @@ function buildPanelPayload(
         preset: "applications",
         panelToken: panelId,
       });
+    case "safety": {
+      if (!safetyReadiness) {
+        throw new Error("Safety panel readiness was not freshly verified.");
+      }
+      return renderSuperiorPanel({
+        preset: "safety",
+        panelToken: panelId,
+        reportsEnabled: safetyReadiness.reportsEnabled,
+        appealsEnabled: safetyReadiness.appealsEnabled,
+      });
+    }
   }
+}
+
+async function inspectSafetyPanelReadiness(
+  guild: Guild,
+  runtime: GuildRuntime,
+  configuration: ModerationConfiguration | null,
+): Promise<SafetyPanelReadiness> {
+  const candidates = {
+    reports: Boolean(
+      configuration?.reportsEnabled && configuration.reportBindingsVerifiedAt,
+    ),
+    appeals: Boolean(
+      configuration?.appealsEnabled && configuration.appealBindingsVerifiedAt,
+    ),
+  };
+  const readiness: SafetyPanelReadiness = {
+    reportsEnabled: false,
+    appealsEnabled: false,
+    unavailableWorkflows: [],
+  };
+  if (!configuration) return readiness;
+  const inspections = await Promise.all(
+    (["reports", "appeals"] as const).map(async (workflow) => {
+      if (!candidates[workflow]) return { workflow, ready: false };
+      const resources = await inspectSafetyWorkflowResources(
+        guild,
+        configuration,
+        workflow,
+        runtime.storage,
+      );
+      return {
+        workflow,
+        ready: Boolean(
+          resources.reviewChannel && resources.issues.length === 0,
+        ),
+      };
+    }),
+  );
+  for (const inspection of inspections) {
+    if (inspection.workflow === "reports") {
+      readiness.reportsEnabled = inspection.ready;
+    } else {
+      readiness.appealsEnabled = inspection.ready;
+    }
+    if (candidates[inspection.workflow] && !inspection.ready) {
+      readiness.unavailableWorkflows.push(inspection.workflow);
+    }
+  }
+  return readiness;
 }
 
 function buildFeatureState(
@@ -458,6 +592,14 @@ function buildFeatureState(
         enabledOnly: true,
         limit: 1,
       }).length > 0,
+    reports: Boolean(
+      getModerationConfigurationSafely(runtime)?.reportsEnabled &&
+      getModerationConfigurationSafely(runtime)?.reportBindingsVerifiedAt,
+    ),
+    appeals: Boolean(
+      getModerationConfigurationSafely(runtime)?.appealsEnabled &&
+      getModerationConfigurationSafely(runtime)?.appealBindingsVerifiedAt,
+    ),
   };
 }
 
@@ -543,6 +685,17 @@ function getSuggestionConfigurationSafely(
     : null;
 }
 
+function getModerationConfigurationSafely(
+  runtime: GuildRuntime,
+): ModerationConfiguration | null {
+  const storage = runtime.storage as unknown as {
+    getModerationConfiguration?: () => ModerationConfiguration | null;
+  };
+  return typeof storage.getModerationConfiguration === "function"
+    ? storage.getModerationConfiguration()
+    : null;
+}
+
 function listApplicationFormsSafely(
   runtime: GuildRuntime,
   options: { enabledOnly?: boolean; limit?: number },
@@ -571,6 +724,7 @@ async function showPanelStatus(
   const enabledApplicationForms = applicationForms.filter(
     (form) => form.enabled,
   );
+  const moderationConfiguration = getModerationConfigurationSafely(runtime);
   const panelCount = runtime.storage.countPostedPanels();
   const panels = runtime.storage.listPostedPanels(undefined, 20, 0);
   const lines = [
@@ -578,6 +732,8 @@ async function showPanelStatus(
     `Ticket departments: **${enabledDepartments.length} enabled** · ${departments.length} configured`,
     `Suggestions: **${suggestionConfiguration?.enabled ? "enabled" : "disabled"}**`,
     `Application forms: **${enabledApplicationForms.length} enabled** · ${applicationForms.length} configured`,
+    `Private reports: **${moderationConfiguration?.reportsEnabled ? "enabled" : "disabled"}**`,
+    `Case appeals: **${moderationConfiguration?.appealsEnabled ? "enabled" : "disabled"}**`,
     panels.length > 0
       ? `Tracked panels (${panels.length}${panelCount > panels.length ? "+" : ""} of ${panelCount}):`
       : "Tracked panels: none",

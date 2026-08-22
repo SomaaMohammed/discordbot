@@ -53,6 +53,7 @@ export const PANEL_PRESETS = [
   "tickets",
   "suggestions",
   "applications",
+  "safety",
 ] as const;
 
 export type PanelPreset = (typeof PANEL_PRESETS)[number];
@@ -65,6 +66,10 @@ export const GUILD_CAPABILITIES = [
   "suggestions.review",
   "applications.configure",
   "applications.review",
+  "moderation.configure",
+  "moderation.manage",
+  "reports.review",
+  "appeals.review",
 ] as const;
 
 export const DELEGATED_CAPABILITIES = GUILD_CAPABILITIES;
@@ -73,7 +78,7 @@ export type GuildCapability = (typeof GUILD_CAPABILITIES)[number];
 export type DelegatedCapability = GuildCapability;
 export type Capability = GuildCapability;
 
-/** Storage supports future user principals, but Phase 2 only grants roles. */
+/** Storage supports future user principals, but Phase 3 only grants roles. */
 export type CapabilityPrincipalType = "role" | "user";
 
 export interface DelegatedCapabilityGrant {
@@ -579,6 +584,39 @@ export const DELIVERY_STATES = [
 ] as const;
 export type DeliveryState = (typeof DELIVERY_STATES)[number];
 
+export type DeliveryClaimResult<T> =
+  | { status: "claimed"; claimId: string; retryAt: string; record: T }
+  | { status: "busy"; claimId: null; retryAt: string; record: T }
+  | {
+      status: "conflict" | "unavailable";
+      claimId: null;
+      retryAt: null;
+      record: T;
+    }
+  | { status: "not-found"; claimId: null; retryAt: null; record: null };
+
+export interface DeliveryAttempt {
+  attemptId: string;
+  channelId: string;
+  startedAt: string;
+}
+
+export interface DeliveryAttemptInput {
+  channelId: string;
+  claimId: string;
+  expectedUpdatedAt: string;
+  /** Required when rotating an unresolved attempt to another channel. */
+  previousAttemptId?: string;
+}
+
+export type DeliveryAttemptTransitionResult<T> =
+  | {
+      status: "changed" | "unchanged" | "conflict" | "unavailable";
+      record: T;
+      attempt: DeliveryAttempt | null;
+    }
+  | { status: "not-found"; record: null; attempt: null };
+
 export interface SuggestionRecord {
   guildId: string;
   suggestionId: string;
@@ -895,9 +933,533 @@ export interface ApplicationEvent {
   createdAt: string;
 }
 
+export interface ModerationConfigurationInput {
+  casesEnabled?: boolean;
+  moderationLogChannelId?: string | null;
+  moderationLogVerifiedAt?: string | null;
+  reportsEnabled?: boolean;
+  reportReviewChannelId?: string | null;
+  reportReviewerRoleId?: string | null;
+  reportBindingsVerifiedAt?: string | null;
+  appealsEnabled?: boolean;
+  appealReviewChannelId?: string | null;
+  appealReviewerRoleId?: string | null;
+  appealBindingsVerifiedAt?: string | null;
+  antiSpamEnabled?: boolean;
+  reportCooldownLimit?: number;
+  reportCooldownWindowSeconds?: number;
+  actorId: string;
+}
+
+export interface ModerationConfiguration {
+  guildId: string;
+  casesEnabled: boolean;
+  moderationLogChannelId: string | null;
+  moderationLogVerifiedAt: string | null;
+  reportsEnabled: boolean;
+  reportReviewChannelId: string | null;
+  reportReviewerRoleId: string | null;
+  reportBindingsVerifiedAt: string | null;
+  appealsEnabled: boolean;
+  appealReviewChannelId: string | null;
+  appealReviewerRoleId: string | null;
+  appealBindingsVerifiedAt: string | null;
+  antiSpamEnabled: boolean;
+  reportCooldownLimit: number;
+  reportCooldownWindowSeconds: number;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const MODERATION_CASE_ACTION_TYPES = [
+  "warning",
+  "note",
+  "timeout",
+  "timeout-removed",
+  "kick",
+  "ban",
+  "unban",
+  "automod-warning",
+  "automod-timeout",
+] as const;
+export type ModerationCaseActionType =
+  (typeof MODERATION_CASE_ACTION_TYPES)[number];
+
+export const MODERATION_CASE_SOURCES = [
+  "moderation-command",
+  "superior-command",
+  "anti-spam",
+  "appeal-review",
+  "import",
+] as const;
+export type ModerationCaseSource = (typeof MODERATION_CASE_SOURCES)[number];
+
+export const MODERATION_CASE_STATUSES = [
+  "active",
+  "completed",
+  "voided",
+  "overturned",
+  "failed",
+] as const;
+export type ModerationCaseStatus = (typeof MODERATION_CASE_STATUSES)[number];
+
+export interface ModerationCaseInput {
+  targetUserId: string;
+  actorId: string;
+  actionType: ModerationCaseActionType;
+  source: ModerationCaseSource;
+  publicReason: string;
+  privateNote?: string | null;
+  discordActionMetadata?: unknown;
+  status: ModerationCaseStatus;
+  relatedCaseId?: string | null;
+}
+
+export type ModerationCaseAttemptInput = Omit<ModerationCaseInput, "status">;
+
+export interface ModerationCase {
+  guildId: string;
+  caseId: string;
+  caseNumber: number;
+  targetUserId: string;
+  actorId: string;
+  actionType: ModerationCaseActionType;
+  source: ModerationCaseSource;
+  publicReason: string;
+  privateNote: string | null;
+  discordActionMetadata: unknown;
+  status: ModerationCaseStatus;
+  relatedCaseId: string | null;
+  voidedBy: string | null;
+  voidedAt: string | null;
+  voidReason: string | null;
+  overturnedBy: string | null;
+  overturnedAt: string | null;
+  overturnReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModerationCaseListFilter {
+  targetUserId?: string;
+  statuses?: readonly ModerationCaseStatus[];
+  actionTypes?: readonly ModerationCaseActionType[];
+  limit?: number;
+  offset?: number;
+}
+
+export type ActiveModerationCaseLookupResult =
+  | { status: "found"; case: ModerationCase }
+  | { status: "none" | "ambiguous"; case: null };
+
+export interface ExpiredTimeoutCaseCompletionInput {
+  actorId: string;
+  observedAt: string;
+  expectedUpdatedAt: string;
+}
+
+export interface ModerationCaseAmendInput {
+  actorId: string;
+  publicReason?: string;
+  privateNote?: string | null;
+  expectedUpdatedAt?: string;
+}
+
+export type ModerationCaseTransitionResult =
+  | {
+      status: "changed" | "unchanged" | "conflict" | "unavailable";
+      case: ModerationCase;
+    }
+  | { status: "not-found"; case: null };
+
+export type ModerationTimeoutRemovalFinalizeResult =
+  | {
+      status: "changed" | "unchanged" | "conflict" | "unavailable";
+      removalCase: ModerationCase;
+      originalCase: ModerationCase;
+    }
+  | {
+      status: "not-found";
+      removalCase: ModerationCase | null;
+      originalCase: ModerationCase | null;
+    };
+
+export type TimeoutAppealRemovalCheckpointResult =
+  | {
+      status: "changed" | "unchanged" | "conflict" | "unavailable";
+      appeal: CaseAppeal;
+      originalCase: ModerationCase;
+      removalCase: ModerationCase;
+    }
+  | {
+      status: "not-found";
+      appeal: CaseAppeal | null;
+      originalCase: ModerationCase | null;
+      removalCase: ModerationCase | null;
+    };
+
+export interface TimeoutAppealRemovalCheckpointInput {
+  reviewerId: string;
+  originalExpiresAt: string;
+  discordActionMetadata?: unknown;
+  appealExpectedUpdatedAt: string;
+  removalExpectedUpdatedAt: string;
+  originalExpectedUpdatedAt: string;
+}
+
+export interface TimeoutAppealRemovalCheckpointProof {
+  kind: "timeout-appeal-removal-confirmed";
+  appealId: string;
+  originalCaseId: string;
+  originalExpiresAt: string;
+  reviewerId: string;
+}
+
+export const MODERATION_CASE_EVENT_TYPES = [
+  "created",
+  "action-reserved",
+  "action-confirmed-pending",
+  "action-confirmed",
+  "action-failed",
+  "amended",
+  "completed",
+  "voided",
+  "overturned",
+  "log-delivered",
+  "log-failed",
+  "timeout-expired",
+  "recovery-noted",
+] as const;
+export type ModerationCaseEventType =
+  (typeof MODERATION_CASE_EVENT_TYPES)[number];
+
+export interface ModerationCaseEventInput {
+  type: ModerationCaseEventType;
+  actorId?: string | null;
+  details?: unknown;
+}
+
+export interface ModerationCaseEvent {
+  guildId: string;
+  caseId: string;
+  eventId: string;
+  eventNumber: number;
+  type: ModerationCaseEventType;
+  actorId: string | null;
+  details: unknown;
+  createdAt: string;
+}
+
+export type ModerationLogDeliveryState =
+  "pending" | "delivered" | "failed" | "missing";
+
+export interface ModerationLogDelivery {
+  guildId: string;
+  caseId: string;
+  state: ModerationLogDeliveryState;
+  channelId: string | null;
+  messageId: string | null;
+  attemptCount: number;
+  lastFailureCode: string | null;
+  deliveredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ModerationLogDeliveryTransitionResult =
+  | {
+      status: "changed" | "unchanged" | "conflict" | "unavailable";
+      delivery: ModerationLogDelivery;
+    }
+  | { status: "not-found"; delivery: null };
+
+export const MEMBER_REPORT_CATEGORIES = [
+  "harassment",
+  "spam",
+  "scam",
+  "safety",
+  "other",
+] as const;
+export type MemberReportCategory = (typeof MEMBER_REPORT_CATEGORIES)[number];
+export const MEMBER_REPORT_STATES = [
+  "submitted",
+  "under-review",
+  "resolved",
+  "dismissed",
+  "withdrawn",
+] as const;
+export type MemberReportState = (typeof MEMBER_REPORT_STATES)[number];
+
+export interface MemberReportReservationInput {
+  reporterId: string;
+  targetUserId: string;
+  category: MemberReportCategory;
+  explanation: string;
+  evidenceGuildId?: string | null;
+  evidenceChannelId?: string | null;
+  evidenceMessageId?: string | null;
+}
+
+export interface MemberReport {
+  guildId: string;
+  reportId: string;
+  reportNumber: number;
+  reporterId: string;
+  targetUserId: string;
+  category: MemberReportCategory;
+  explanation: string;
+  evidenceGuildId: string | null;
+  evidenceChannelId: string | null;
+  evidenceMessageId: string | null;
+  state: MemberReportState;
+  deliveryState: DeliveryState;
+  reviewChannelId: string | null;
+  reviewMessageId: string | null;
+  claimedBy: string | null;
+  claimedAt: string | null;
+  decisionBy: string | null;
+  decisionReason: string | null;
+  decidedAt: string | null;
+  linkedCaseId: string | null;
+  withdrawnAt: string | null;
+  failureCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type MemberReportReservationResult =
+  | { status: "created"; report: MemberReport }
+  | { status: "cooldown"; report: null; recentCount: number; retryAt: string }
+  | { status: "disabled"; report: null };
+
+export type MemberReportTransitionResult =
+  | {
+      status: "changed" | "unchanged" | "conflict" | "unavailable";
+      report: MemberReport;
+    }
+  | { status: "not-found"; report: null };
+
+export interface MemberReportDecisionInput {
+  state: "resolved" | "dismissed";
+  reviewerId: string;
+  reason: string;
+  linkedCaseId?: string | null;
+  expectedUpdatedAt?: string;
+}
+
+export interface MemberReportEvent {
+  guildId: string;
+  reportId: string;
+  eventId: string;
+  eventNumber: number;
+  type: string;
+  actorId: string | null;
+  details: unknown;
+  createdAt: string;
+}
+
+export const CASE_APPEAL_STATES = [
+  "submitted",
+  "under-review",
+  "upheld",
+  "overturned",
+  "withdrawn",
+] as const;
+export type CaseAppealState = (typeof CASE_APPEAL_STATES)[number];
+
+export interface CaseAppealReservationInput {
+  caseId: string;
+  appellantId: string;
+  explanation: string;
+}
+
+export interface CaseAppeal {
+  guildId: string;
+  appealId: string;
+  appealNumber: number;
+  caseId: string;
+  appellantId: string;
+  explanation: string;
+  state: CaseAppealState;
+  deliveryState: DeliveryState;
+  reviewChannelId: string | null;
+  reviewMessageId: string | null;
+  claimedBy: string | null;
+  claimedAt: string | null;
+  decisionBy: string | null;
+  decisionReason: string | null;
+  decidedAt: string | null;
+  reversalCaseId: string | null;
+  withdrawnAt: string | null;
+  failureCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CaseAppealReservationResult =
+  | { status: "created"; appeal: CaseAppeal }
+  | {
+      status: "existing" | "disabled" | "ineligible";
+      appeal: CaseAppeal | null;
+    };
+
+export type CaseAppealTransitionResult =
+  | {
+      status: "changed" | "unchanged" | "conflict" | "unavailable";
+      appeal: CaseAppeal;
+    }
+  | { status: "not-found"; appeal: null };
+
+export type CaseAppealOverturnFinalizeResult =
+  | {
+      status: "changed" | "unchanged" | "conflict" | "unavailable";
+      appeal: CaseAppeal;
+      originalCase: ModerationCase;
+      reversalCase: ModerationCase | null;
+    }
+  | {
+      status: "not-found";
+      appeal: CaseAppeal | null;
+      originalCase: ModerationCase | null;
+      reversalCase: ModerationCase | null;
+    };
+
+export interface CaseAppealDecisionInput {
+  state: "upheld" | "overturned";
+  reviewerId: string;
+  reason: string;
+  reversalCaseId?: string | null;
+  expectedUpdatedAt?: string;
+}
+
+export interface CaseAppealEvent {
+  guildId: string;
+  appealId: string;
+  eventId: string;
+  eventNumber: number;
+  type: string;
+  actorId: string | null;
+  details: unknown;
+  createdAt: string;
+}
+
+export const ANTI_SPAM_RULE_TYPES = ["burst", "duplicate", "mention"] as const;
+export type AntiSpamRuleType = (typeof ANTI_SPAM_RULE_TYPES)[number];
+export const ANTI_SPAM_ACTIONS = [
+  "delete",
+  "delete-and-warn",
+  "delete-and-timeout",
+] as const;
+export type AntiSpamAction = (typeof ANTI_SPAM_ACTIONS)[number];
+
+export interface AntiSpamRuleInput {
+  ruleType: AntiSpamRuleType;
+  enabled?: boolean;
+  threshold: number;
+  windowSeconds?: number | null;
+  action: AntiSpamAction;
+  timeoutSeconds?: number | null;
+  cooldownSeconds: number;
+  actorId: string;
+}
+
+export interface AntiSpamRule {
+  guildId: string;
+  ruleType: AntiSpamRuleType;
+  enabled: boolean;
+  threshold: number;
+  windowSeconds: number | null;
+  action: AntiSpamAction;
+  timeoutSeconds: number | null;
+  cooldownSeconds: number;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AntiSpamExemption {
+  guildId: string;
+  subjectId: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface AntiSpamEnforcementReservationInput {
+  ruleType: AntiSpamRuleType;
+  messageId: string;
+  memberId: string;
+  channelId: string;
+  observedCount: number;
+}
+
+export type AntiSpamEnforcementOutcome =
+  "deleted" | "warned" | "timed-out" | "failed" | "skipped";
+
+export interface AntiSpamEnforcement {
+  guildId: string;
+  enforcementId: string;
+  ruleType: AntiSpamRuleType;
+  messageId: string;
+  memberId: string;
+  channelId: string;
+  observedCount: number;
+  state: "reserved" | AntiSpamEnforcementOutcome;
+  reservationId: string | null;
+  caseId: string | null;
+  failureCode: string | null;
+  reservationExpiresAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AntiSpamEnforcementReservationResult =
+  | {
+      status: "reserved";
+      reservationId: string;
+      retryAt: null;
+      enforcement: AntiSpamEnforcement;
+    }
+  | {
+      status: "duplicate";
+      reservationId: null;
+      retryAt: string | null;
+      enforcement: AntiSpamEnforcement;
+    }
+  | {
+      status: "cooldown";
+      reservationId: null;
+      retryAt: string;
+      enforcement: AntiSpamEnforcement | null;
+    };
+
+export interface AntiSpamEnforcementCompletionInput {
+  outcome: AntiSpamEnforcementOutcome;
+  caseId?: string | null;
+  failureCode?: string | null;
+}
+
+export interface AntiSpamEvent {
+  guildId: string;
+  eventId: string;
+  eventNumber: number;
+  ruleType: AntiSpamRuleType;
+  messageId: string;
+  memberId: string;
+  channelId: string;
+  observedCount: number;
+  outcome: AntiSpamEnforcementOutcome;
+  caseId: string | null;
+  failureCode: string | null;
+  createdAt: string;
+}
+
 /** Portable, tenant-scoped export of the active product data model. */
 export interface GuildDataExport {
-  formatVersion: 6;
+  formatVersion: 7;
   guildId: string;
   exportedAt: string;
   metadata: GuildRecord;
@@ -923,6 +1485,19 @@ export interface GuildDataExport {
   restrictedPingMappings: RestrictedPingMapping[];
   restrictedPingUserCooldowns: RestrictedPingUserCooldown[];
   restrictedPingEvents: RestrictedPingEvent[];
+  moderationConfiguration: ModerationConfiguration | null;
+  moderationCases: ModerationCase[];
+  moderationCaseEvents: ModerationCaseEvent[];
+  moderationLogDeliveries: ModerationLogDelivery[];
+  memberReports: MemberReport[];
+  memberReportEvents: MemberReportEvent[];
+  caseAppeals: CaseAppeal[];
+  caseAppealEvents: CaseAppealEvent[];
+  antiSpamRules: AntiSpamRule[];
+  antiSpamExemptRoles: AntiSpamExemption[];
+  antiSpamExemptChannels: AntiSpamExemption[];
+  antiSpamEnforcements: AntiSpamEnforcement[];
+  antiSpamEvents: AntiSpamEvent[];
 }
 
 export interface GuildPurgeResult {
@@ -951,6 +1526,19 @@ export interface GuildPurgeResult {
   restrictedPingUserCooldowns: number;
   restrictedPingEvents: number;
   mudaeWatchDeliveries: number;
+  moderationConfigurations: number;
+  moderationCases: number;
+  moderationCaseEvents: number;
+  moderationLogDeliveries: number;
+  memberReports: number;
+  memberReportEvents: number;
+  caseAppeals: number;
+  caseAppealEvents: number;
+  antiSpamRules: number;
+  antiSpamExemptRoles: number;
+  antiSpamExemptChannels: number;
+  antiSpamEnforcements: number;
+  antiSpamEvents: number;
 }
 
 export const USER_ACTIVITY_METRICS = [

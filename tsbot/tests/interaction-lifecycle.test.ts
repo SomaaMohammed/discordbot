@@ -70,6 +70,145 @@ afterEach(() => {
 });
 
 describe("interaction acknowledgement lifecycle", () => {
+  it.each([
+    ["report", "submit"],
+    ["appeal", "submit"],
+  ])(
+    "preserves the initial response for /%s %s",
+    async (commandName, subcommand) => {
+      const interaction = commandInteraction({ now: Date.now() }) as never as {
+        commandName: string;
+        options: { getSubcommand: ReturnType<typeof vi.fn> };
+        deferReply: ReturnType<typeof vi.fn>;
+      };
+      interaction.commandName = commandName;
+      interaction.options.getSubcommand = vi.fn(() => subcommand);
+      const lifecycle = beginInteractionLifecycle(interaction as never, {
+        correlationId: () => `${commandName}-modal-first`,
+      });
+      await expect(lifecycle.ready).resolves.toBe(true);
+      expect(interaction.deferReply).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    "superior:report:open:abcdefgh",
+    "superior:report:resolve:abcdefgh:lz6y5w00",
+    "superior:report:dismiss:abcdefgh:lz6y5w00",
+    "superior:appeal:open:abcdefgh",
+    "superior:appeal:uphold:abcdefgh:lz6y5w00",
+    "superior:appeal:overturn:abcdefgh:lz6y5w00",
+  ])("preserves modal-first button route %s", async (customId) => {
+    const interaction = {
+      createdTimestamp: Date.now(),
+      guildId: GUILD_ID,
+      customId,
+      deferred: false,
+      replied: false,
+      deferReply: vi.fn(async () => undefined),
+      isAutocomplete: () => false,
+      isChatInputCommand: () => false,
+      isButton: () => true,
+      isModalSubmit: () => false,
+      isStringSelectMenu: () => false,
+    } as unknown as Interaction & { deferReply: ReturnType<typeof vi.fn> };
+    const lifecycle = beginInteractionLifecycle(interaction, {
+      correlationId: () => "phase3-button-modal-first",
+    });
+    await expect(lifecycle.ready).resolves.toBe(true);
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["report", { getUser: () => ({ id: "223456789012345678" }) }],
+    ["appeal", { getInteger: () => 42 }],
+  ])(
+    "opens the /%s submit modal as the first response",
+    async (commandName, extraOptions) => {
+      const showModal = vi.fn(async () => undefined);
+      const interaction = {
+        createdTimestamp: Date.now(),
+        guildId: GUILD_ID,
+        guild: { id: GUILD_ID },
+        commandName,
+        options: {
+          getSubcommand: vi.fn(() => "submit"),
+          ...extraOptions,
+        },
+        deferred: false,
+        replied: false,
+        showModal,
+        reply: vi.fn(async () => undefined),
+        deferReply: vi.fn(async () => undefined),
+        isAutocomplete: () => false,
+        isChatInputCommand: () => true,
+        isButton: () => false,
+        isModalSubmit: () => false,
+        isStringSelectMenu: () => false,
+      } as unknown as Interaction & {
+        showModal: ReturnType<typeof vi.fn>;
+        deferReply: ReturnType<typeof vi.fn>;
+      };
+      const runtime = {
+        interactionFormsForGuild: vi.fn(() => null),
+      } as unknown as BotRuntime;
+      const lifecycle = beginInteractionLifecycle(interaction, {
+        correlationId: () => `${commandName}-immediate-modal`,
+      });
+      await expect(lifecycle.ready).resolves.toBe(true);
+      await expect(
+        startImmediateInteractionResponse(interaction, runtime, lifecycle),
+      ).resolves.toBe("handled");
+      expect(showModal).toHaveBeenCalledOnce();
+      expect(interaction.deferReply).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    "superior:report:open:abcdefgh",
+    "superior:report:resolve:record0001:lz6y5w00",
+    "superior:report:dismiss:record0001:lz6y5w00",
+    "superior:appeal:open:abcdefgh",
+    "superior:appeal:uphold:record0001:lz6y5w00",
+    "superior:appeal:overturn:record0001:lz6y5w00",
+  ])("opens the immediate Phase 3 button modal for %s", async (customId) => {
+    const botId = "923456789012345678";
+    const showModal = vi.fn(async () => undefined);
+    const interaction = {
+      createdTimestamp: Date.now(),
+      guildId: GUILD_ID,
+      guild: { id: GUILD_ID },
+      customId,
+      message: { id: "423456789012345678", author: { id: botId } },
+      client: { user: { id: botId } },
+      deferred: false,
+      replied: false,
+      showModal,
+      reply: vi.fn(async () => undefined),
+      deferReply: vi.fn(async () => undefined),
+      isAutocomplete: () => false,
+      isChatInputCommand: () => false,
+      isButton: () => true,
+      isModalSubmit: () => false,
+      isStringSelectMenu: () => false,
+    } as unknown as Interaction & {
+      showModal: ReturnType<typeof vi.fn>;
+      deferReply: ReturnType<typeof vi.fn>;
+    };
+    const runtime = {
+      interactionFormsForGuild: vi.fn(() => null),
+    } as unknown as BotRuntime;
+    const lifecycle = beginInteractionLifecycle(interaction, {
+      correlationId: () => "phase3-immediate-button",
+    });
+    await expect(lifecycle.ready).resolves.toBe(true);
+    await expect(
+      startImmediateInteractionResponse(interaction, runtime, lifecycle),
+    ).resolves.toBe("handled");
+    expect(showModal).toHaveBeenCalledOnce();
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+  });
+
   it("starts the private acknowledgement before delayed storage work", async () => {
     vi.useFakeTimers();
     const now = Date.UTC(2026, 7, 11, 12);

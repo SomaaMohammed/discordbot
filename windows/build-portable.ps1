@@ -14,6 +14,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "hash-utils.ps1")
 
 if ($env:OS -ne "Windows_NT") {
     throw "The portable x64 artifact must be built on Windows."
@@ -84,7 +85,7 @@ function Get-VerifiedDownload {
     $Expected = $ExpectedSha256.ToLowerInvariant()
     $Download = "$Destination.download"
     if (Test-Path -LiteralPath $Destination -PathType Leaf) {
-        $CachedHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        $CachedHash = Get-Sha256Hex -LiteralPath $Destination
         if ($CachedHash -ne $Expected) {
             Remove-Item -LiteralPath $Destination -Force
         }
@@ -98,7 +99,7 @@ function Get-VerifiedDownload {
 
     Write-Host "Downloading pinned $Description..."
     Invoke-WebRequest -Uri $Uri -OutFile $Download
-    $DownloadedHash = (Get-FileHash -LiteralPath $Download -Algorithm SHA256).Hash.ToLowerInvariant()
+    $DownloadedHash = Get-Sha256Hex -LiteralPath $Download
     if ($DownloadedHash -ne $Expected) {
         Remove-Item -LiteralPath $Download -Force
         throw "$Description SHA-256 mismatch. Expected $Expected; got $DownloadedHash"
@@ -246,8 +247,22 @@ try {
     }
 
     Write-Host "Building clean production JavaScript..."
-    $NpmCommand = Get-Command npm.cmd -ErrorAction Stop
-    Invoke-NativeChecked -Executable $NpmCommand.Source -Arguments @("run", "build") -WorkingDirectory $TsbotRoot
+    # Run the authoritative build steps directly. Invoking `npm run build`
+    # recursively from an npm-owned Windows process can leave package-lock.json
+    # unavailable to the nested npm process on some hosts.
+    $BuildNode = (Get-Command node.exe -ErrorAction Stop).Source
+    Invoke-NativeChecked -Executable $BuildNode -Arguments @(
+        (Join-Path $RepositoryRoot "scripts\version.mjs"),
+        "generate"
+    ) -WorkingDirectory $TsbotRoot
+    Invoke-NativeChecked -Executable $BuildNode -Arguments @(
+        (Join-Path $WindowsDirectory "clean-dist.mjs")
+    ) -WorkingDirectory $TsbotRoot
+    Invoke-NativeChecked -Executable $BuildNode -Arguments @(
+        (Join-Path $TsbotRoot "node_modules\typescript\bin\tsc"),
+        "-p",
+        (Join-Path $TsbotRoot "tsconfig.build.json")
+    ) -WorkingDirectory $TsbotRoot
     $DistRoot = Join-Path $TsbotRoot "dist"
     if (-not (Test-Path -LiteralPath (Join-Path $DistRoot "src\index.js") -PathType Leaf)) {
         throw "Production build did not create dist/src/index.js"
@@ -320,7 +335,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $WindowsDirectory "PORTABLE-README.txt") -Destination (Join-Path $StageRoot "README-WINDOWS.txt")
     Copy-Item -LiteralPath (Join-Path $RepositoryRoot ".env.example") -Destination $StageRoot
     [System.IO.File]::WriteAllText((Join-Path $StageRoot "VERSION"), "$($Package.version)`n", $Utf8NoBom)
-    $PackageLockHash = (Get-FileHash -LiteralPath (Join-Path $TsbotRoot "package-lock.json") -Algorithm SHA256).Hash.ToLowerInvariant()
+    $PackageLockHash = Get-Sha256Hex -LiteralPath (Join-Path $TsbotRoot "package-lock.json")
     $BuildInfo = @(
         "PACKAGE_NAME=$($Package.name)",
         "PACKAGE_VERSION=$($Package.version)",
@@ -412,7 +427,7 @@ internal static class BuildIdentity
     if (@($NativeAddon).Count -ne 1) {
         throw "Expected exactly one packaged better-sqlite3 native binary; found $(@($NativeAddon).Count)."
     }
-    $NativeAddonHash = (Get-FileHash -LiteralPath $NativeAddon[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $NativeAddonHash = Get-Sha256Hex -LiteralPath $NativeAddon[0].FullName
     if ($NativeAddonHash -ne $BetterSqlite3BinarySha256.ToLowerInvariant()) {
         throw "Packaged better-sqlite3 binary SHA-256 mismatch. Expected $BetterSqlite3BinarySha256; got $NativeAddonHash"
     }
@@ -453,7 +468,7 @@ internal static class BuildIdentity
     $ManifestFiles = @(Get-SortedRelativeFileNames -BaseDirectory $StageRoot)
     $ManifestLines = foreach ($Relative in $ManifestFiles) {
         $FilePath = Join-Path $StageRoot $Relative.Replace("/", "\")
-        $Hash = (Get-FileHash -LiteralPath $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $Hash = Get-Sha256Hex -LiteralPath $FilePath
         "$Hash  $Relative"
     }
     [System.IO.File]::WriteAllLines((Join-Path $StageRoot "MANIFEST.sha256"), $ManifestLines, $Utf8NoBom)
@@ -477,7 +492,7 @@ internal static class BuildIdentity
         Remove-Item -LiteralPath $FinalChecksum -Force
     }
     Move-Item -LiteralPath $WorkArchive -Destination $FinalArchive
-    $ArchiveHash = (Get-FileHash -LiteralPath $FinalArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $ArchiveHash = Get-Sha256Hex -LiteralPath $FinalArchive
     [System.IO.File]::WriteAllText(
         $FinalChecksum,
         "$ArchiveHash  $([System.IO.Path]::GetFileName($FinalArchive))`n",
@@ -525,7 +540,7 @@ internal static class BuildIdentity
             Remove-Item -LiteralPath $StandaloneTarget -Force
         }
         Move-Item -LiteralPath $StandaloneWorkOutput -Destination $StandaloneTarget
-        $StandaloneHash = (Get-FileHash -LiteralPath $StandaloneTarget -Algorithm SHA256).Hash.ToLowerInvariant()
+        $StandaloneHash = Get-Sha256Hex -LiteralPath $StandaloneTarget
         Write-Host "Standalone executable: $StandaloneTarget"
         Write-Host "Standalone SHA-256: $StandaloneHash"
     }

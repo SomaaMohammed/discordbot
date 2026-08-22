@@ -26,6 +26,7 @@ import { AsyncWorkTracker } from "./work-tracker.js";
 import { clearBackfillStatus } from "./activity.js";
 import { clearModerationProcessState } from "./moderation.js";
 import { clearPanelProcessState } from "./panels.js";
+import { clearAntiSpamProcessState } from "./anti-spam-enforcement.js";
 import {
   beginInteractionLifecycle,
   EventLoopDiagnostics,
@@ -516,6 +517,7 @@ export function recordGuildAvailable(
     clearBackfillStatus(guildId);
     clearModerationProcessState(guildId);
     clearPanelProcessState(guildId);
+    clearAntiSpamProcessState(guildId);
   }
   runtime.invalidateGuild(guildId);
   return { record, rejoined };
@@ -548,6 +550,7 @@ export function recordGuildUnavailable(
   clearBackfillStatus(guildId);
   clearModerationProcessState(guildId);
   clearPanelProcessState(guildId);
+  clearAntiSpamProcessState(guildId);
   runtime.invalidateGuild(guildId);
 }
 
@@ -562,6 +565,7 @@ export function recordGuildRemoved(runtime: BotRuntime, guildId: string): void {
     clearBackfillStatus(guildId);
     clearModerationProcessState(guildId);
     clearPanelProcessState(guildId);
+    clearAntiSpamProcessState(guildId);
   }
 }
 

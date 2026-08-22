@@ -156,6 +156,7 @@ describe("Windows portable packaging", () => {
     const launcherSupport = read("windows/launcher/LauncherSupport.cs");
     const diagnostics = read("windows/diagnostics.mjs");
     const releaseVerifier = read("windows/verify-release.ps1");
+    const hashUtilities = read("windows/hash-utils.ps1");
 
     expect(builder).toContain('$NodeVersion = "22.12.0"');
     expect(builder).toContain(
@@ -172,7 +173,10 @@ describe("Windows portable packaging", () => {
     expect(builder).toContain(
       '$BetterSqlite3BinarySha256 = "8c041ef57dd1bb55b0032306594310625b7a7a374bc48956e0858645f56919c4"',
     );
-    expect(builder).toContain("Get-FileHash");
+    expect(builder).toContain("Get-Sha256Hex");
+    expect(hashUtilities).toContain(
+      "[System.Security.Cryptography.SHA256]::Create()",
+    );
     expect(builder).toContain('"--omit=dev"');
     expect(builder).toContain('"/platform:x64"');
     expect(builder).toContain('"/noconfig"');

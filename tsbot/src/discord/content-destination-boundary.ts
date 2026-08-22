@@ -22,7 +22,11 @@ export type ContentDestinationBoundary =
 export async function inspectContentDestinationBoundary(options: {
   guild: Guild;
   userId: string;
-  capability: "tickets.manage" | "applications.review";
+  capability:
+    | "tickets.manage"
+    | "applications.review"
+    | "reports.review"
+    | "appeals.review";
   configuredRoleId: string | null;
   grants: CapabilityGrantReader;
   channel: GuildTextBasedChannel;

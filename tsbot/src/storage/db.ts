@@ -17,6 +17,51 @@ import type {
   GuildPurgeResult,
   GuildRecord,
   GuildSettings,
+  ActiveModerationCaseLookupResult,
+  DeliveryAttempt,
+  DeliveryAttemptInput,
+  DeliveryAttemptTransitionResult,
+  DeliveryClaimResult,
+  ModerationCase,
+  ModerationCaseActionType,
+  ModerationCaseSource,
+  ModerationCaseAmendInput,
+  ModerationCaseAttemptInput,
+  ModerationCaseEvent,
+  ModerationCaseEventInput,
+  ModerationCaseInput,
+  ModerationCaseListFilter,
+  ModerationCaseTransitionResult,
+  ExpiredTimeoutCaseCompletionInput,
+  ModerationTimeoutRemovalFinalizeResult,
+  ModerationConfiguration,
+  ModerationConfigurationInput,
+  ModerationLogDelivery,
+  ModerationLogDeliveryTransitionResult,
+  MemberReport,
+  MemberReportDecisionInput,
+  MemberReportEvent,
+  MemberReportReservationInput,
+  MemberReportReservationResult,
+  MemberReportTransitionResult,
+  CaseAppeal,
+  CaseAppealDecisionInput,
+  CaseAppealEvent,
+  CaseAppealReservationInput,
+  CaseAppealReservationResult,
+  CaseAppealTransitionResult,
+  CaseAppealOverturnFinalizeResult,
+  TimeoutAppealRemovalCheckpointInput,
+  TimeoutAppealRemovalCheckpointResult,
+  AntiSpamRule,
+  AntiSpamRuleInput,
+  AntiSpamRuleType,
+  AntiSpamExemption,
+  AntiSpamEnforcement,
+  AntiSpamEnforcementCompletionInput,
+  AntiSpamEnforcementReservationInput,
+  AntiSpamEnforcementReservationResult,
+  AntiSpamEvent,
   RoleCapabilityGrant,
   PanelPreset,
   PostedPanel,
@@ -54,14 +99,32 @@ import {
 } from "./metric-keys.js";
 import {
   detectDatabaseSchema,
-  initializeV8Schema,
-  validateV8Schema,
+  initializeV9Schema,
+  validateV9Schema,
 } from "./schema.js";
 import { GuildOperationalRepository } from "./operational-repository.js";
 import { GuildAccessRepository } from "./access-repository.js";
 import { TicketDepartmentRepository } from "./ticket-department-repository.js";
 import { SuggestionRepository } from "./suggestion-repository.js";
 import { RestrictedPingRepository } from "./restricted-ping-repository.js";
+import { ModerationCaseRepository } from "./moderation-case-repository.js";
+import { AntiSpamRepository } from "./anti-spam-repository.js";
+import {
+  CaseAppealRepository,
+  MemberReportRepository,
+  type CaseAppealListFilter,
+  type CaseAppealActorInput,
+  type CaseAppealWithdrawInput,
+  type DeliveryBindingInput,
+  type DeliveryFailureInput,
+  type DeliveryMissingInput,
+  type DeliveryOrphanCheckpointInput,
+  type MemberReportActorInput,
+  type MemberReportListFilter,
+  type MemberReportWithdrawInput,
+  type ReviewClaimReleaseInput,
+  type ReviewClaimTakeoverInput,
+} from "./report-appeal-repository.js";
 import {
   MudaeWatchDeliveryRepository,
   pruneAllMudaeWatchDeliveries,
@@ -128,6 +191,7 @@ import type {
 import {
   GUILD_DATA_COLLECTION_LIMITS,
   insertImportedOperationalData,
+  insertPhase3GuildData,
   parseGuildDataExport,
 } from "./guild-data.js";
 import {
@@ -140,6 +204,11 @@ import {
   readRestrictedPingGuildData,
   RESTRICTED_PING_GUILD_TABLES,
 } from "./guild-data-v5.js";
+import {
+  deactivatePhase3Bindings,
+  PHASE3_GUILD_TABLES,
+  readPhase3GuildData,
+} from "./guild-data-v7.js";
 export { createOpaqueStorageId } from "./operational-repository.js";
 
 interface GuildRow {
@@ -204,7 +273,7 @@ export class BotStorage {
       const memory = new Database(":memory:", { timeout: 5_000 });
       try {
         memory.pragma("foreign_keys = ON");
-        initializeV8Schema(memory, utcNow());
+        initializeV9Schema(memory, utcNow());
         this.db = memory;
       } catch (error) {
         memory.close();
@@ -230,7 +299,7 @@ export class BotStorage {
 
     if (schema === "legacy-v1") {
       throw new Error(
-        "Database schema v1 is not supported by v8 startup. Upgrade through the final v4 release to schema v2, create an offline backup, stop every older executable, then run the current migration command.",
+        "Database schema v1 is not supported by v9 startup. Upgrade through the final v4 release to schema v2, create an offline backup, stop every older executable, then run the current migration command.",
       );
     }
     if (schema === "legacy-v2") {
@@ -260,7 +329,12 @@ export class BotStorage {
     }
     if (schema === "legacy-v7") {
       throw new Error(
-        `Database schema v7 requires an explicit migration to v8. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}. After migration, do not run a pre-6.0.0 executable against this database.`,
+        `Database schema v7 requires an explicit migration to v9. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+      );
+    }
+    if (schema === "legacy-v8") {
+      throw new Error(
+        `Database schema v8 requires an explicit migration to v9. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
       );
     }
     if (schema === "unknown") {
@@ -273,9 +347,9 @@ export class BotStorage {
     try {
       writable.pragma("foreign_keys = ON");
       if (schema === "empty") {
-        initializeV8Schema(writable, utcNow());
+        initializeV9Schema(writable, utcNow());
       } else {
-        const issues = validateV8Schema(writable);
+        const issues = validateV9Schema(writable);
         if (issues.length > 0) {
           throw new Error(
             `Database changed after read-only classification: ${issues.join("; ")}`,
@@ -644,6 +718,66 @@ export class BotStorage {
           counts.restrictedPingEvents,
           GUILD_DATA_COLLECTION_LIMITS.restrictedPingEvents,
         ],
+        [
+          "moderation cases",
+          counts.moderationCases,
+          GUILD_DATA_COLLECTION_LIMITS.moderationCases,
+        ],
+        [
+          "moderation case events",
+          counts.moderationCaseEvents,
+          GUILD_DATA_COLLECTION_LIMITS.moderationCaseEvents,
+        ],
+        [
+          "moderation log deliveries",
+          counts.moderationLogDeliveries,
+          GUILD_DATA_COLLECTION_LIMITS.moderationLogDeliveries,
+        ],
+        [
+          "member reports",
+          counts.memberReports,
+          GUILD_DATA_COLLECTION_LIMITS.memberReports,
+        ],
+        [
+          "member report events",
+          counts.memberReportEvents,
+          GUILD_DATA_COLLECTION_LIMITS.memberReportEvents,
+        ],
+        [
+          "case appeals",
+          counts.caseAppeals,
+          GUILD_DATA_COLLECTION_LIMITS.caseAppeals,
+        ],
+        [
+          "case appeal events",
+          counts.caseAppealEvents,
+          GUILD_DATA_COLLECTION_LIMITS.caseAppealEvents,
+        ],
+        [
+          "anti-spam rules",
+          counts.antiSpamRules,
+          GUILD_DATA_COLLECTION_LIMITS.antiSpamRules,
+        ],
+        [
+          "anti-spam exempt roles",
+          counts.antiSpamExemptRoles,
+          GUILD_DATA_COLLECTION_LIMITS.antiSpamExemptRoles,
+        ],
+        [
+          "anti-spam exempt channels",
+          counts.antiSpamExemptChannels,
+          GUILD_DATA_COLLECTION_LIMITS.antiSpamExemptChannels,
+        ],
+        [
+          "anti-spam enforcements",
+          counts.antiSpamEnforcements,
+          GUILD_DATA_COLLECTION_LIMITS.antiSpamEnforcements,
+        ],
+        [
+          "anti-spam events",
+          counts.antiSpamEvents,
+          GUILD_DATA_COLLECTION_LIMITS.antiSpamEvents,
+        ],
       ] as const;
       for (const [label, count, maximum] of boundedCollections) {
         if (count > maximum) {
@@ -671,7 +805,7 @@ export class BotStorage {
         )
         .all(normalized) as MetricRow[];
       return {
-        formatVersion: 6,
+        formatVersion: 7,
         guildId: normalized,
         exportedAt: utcNow(),
         metadata,
@@ -683,6 +817,7 @@ export class BotStorage {
         })),
         ...readPhase2OperationalData(db, normalized),
         ...readRestrictedPingGuildData(db, normalized),
+        ...readPhase3GuildData(db, normalized),
       };
     });
     return exportSnapshot.deferred();
@@ -723,6 +858,16 @@ export class BotStorage {
           db.prepare(`DELETE FROM ${table} WHERE guild_id = ?`).run(normalized);
         }
       }
+      // Formats 3+ have always represented a complete portable tenant model
+      // for their schema generation. Collections introduced after the source
+      // format therefore become empty on import instead of silently retaining
+      // newer live records. Format 2 intentionally keeps all operational rows
+      // for its documented settings-and-metrics-only compatibility behavior.
+      if (imported.sourceFormatVersion >= 3) {
+        for (const table of [...PHASE3_GUILD_TABLES].reverse()) {
+          db.prepare(`DELETE FROM ${table} WHERE guild_id = ?`).run(normalized);
+        }
+      }
       const insert = db.prepare(
         `INSERT INTO metrics (
            guild_id, metric_key, metric_value, updated_at
@@ -734,8 +879,12 @@ export class BotStorage {
       if (imported.sourceFormatVersion >= 3) {
         insertImportedOperationalData(db, normalized, imported);
       }
+      if (imported.sourceFormatVersion === 7) {
+        insertPhase3GuildData(db, normalized, imported);
+      }
       deactivatePhase2OperationalBindings(db, normalized);
       deactivateRestrictedPingBindings(db, normalized);
+      deactivatePhase3Bindings(db, normalized);
       saved = reviewed;
     });
     apply.immediate();
@@ -763,6 +912,7 @@ export class BotStorage {
         "metrics",
         ...PHASE2_GUILD_TABLES,
         ...RESTRICTED_PING_GUILD_TABLES,
+        ...PHASE3_GUILD_TABLES,
         "mudae_watch_deliveries",
       ] as const) {
         if (this.countGuildRows(table, normalized) !== 0) {
@@ -903,6 +1053,37 @@ export class BotStorage {
         "mudae_watch_deliveries",
         guildId,
       ),
+      moderationConfigurations: this.countGuildRows(
+        "moderation_configurations",
+        guildId,
+      ),
+      moderationCases: this.countGuildRows("moderation_cases", guildId),
+      moderationCaseEvents: this.countGuildRows(
+        "moderation_case_events",
+        guildId,
+      ),
+      moderationLogDeliveries: this.countGuildRows(
+        "moderation_log_deliveries",
+        guildId,
+      ),
+      memberReports: this.countGuildRows("member_reports", guildId),
+      memberReportEvents: this.countGuildRows("member_report_events", guildId),
+      caseAppeals: this.countGuildRows("case_appeals", guildId),
+      caseAppealEvents: this.countGuildRows("case_appeal_events", guildId),
+      antiSpamRules: this.countGuildRows("anti_spam_rules", guildId),
+      antiSpamExemptRoles: this.countGuildRows(
+        "anti_spam_exempt_roles",
+        guildId,
+      ),
+      antiSpamExemptChannels: this.countGuildRows(
+        "anti_spam_exempt_channels",
+        guildId,
+      ),
+      antiSpamEnforcements: this.countGuildRows(
+        "anti_spam_enforcements",
+        guildId,
+      ),
+      antiSpamEvents: this.countGuildRows("anti_spam_events", guildId),
     };
   }
 
@@ -913,6 +1094,7 @@ export class BotStorage {
       "metrics",
       ...PHASE2_GUILD_TABLES,
       ...RESTRICTED_PING_GUILD_TABLES,
+      ...PHASE3_GUILD_TABLES,
     ] as const;
     return tables.reduce(
       (total, table) => total + this.estimateGuildTableBytes(table, guildId),
@@ -926,7 +1108,8 @@ export class BotStorage {
       | "guild_settings"
       | "metrics"
       | (typeof PHASE2_GUILD_TABLES)[number]
-      | (typeof RESTRICTED_PING_GUILD_TABLES)[number],
+      | (typeof RESTRICTED_PING_GUILD_TABLES)[number]
+      | (typeof PHASE3_GUILD_TABLES)[number],
     guildId: string,
   ): number {
     const db = this.requireDatabase();
@@ -955,6 +1138,7 @@ export class BotStorage {
       | "metrics"
       | (typeof PHASE2_GUILD_TABLES)[number]
       | (typeof RESTRICTED_PING_GUILD_TABLES)[number]
+      | (typeof PHASE3_GUILD_TABLES)[number]
       | "mudae_watch_deliveries",
     guildId: string,
   ): number {
@@ -973,6 +1157,10 @@ export class GuildStorage {
   private readonly applications: ApplicationRepository;
   private readonly restrictedPings: RestrictedPingRepository;
   private readonly mudaeWatchDeliveries: MudaeWatchDeliveryRepository;
+  private readonly moderationCases: ModerationCaseRepository;
+  private readonly memberReports: MemberReportRepository;
+  private readonly caseAppeals: CaseAppealRepository;
+  private readonly antiSpam: AntiSpamRepository;
 
   public constructor(
     private readonly db: Database.Database,
@@ -986,6 +1174,649 @@ export class GuildStorage {
     this.applications = new ApplicationRepository(db, guildId);
     this.restrictedPings = new RestrictedPingRepository(db, guildId);
     this.mudaeWatchDeliveries = new MudaeWatchDeliveryRepository(db, guildId);
+    this.moderationCases = new ModerationCaseRepository(db, guildId);
+    this.memberReports = new MemberReportRepository(db, guildId);
+    this.caseAppeals = new CaseAppealRepository(db, guildId);
+    this.antiSpam = new AntiSpamRepository(db, guildId);
+  }
+
+  public getModerationConfiguration(): ModerationConfiguration | null {
+    return this.moderationCases.getConfiguration();
+  }
+
+  public upsertModerationConfiguration(
+    input: ModerationConfigurationInput,
+  ): ModerationConfiguration {
+    return this.moderationCases.upsertConfiguration(input);
+  }
+
+  public disableModerationConfiguration(
+    actorId: string,
+  ): ModerationConfiguration | null {
+    return this.moderationCases.disableConfiguration(actorId);
+  }
+
+  public createModerationCase(input: ModerationCaseInput): ModerationCase {
+    return this.moderationCases.createCase(input);
+  }
+
+  public reserveModerationCaseAttempt(
+    input: ModerationCaseAttemptInput,
+  ): ModerationCase {
+    return this.moderationCases.reserveCaseAttempt(input);
+  }
+
+  public confirmModerationCase(
+    caseId: string,
+    input: {
+      actorId: string;
+      status: "active" | "completed";
+      discordActionMetadata?: unknown;
+      expectedUpdatedAt?: string;
+    },
+  ): ModerationCaseTransitionResult {
+    return this.moderationCases.confirmCaseAttempt(caseId, input);
+  }
+
+  public failModerationCaseAttempt(
+    caseId: string,
+    input: { actorId: string; failureCode: string; expectedUpdatedAt?: string },
+  ): ModerationCaseTransitionResult {
+    return this.moderationCases.failCaseAttempt(caseId, input);
+  }
+
+  public finalizeTimeoutRemovalCase(
+    removalCaseId: string,
+    input: {
+      actorId: string;
+      originalCaseId: string;
+      discordActionMetadata?: unknown;
+      originalOutcome?: "completed" | "overturned";
+      originalReason?: string;
+      removalExpectedUpdatedAt?: string;
+      originalExpectedUpdatedAt?: string;
+    },
+  ): ModerationTimeoutRemovalFinalizeResult {
+    return this.moderationCases.finalizeTimeoutRemoval(removalCaseId, input);
+  }
+
+  public finalizeBanRemovalCase(
+    removalCaseId: string,
+    input: {
+      actorId: string;
+      originalCaseId: string;
+      discordActionMetadata?: unknown;
+      removalExpectedUpdatedAt?: string;
+      originalExpectedUpdatedAt?: string;
+    },
+  ): ModerationTimeoutRemovalFinalizeResult {
+    return this.moderationCases.finalizeBanRemoval(removalCaseId, input);
+  }
+
+  public finalizeTimeoutRemovalAppealCases(
+    removalCaseId: string,
+    input: {
+      actorId: string;
+      originalCaseId: string;
+      reason: string;
+      discordActionMetadata?: unknown;
+      removalExpectedUpdatedAt?: string;
+      originalExpectedUpdatedAt?: string;
+    },
+  ): ModerationTimeoutRemovalFinalizeResult {
+    return this.moderationCases.finalizeTimeoutAppealOverturn(
+      removalCaseId,
+      input,
+    );
+  }
+
+  public getModerationCaseById(caseId: string): ModerationCase | null {
+    return this.moderationCases.getCaseById(caseId);
+  }
+
+  public getModerationCaseByNumber(caseNumber: number): ModerationCase | null {
+    return this.moderationCases.getCaseByNumber(caseNumber);
+  }
+
+  public listModerationCases(
+    filter: ModerationCaseListFilter = {},
+  ): ModerationCase[] {
+    return this.moderationCases.listCases(filter);
+  }
+
+  public findUniqueActiveModerationCase(
+    targetUserId: string,
+    actionTypes: readonly ModerationCaseActionType[],
+  ): ActiveModerationCaseLookupResult {
+    return this.moderationCases.findUniqueActiveCase(targetUserId, actionTypes);
+  }
+
+  public findUniqueFailedModerationCase(
+    targetUserId: string,
+    actionTypes: readonly ModerationCaseActionType[],
+    filter: {
+      relatedCaseId?: string;
+      sources?: readonly ModerationCaseSource[];
+    } = {},
+  ): ActiveModerationCaseLookupResult {
+    return this.moderationCases.findUniqueFailedCase(
+      targetUserId,
+      actionTypes,
+      filter,
+    );
+  }
+
+  public amendModerationCase(
+    caseId: string,
+    input: ModerationCaseAmendInput,
+  ): ModerationCaseTransitionResult {
+    return this.moderationCases.amendCase(caseId, input);
+  }
+
+  public voidModerationCase(
+    caseId: string,
+    input: { actorId: string; reason: string; expectedUpdatedAt?: string },
+  ): ModerationCaseTransitionResult {
+    return this.moderationCases.voidCase(caseId, input);
+  }
+
+  public completeModerationCase(
+    caseId: string,
+    input: {
+      actorId: string;
+      reason?: string;
+      relatedCaseId?: string | null;
+      expectedUpdatedAt?: string;
+    },
+  ): ModerationCaseTransitionResult {
+    return this.moderationCases.completeCase(caseId, input);
+  }
+
+  public completeExpiredTimeoutCase(
+    caseId: string,
+    input: ExpiredTimeoutCaseCompletionInput,
+  ): ModerationCaseTransitionResult {
+    return this.moderationCases.completeExpiredTimeoutCase(caseId, input);
+  }
+
+  public overturnModerationCase(
+    caseId: string,
+    input: { actorId: string; reason: string; expectedUpdatedAt?: string },
+  ): ModerationCaseTransitionResult {
+    return this.moderationCases.overturnCase(caseId, input);
+  }
+
+  public appendModerationCaseEvent(
+    caseId: string,
+    input: ModerationCaseEventInput,
+  ): ModerationCaseEvent | null {
+    return this.moderationCases.appendEvent(caseId, input);
+  }
+
+  public listModerationCaseEvents(
+    caseId: string,
+    limit?: number,
+    offset?: number,
+  ): ModerationCaseEvent[] {
+    return this.moderationCases.listEvents(caseId, limit, offset);
+  }
+
+  public getModerationLogDelivery(
+    caseId: string,
+  ): ModerationLogDelivery | null {
+    return this.moderationCases.getLogDelivery(caseId);
+  }
+
+  public getModerationLogDeliveryAttempt(
+    caseId: string,
+  ): DeliveryAttempt | null {
+    return this.moderationCases.getLogDeliveryAttempt(caseId);
+  }
+
+  public beginModerationLogDeliveryAttempt(
+    caseId: string,
+    input: DeliveryAttemptInput,
+  ): DeliveryAttemptTransitionResult<ModerationLogDelivery> {
+    return this.moderationCases.beginLogDeliveryAttempt(caseId, input);
+  }
+
+  public completeModerationLogDelivery(
+    caseId: string,
+    input: {
+      channelId: string;
+      messageId: string;
+      claimId: string;
+      expectedUpdatedAt?: string;
+    },
+  ): ModerationLogDelivery | null {
+    return this.moderationCases.completeLogDelivery(
+      caseId,
+      input.channelId,
+      input.messageId,
+      input.claimId,
+      input.expectedUpdatedAt,
+    );
+  }
+
+  public failModerationLogDelivery(
+    caseId: string,
+    input: {
+      failureCode: string;
+      claimId?: string;
+      expectedUpdatedAt?: string;
+    },
+  ): ModerationLogDelivery | null {
+    return this.moderationCases.failLogDelivery(
+      caseId,
+      input.failureCode,
+      input.claimId,
+      input.expectedUpdatedAt,
+    );
+  }
+
+  public markModerationLogDeliveryMissing(
+    caseId: string,
+    input: { expectedUpdatedAt?: string },
+  ): ModerationLogDelivery | null {
+    return this.moderationCases.markLogDeliveryMissing(
+      caseId,
+      "message-missing",
+      input.expectedUpdatedAt,
+    );
+  }
+
+  public checkpointModerationLogDeliveryOrphan(
+    caseId: string,
+    input: {
+      channelId: string;
+      messageId: string;
+      claimId: string;
+      failureCode: string;
+      expectedUpdatedAt: string;
+    },
+  ): ModerationLogDeliveryTransitionResult {
+    return this.moderationCases.checkpointLogDeliveryOrphan(caseId, input);
+  }
+
+  public listRecoverableModerationLogDeliveries(
+    limit?: number,
+  ): ModerationLogDelivery[] {
+    return this.moderationCases.listRecoverableLogDeliveries(limit);
+  }
+
+  public claimModerationLogDelivery(
+    caseId: string,
+    input: { expectedUpdatedAt?: string } = {},
+  ): DeliveryClaimResult<ModerationLogDelivery> {
+    return this.moderationCases.claimLogDelivery(
+      caseId,
+      input.expectedUpdatedAt,
+    );
+  }
+
+  public reserveMemberReport(
+    input: MemberReportReservationInput,
+  ): MemberReportReservationResult {
+    return this.memberReports.reserveReport(input);
+  }
+
+  public bindMemberReportDelivery(
+    reportId: string,
+    input: DeliveryBindingInput,
+  ): MemberReportTransitionResult {
+    return this.memberReports.bindDelivery(reportId, input);
+  }
+
+  public claimMemberReportDelivery(
+    reportId: string,
+    input: DeliveryMissingInput = {},
+  ): DeliveryClaimResult<MemberReport> {
+    return this.memberReports.claimDelivery(reportId, input);
+  }
+
+  public getMemberReportDeliveryAttempt(
+    reportId: string,
+  ): DeliveryAttempt | null {
+    return this.memberReports.getDeliveryAttempt(reportId);
+  }
+
+  public beginMemberReportDeliveryAttempt(
+    reportId: string,
+    input: DeliveryAttemptInput,
+  ): DeliveryAttemptTransitionResult<MemberReport> {
+    return this.memberReports.beginDeliveryAttempt(reportId, input);
+  }
+
+  public failMemberReportDelivery(
+    reportId: string,
+    input: DeliveryFailureInput,
+  ): MemberReportTransitionResult {
+    return this.memberReports.failDelivery(reportId, input);
+  }
+
+  public markMemberReportDeliveryMissing(
+    reportId: string,
+    input: DeliveryMissingInput,
+  ): MemberReportTransitionResult {
+    return this.memberReports.markDeliveryMissing(reportId, input);
+  }
+
+  public checkpointMemberReportDeliveryOrphan(
+    reportId: string,
+    input: DeliveryOrphanCheckpointInput,
+  ): MemberReportTransitionResult {
+    return this.memberReports.checkpointOrphanDelivery(reportId, input);
+  }
+
+  public claimMemberReport(
+    reportId: string,
+    input: MemberReportActorInput,
+  ): MemberReportTransitionResult {
+    return this.memberReports.claimReport(reportId, input);
+  }
+
+  public takeOverMemberReportClaim(
+    reportId: string,
+    input: ReviewClaimTakeoverInput,
+  ): MemberReportTransitionResult {
+    return this.memberReports.takeOverClaim(reportId, input);
+  }
+
+  public releaseMemberReportClaim(
+    reportId: string,
+    input: ReviewClaimReleaseInput,
+  ): MemberReportTransitionResult {
+    return this.memberReports.releaseClaim(reportId, input);
+  }
+
+  public decideMemberReport(
+    reportId: string,
+    input: MemberReportDecisionInput,
+  ): MemberReportTransitionResult {
+    return this.memberReports.decideReport(reportId, input);
+  }
+
+  public withdrawMemberReport(
+    reportId: string,
+    input: MemberReportWithdrawInput,
+  ): MemberReportTransitionResult {
+    return this.memberReports.withdrawReport(reportId, input);
+  }
+
+  public getMemberReportById(reportId: string): MemberReport | null {
+    return this.memberReports.getReportById(reportId);
+  }
+
+  public getMemberReportByNumber(reportNumber: number): MemberReport | null {
+    return this.memberReports.getReportByNumber(reportNumber);
+  }
+
+  public listMemberReports(
+    filter: MemberReportListFilter = {},
+  ): MemberReport[] {
+    return this.memberReports.listReports(filter);
+  }
+
+  public listMemberReportEvents(
+    reportId: string,
+    limit?: number,
+    offset?: number,
+  ): MemberReportEvent[] {
+    return this.memberReports.listEvents(reportId, limit, offset);
+  }
+
+  public listRecoverableMemberReports(limit?: number): MemberReport[] {
+    return this.memberReports.listRecoverable(limit);
+  }
+
+  public reserveCaseAppeal(
+    input: CaseAppealReservationInput,
+  ): CaseAppealReservationResult {
+    return this.caseAppeals.reserveAppeal(input);
+  }
+
+  public bindCaseAppealDelivery(
+    appealId: string,
+    input: DeliveryBindingInput,
+  ): CaseAppealTransitionResult {
+    return this.caseAppeals.bindDelivery(appealId, input);
+  }
+
+  public claimCaseAppealDelivery(
+    appealId: string,
+    input: DeliveryMissingInput = {},
+  ): DeliveryClaimResult<CaseAppeal> {
+    return this.caseAppeals.claimDelivery(appealId, input);
+  }
+
+  public getCaseAppealDeliveryAttempt(
+    appealId: string,
+  ): DeliveryAttempt | null {
+    return this.caseAppeals.getDeliveryAttempt(appealId);
+  }
+
+  public beginCaseAppealDeliveryAttempt(
+    appealId: string,
+    input: DeliveryAttemptInput,
+  ): DeliveryAttemptTransitionResult<CaseAppeal> {
+    return this.caseAppeals.beginDeliveryAttempt(appealId, input);
+  }
+
+  public failCaseAppealDelivery(
+    appealId: string,
+    input: DeliveryFailureInput,
+  ): CaseAppealTransitionResult {
+    return this.caseAppeals.failDelivery(appealId, input);
+  }
+
+  public markCaseAppealDeliveryMissing(
+    appealId: string,
+    input: DeliveryMissingInput,
+  ): CaseAppealTransitionResult {
+    return this.caseAppeals.markDeliveryMissing(appealId, input);
+  }
+
+  public checkpointCaseAppealDeliveryOrphan(
+    appealId: string,
+    input: DeliveryOrphanCheckpointInput,
+  ): CaseAppealTransitionResult {
+    return this.caseAppeals.checkpointOrphanDelivery(appealId, input);
+  }
+
+  public claimCaseAppeal(
+    appealId: string,
+    input: CaseAppealActorInput,
+  ): CaseAppealTransitionResult {
+    return this.caseAppeals.claimAppeal(appealId, input);
+  }
+
+  public takeOverCaseAppealClaim(
+    appealId: string,
+    input: ReviewClaimTakeoverInput,
+  ): CaseAppealTransitionResult {
+    return this.caseAppeals.takeOverClaim(appealId, input);
+  }
+
+  public releaseCaseAppealClaim(
+    appealId: string,
+    input: ReviewClaimReleaseInput,
+  ): CaseAppealTransitionResult {
+    return this.caseAppeals.releaseClaim(appealId, input);
+  }
+
+  public decideCaseAppeal(
+    appealId: string,
+    input: CaseAppealDecisionInput,
+  ): CaseAppealTransitionResult {
+    return this.caseAppeals.decideAppeal(appealId, input);
+  }
+
+  public finalizeCaseAppealOverturn(
+    appealId: string,
+    input: {
+      reviewerId: string;
+      decisionReason: string;
+      caseReason: string;
+      reversalCaseId?: string | null;
+      appealExpectedUpdatedAt?: string;
+      originalExpectedUpdatedAt?: string;
+    },
+  ): CaseAppealOverturnFinalizeResult {
+    return this.caseAppeals.finalizeCaseOverturn(appealId, input);
+  }
+
+  public checkpointTimeoutAppealRemoval(
+    appealId: string,
+    removalCaseId: string,
+    input: TimeoutAppealRemovalCheckpointInput,
+  ): TimeoutAppealRemovalCheckpointResult {
+    return this.caseAppeals.checkpointTimeoutAppealRemoval(
+      appealId,
+      removalCaseId,
+      input,
+    );
+  }
+
+  public finalizeTimeoutAppealOverturn(
+    appealId: string,
+    removalCaseId: string,
+    input: {
+      reviewerId: string;
+      decisionReason: string;
+      caseReason: string;
+      discordActionMetadata?: unknown;
+      appealExpectedUpdatedAt?: string;
+      removalExpectedUpdatedAt?: string;
+      originalExpectedUpdatedAt?: string;
+    },
+  ): CaseAppealOverturnFinalizeResult {
+    return this.caseAppeals.finalizeTimeoutAppealOverturn(
+      appealId,
+      removalCaseId,
+      input,
+    );
+  }
+
+  public withdrawCaseAppeal(
+    appealId: string,
+    input: CaseAppealWithdrawInput,
+  ): CaseAppealTransitionResult {
+    return this.caseAppeals.withdrawAppeal(appealId, input);
+  }
+
+  public getCaseAppealById(appealId: string): CaseAppeal | null {
+    return this.caseAppeals.getAppealById(appealId);
+  }
+
+  public getCaseAppealByNumber(appealNumber: number): CaseAppeal | null {
+    return this.caseAppeals.getAppealByNumber(appealNumber);
+  }
+
+  public listCaseAppeals(filter: CaseAppealListFilter = {}): CaseAppeal[] {
+    return this.caseAppeals.listAppeals(filter);
+  }
+
+  public listCaseAppealEvents(
+    appealId: string,
+    limit?: number,
+    offset?: number,
+  ): CaseAppealEvent[] {
+    return this.caseAppeals.listEvents(appealId, limit, offset);
+  }
+
+  public listRecoverableCaseAppeals(limit?: number): CaseAppeal[] {
+    return this.caseAppeals.listRecoverable(limit);
+  }
+
+  public getAntiSpamRule(ruleType: AntiSpamRuleType): AntiSpamRule | null {
+    return this.antiSpam.getRule(ruleType);
+  }
+
+  public listAntiSpamRules(): AntiSpamRule[] {
+    return this.antiSpam.listRules();
+  }
+
+  public upsertAntiSpamRule(input: AntiSpamRuleInput): AntiSpamRule {
+    return this.antiSpam.upsertRule(input);
+  }
+
+  public setAntiSpamRuleEnabled(
+    ruleType: AntiSpamRuleType,
+    enabled: boolean,
+    actorId: string,
+  ): AntiSpamRule | null {
+    return this.antiSpam.setRuleEnabled(ruleType, enabled, actorId);
+  }
+
+  public listAntiSpamExemptRoleIds(): string[] {
+    return this.antiSpam.listExemptRoleIds();
+  }
+
+  public listAntiSpamExemptChannelIds(): string[] {
+    return this.antiSpam.listExemptChannelIds();
+  }
+
+  public listAntiSpamExemptRoles(): string[] {
+    return this.listAntiSpamExemptRoleIds();
+  }
+
+  public listAntiSpamExemptChannels(): string[] {
+    return this.listAntiSpamExemptChannelIds();
+  }
+
+  public addAntiSpamExemptRole(roleId: string, actorId: string): boolean {
+    this.antiSpam.addExemptRole(roleId, actorId);
+    return true;
+  }
+
+  public removeAntiSpamExemptRole(roleId: string, _actorId?: string): boolean {
+    return this.antiSpam.removeExemptRole(roleId);
+  }
+
+  public addAntiSpamExemptChannel(channelId: string, actorId: string): boolean {
+    this.antiSpam.addExemptChannel(channelId, actorId);
+    return true;
+  }
+
+  public removeAntiSpamExemptChannel(
+    channelId: string,
+    _actorId?: string,
+  ): boolean {
+    return this.antiSpam.removeExemptChannel(channelId);
+  }
+
+  public reserveAntiSpamEnforcement(
+    input: AntiSpamEnforcementReservationInput,
+  ): AntiSpamEnforcementReservationResult {
+    return this.antiSpam.reserveEnforcement(input);
+  }
+
+  public completeAntiSpamEnforcement(
+    reservationId: string,
+    input: AntiSpamEnforcementCompletionInput,
+  ): AntiSpamEnforcement | null {
+    return this.antiSpam.completeEnforcement(reservationId, input);
+  }
+
+  public getAntiSpamEnforcement(
+    enforcementId: string,
+  ): AntiSpamEnforcement | null {
+    return this.antiSpam.getEnforcement(enforcementId);
+  }
+
+  public listAntiSpamEnforcements(
+    limit?: number,
+    offset?: number,
+  ): AntiSpamEnforcement[] {
+    return this.antiSpam.listEnforcements(limit, offset);
+  }
+
+  public listAntiSpamEvents(limit?: number, offset?: number): AntiSpamEvent[] {
+    return this.antiSpam.listEvents(limit, offset);
+  }
+
+  public recoverExpiredAntiSpamEnforcements(limit?: number): number {
+    return this.antiSpam.recoverExpiredEnforcements(limit);
   }
 
   public getMudaeWatchDelivery(

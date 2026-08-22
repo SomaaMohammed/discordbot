@@ -818,7 +818,7 @@ describe("immediate configuration behavior", () => {
 
     const response = interaction.editReply.mock.calls[0]?.[0];
     expect(response).toMatchObject({
-      content: expect.stringContaining("Format-6"),
+      content: expect.stringContaining("Format-7"),
       files: [expect.anything()],
       allowedMentions: { parse: [] },
     });
@@ -828,6 +828,10 @@ describe("immediate configuration behavior", () => {
       "suggestion configuration/suggestions/votes/events",
       "application forms/fields/applications/responses/events",
       "restricted-ping roles/mappings/user cooldowns/events",
+      "moderation configuration/cases/events",
+      "private reports/events",
+      "private appeals/events",
+      "anti-spam rules/exemptions/safe enforcement events",
       "delivery identifiers",
     ]) {
       expect(response.content).toContain(collection);

@@ -4,6 +4,10 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  createDefaultGuildSettings,
+  serializeGuildSettings,
+} from "../src/guild-settings.js";
+import {
   createDefaultLegacyGuildSettingsV2,
   serializeLegacyGuildSettingsV2,
 } from "../src/storage/guild-settings-v2.js";
@@ -19,8 +23,11 @@ import {
   initializeV4Schema,
   initializeV5Schema,
   initializeV6Schema,
-  V8_EXPLICIT_INDEX_NAMES,
+  initializeV7Schema,
+  initializeV8Schema,
   V8_TABLE_NAMES,
+  V9_EXPLICIT_INDEX_NAMES,
+  V9_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import {
   createV2FixtureDatabase,
@@ -31,6 +38,7 @@ import {
 const GUILD_A = "111111111111111111";
 const GUILD_B = "222222222222222222";
 const USER_A = "444444444444444444";
+const NOW = "2026-01-01T00:00:00.000Z";
 const roots: string[] = [];
 
 afterEach(() => {
@@ -39,7 +47,127 @@ afterEach(() => {
   }
 });
 
-describe("explicit schema migration to v8", () => {
+describe("explicit schema migration to v9", () => {
+  it("transactionally migrates exact v8 rows and enables only new constraints", () => {
+    const dbFile = fixturePath("v8.db");
+    createV8Fixture(dbFile);
+    const source = new Database(dbFile, { readonly: true });
+    const snapshot = new Map(
+      V8_TABLE_NAMES.filter((table) => table !== "schema_migrations").map(
+        (table) => [
+          table,
+          source.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+        ],
+      ),
+    );
+    source.close();
+
+    expect(
+      migrateDatabase({
+        dbFile,
+        now: () => "2026-02-01T00:00:00.000Z",
+      }),
+    ).toMatchObject({
+      status: "migrated",
+      fromSchema: "legacy-v8",
+      toSchema: "current-v9",
+      guilds: 1,
+    });
+    expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
+      schema: "current-v9",
+      schemaVersion: 9,
+      foreignKeyViolations: 0,
+    });
+
+    const migrated = new Database(dbFile);
+    migrated.pragma("foreign_keys = ON");
+    try {
+      for (const [table, rows] of snapshot) {
+        expect(
+          migrated.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+        ).toEqual(rows);
+      }
+      expect(
+        migrated
+          .prepare("SELECT version FROM schema_migrations ORDER BY version")
+          .all(),
+      ).toEqual([{ version: 8 }, { version: 9 }]);
+      for (const table of [
+        "moderation_configurations",
+        "moderation_cases",
+        "member_reports",
+        "case_appeals",
+        "anti_spam_rules",
+        "anti_spam_enforcements",
+      ]) {
+        expect(
+          migrated.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get(),
+        ).toEqual({
+          count: 0,
+        });
+      }
+      expect(() =>
+        migrated
+          .prepare(
+            `INSERT INTO delegated_capability_grants (
+               guild_id, principal_type, principal_id, capability, active,
+               granted_by, created_at, updated_at
+             ) VALUES (?, 'role', ?, 'moderation.manage', 1, ?, ?, ?)`,
+          )
+          .run(GUILD_A, "900000000000000001", USER_A, NOW, NOW),
+      ).not.toThrow();
+      expect(() =>
+        migrated
+          .prepare(
+            `INSERT INTO posted_panels (
+               guild_id, panel_id, preset, channel_id, message_id,
+               configuration_json, created_at, updated_at
+             ) VALUES (?, 'safetypanel', 'safety', ?, ?, '{}', ?, ?)`,
+          )
+          .run(GUILD_A, "900000000000000002", "900000000000000003", NOW, NOW),
+      ).not.toThrow();
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it.each<MigrationFailurePoint>([
+    "after-source-read",
+    "after-rename",
+    "after-create",
+    "after-copy",
+    "after-verify",
+    "after-drop",
+    "after-version",
+    "before-commit",
+  ])("rolls exact v8 back after an injected %s failure", (failurePoint) => {
+    const dbFile = fixturePath(`v8-${failurePoint}.db`);
+    createV8Fixture(dbFile);
+    const before = fs.readFileSync(dbFile);
+    expect(() => migrateDatabase({ dbFile, failurePoint })).toThrow(
+      `Injected migration failure at ${failurePoint}`,
+    );
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 8 }).schema).toBe(
+      "legacy-v8",
+    );
+  });
+
+  it("dry-runs exact v8 through the full v9 transaction", () => {
+    const dbFile = fixturePath("v8-dry-run.db");
+    createV8Fixture(dbFile);
+    const before = fs.readFileSync(dbFile);
+    expect(migrateDatabase({ dbFile, dryRun: true })).toMatchObject({
+      status: "dry-run",
+      fromSchema: "legacy-v8",
+      toSchema: "current-v9",
+    });
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 8 }).schema).toBe(
+      "legacy-v8",
+    );
+  });
+
   it("preserves active tenant data and discards retired state", () => {
     const dbFile = fixturePath("active.db");
     const db = createV2FixtureDatabase(dbFile);
@@ -117,15 +245,15 @@ describe("explicit schema migration to v8", () => {
     expect(result).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v2",
-      toSchema: "current-v8",
+      toSchema: "current-v9",
       guilds: 2,
       settingsRequiringReview: 0,
       metricsPreserved: 3,
       metricsDropped: 3,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 8 })).toMatchObject({
-      schema: "current-v8",
-      schemaVersion: 8,
+    expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
+      schema: "current-v9",
+      schemaVersion: 9,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -133,10 +261,10 @@ describe("explicit schema migration to v8", () => {
     const migrated = new Database(dbFile, { readonly: true });
     try {
       expect(schemaObjects(migrated, "table")).toEqual(
-        [...V8_TABLE_NAMES].sort(),
+        [...V9_TABLE_NAMES].sort(),
       );
       expect(schemaObjects(migrated, "index")).toEqual(
-        [...V8_EXPLICIT_INDEX_NAMES].sort(),
+        [...V9_EXPLICIT_INDEX_NAMES].sort(),
       );
       expect(
         migrated
@@ -338,14 +466,14 @@ describe("explicit schema migration to v8", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v3",
-      toSchema: "current-v8",
+      toSchema: "current-v9",
       guilds: 1,
       metricsPreserved: 1,
       metricsDropped: 0,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 8 })).toMatchObject({
-      schema: "current-v8",
-      schemaVersion: 8,
+    expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
+      schema: "current-v9",
+      schemaVersion: 9,
     });
 
     const db = new Database(dbFile, { readonly: true });
@@ -383,6 +511,7 @@ describe("explicit schema migration to v8", () => {
         { version: 6 },
         { version: 7 },
         { version: 8 },
+        { version: 9 },
       ]);
       for (const table of [
         "ticket_departments",
@@ -446,11 +575,11 @@ describe("explicit schema migration to v8", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v4",
-      toSchema: "current-v8",
+      toSchema: "current-v9",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 8 }).schema).toBe(
-      "current-v8",
+    expect(validateDatabaseFile(dbFile, { expect: 9 }).schema).toBe(
+      "current-v9",
     );
 
     const db = new Database(dbFile);
@@ -535,6 +664,7 @@ describe("explicit schema migration to v8", () => {
         { version: 6 },
         { version: 7 },
         { version: 8 },
+        { version: 9 },
       ]);
       expect(() =>
         db
@@ -609,7 +739,7 @@ describe("explicit schema migration to v8", () => {
     },
   );
 
-  it("additively migrates an exact schema-v6 database to v8", () => {
+  it("additively migrates an exact schema-v6 database to v9", () => {
     const dbFile = fixturePath("v6.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -647,13 +777,13 @@ describe("explicit schema migration to v8", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v6",
-      toSchema: "current-v8",
+      toSchema: "current-v9",
       guilds: 1,
       metricsPreserved: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 8 })).toMatchObject({
-      schema: "current-v8",
-      schemaVersion: 8,
+    expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
+      schema: "current-v9",
+      schemaVersion: 9,
     });
 
     const migrated = new Database(dbFile, { readonly: true });
@@ -662,7 +792,12 @@ describe("explicit schema migration to v8", () => {
         migrated
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([{ version: 6 }, { version: 7 }, { version: 8 }]);
+      ).toEqual([
+        { version: 6 },
+        { version: 7 },
+        { version: 8 },
+        { version: 9 },
+      ]);
       expect(
         migrated
           .prepare("SELECT name FROM guilds WHERE guild_id = ?")
@@ -673,6 +808,44 @@ describe("explicit schema migration to v8", () => {
           .prepare("SELECT COUNT(*) AS count FROM mudae_watch_deliveries")
           .get(),
       ).toEqual({ count: 0 });
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it("migrates and dry-run rolls back an exact schema-v7 database", () => {
+    const dbFile = fixturePath("v7.db");
+    const db = new Database(dbFile);
+    db.pragma("foreign_keys = ON");
+    initializeV7Schema(db, NOW);
+    db.close();
+    const before = fs.readFileSync(dbFile);
+
+    expect(migrateDatabase({ dbFile, dryRun: true })).toMatchObject({
+      status: "dry-run",
+      fromSchema: "legacy-v7",
+      toSchema: "current-v9",
+    });
+    expect(fs.readFileSync(dbFile)).toEqual(before);
+    expect(validateDatabaseFile(dbFile, { expect: 7 }).schema).toBe(
+      "legacy-v7",
+    );
+
+    expect(migrateDatabase({ dbFile })).toMatchObject({
+      status: "migrated",
+      fromSchema: "legacy-v7",
+      toSchema: "current-v9",
+    });
+    expect(validateDatabaseFile(dbFile, { expect: 9 }).schema).toBe(
+      "current-v9",
+    );
+    const migrated = new Database(dbFile, { readonly: true });
+    try {
+      expect(
+        migrated
+          .prepare("SELECT version FROM schema_migrations ORDER BY version")
+          .all(),
+      ).toEqual([{ version: 7 }, { version: 8 }, { version: 9 }]);
     } finally {
       migrated.close();
     }
@@ -699,7 +872,7 @@ describe("explicit schema migration to v8", () => {
     );
   });
 
-  it("dry-runs schema v6 to v8 without modifying the source", () => {
+  it("dry-runs schema v6 to v9 without modifying the source", () => {
     const dbFile = fixturePath("v6-dry-run.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -710,7 +883,7 @@ describe("explicit schema migration to v8", () => {
     expect(migrateDatabase({ dbFile, dryRun: true })).toMatchObject({
       status: "dry-run",
       fromSchema: "legacy-v6",
-      toSchema: "current-v8",
+      toSchema: "current-v9",
     });
     expect(fs.readFileSync(dbFile)).toEqual(before);
     expect(validateDatabaseFile(dbFile, { expect: 6 }).schema).toBe(
@@ -718,7 +891,7 @@ describe("explicit schema migration to v8", () => {
     );
   });
 
-  it("additively migrates an exact schema-v5 database to v8", () => {
+  it("additively migrates an exact schema-v5 database to v9", () => {
     const dbFile = fixturePath("v5.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -733,12 +906,12 @@ describe("explicit schema migration to v8", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v5",
-      toSchema: "current-v8",
+      toSchema: "current-v9",
       guilds: 0,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 8 })).toMatchObject({
-      schema: "current-v8",
-      schemaVersion: 8,
+    expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
+      schema: "current-v9",
+      schemaVersion: 9,
     });
     const migrated = new Database(dbFile, { readonly: true });
     try {
@@ -751,9 +924,10 @@ describe("explicit schema migration to v8", () => {
         { version: 6 },
         { version: 7 },
         { version: 8 },
+        { version: 9 },
       ]);
       expect(schemaObjects(migrated, "table")).toEqual(
-        [...V8_TABLE_NAMES].sort(),
+        [...V9_TABLE_NAMES].sort(),
       );
     } finally {
       migrated.close();
@@ -785,12 +959,12 @@ describe("explicit schema migration to v8", () => {
     storage.close();
     expect(migrateDatabase({ dbFile })).toMatchObject({
       status: "already-current",
-      fromSchema: "current-v8",
-      toSchema: "current-v8",
+      fromSchema: "current-v9",
+      toSchema: "current-v9",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 8 }).schema).toBe(
-      "current-v8",
+    expect(validateDatabaseFile(dbFile, { expect: 9 }).schema).toBe(
+      "current-v9",
     );
   });
 
@@ -889,6 +1063,42 @@ function createV1Fixture(dbFile: string): void {
       ON answers (question_message_id, created_at);
     CREATE INDEX idx_answers_message_id ON answers (answer_message_id);
   `);
+  db.close();
+}
+
+function createV8Fixture(dbFile: string): void {
+  const db = new Database(dbFile);
+  db.pragma("foreign_keys = ON");
+  initializeV8Schema(db, NOW);
+  db.prepare(
+    `INSERT INTO guilds (
+       guild_id, enabled, name, joined_at, left_at, created_at, updated_at
+     ) VALUES (?, 1, 'Preserved v8', ?, NULL, ?, ?)`,
+  ).run(GUILD_A, NOW, NOW, NOW);
+  db.prepare(
+    `INSERT INTO guild_settings (
+       guild_id, settings_version, settings_json, updated_at
+     ) VALUES (?, 3, ?, ?)`,
+  ).run(GUILD_A, serializeGuildSettings(createDefaultGuildSettings()), NOW);
+  db.prepare(
+    `INSERT INTO delegated_capability_grants (
+       guild_id, principal_type, principal_id, capability, active,
+       granted_by, created_at, updated_at
+     ) VALUES (?, 'role', ?, 'panels.manage', 1, ?, ?, ?)`,
+  ).run(GUILD_A, "900000000000000010", USER_A, NOW, NOW);
+  db.prepare(
+    `INSERT INTO posted_panels (
+       guild_id, panel_id, preset, channel_id, message_id,
+       configuration_json, created_at, updated_at
+     ) VALUES (?, 'panel_v8', 'resources', ?, ?, ?, ?, ?)`,
+  ).run(
+    GUILD_A,
+    "900000000000000011",
+    "900000000000000012",
+    JSON.stringify({ title: "Preserved panel" }),
+    NOW,
+    NOW,
+  );
   db.close();
 }
 

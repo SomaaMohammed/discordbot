@@ -18,6 +18,8 @@ export const DISCORD_CUSTOM_ID_LIMIT = 100;
 export const TICKET_OPEN_CUSTOM_ID_PREFIX = "superior:ticket:open:";
 export const SUGGESTION_OPEN_CUSTOM_ID_PREFIX = "superior:suggestion:open:";
 export const APPLICATION_OPEN_CUSTOM_ID_PREFIX = "superior:application:open:";
+export const REPORT_OPEN_CUSTOM_ID_PREFIX = "superior:report:open:";
+export const APPEAL_OPEN_CUSTOM_ID_PREFIX = "superior:appeal:open:";
 
 export const RESOURCE_PANEL_LIMITS = Object.freeze({
   title: 256,
@@ -43,6 +45,7 @@ export const PANEL_PRESET_DESCRIPTIONS: Readonly<Record<PanelPreset, string>> =
     tickets: "The configured support-ticket launcher",
     suggestions: "The configured member-suggestion launcher",
     applications: "The configured private staff-application launcher",
+    safety: "Private member reports and eligible case appeals",
   });
 
 export interface PanelFeatureState {
@@ -53,6 +56,8 @@ export interface PanelFeatureState {
   tickets: boolean;
   suggestions?: boolean;
   applications?: boolean;
+  reports?: boolean;
+  appeals?: boolean;
 }
 
 export interface ResourcePanelLinkInput {
@@ -84,7 +89,13 @@ export type SuperiorPanelRequest =
   | { preset: "resources"; resource: ResourcePanelInput }
   | { preset: "tickets"; panelToken: string }
   | { preset: "suggestions"; panelToken: string }
-  | { preset: "applications"; panelToken: string };
+  | { preset: "applications"; panelToken: string }
+  | {
+      preset: "safety";
+      panelToken: string;
+      reportsEnabled: boolean;
+      appealsEnabled: boolean;
+    };
 
 export interface SuperiorPanelPayload {
   embeds: readonly [EmbedBuilder];
@@ -194,6 +205,12 @@ export function renderSuperiorPanel(
       return renderSuggestionLauncherPanel(request.panelToken);
     case "applications":
       return renderApplicationLauncherPanel(request.panelToken);
+    case "safety":
+      return renderSafetyLauncherPanel(
+        request.panelToken,
+        request.reportsEnabled,
+        request.appealsEnabled,
+      );
   }
 }
 
@@ -241,6 +258,16 @@ export function renderHelpPanel(
       "Staff applications are active. Use `/application submit` or the server's application panel.",
     );
   }
+  if (features.reports) {
+    activeServices.push(
+      "Private member reports are active. Use `/report submit` or the server's safety panel.",
+    );
+  }
+  if (features.appeals) {
+    activeServices.push(
+      "Case appeals are active. Use `/appeal submit` for an eligible moderation case.",
+    );
+  }
   if (activeServices.length === 0) {
     activeServices.push(
       "Core member services are active; resource-bound workflows appear after their Discord bindings are verified.",
@@ -258,6 +285,7 @@ export function renderHelpPanel(
     "`/ticket` - configure departments or recover tickets when authorized.",
     "`/suggestion` - submit or withdraw suggestions; authorized reviewers can manage them.",
     "`/application` - submit, check, or withdraw applications; authorized staff can review them.",
+    "`/report` and `/appeal` - privately contact the server's safety reviewers.",
   ];
 
   const embed = createSuperiorEmbed()
@@ -433,6 +461,53 @@ export function renderApplicationLauncherPanel(
   return createPanelPayload(embed, [row]);
 }
 
+export function renderSafetyLauncherPanel(
+  panelToken: string,
+  reportsEnabled: boolean,
+  appealsEnabled: boolean,
+): SuperiorPanelPayload {
+  const reportCustomId = createFeaturePanelCustomId(
+    REPORT_OPEN_CUSTOM_ID_PREFIX,
+    panelToken,
+    "Report",
+  );
+  const appealCustomId = createFeaturePanelCustomId(
+    APPEAL_OPEN_CUSTOM_ID_PREFIX,
+    panelToken,
+    "Appeal",
+  );
+  const embed = createSuperiorEmbed()
+    .setTitle("Safety Center")
+    .setDescription(
+      "Privately report a member to the server's safety team or appeal an eligible moderation case.",
+    )
+    .addFields(
+      {
+        name: "Privacy",
+        value:
+          "Submissions are delivered only to the configured review channel. Do not include passwords, payment details, or other secrets.",
+      },
+      {
+        name: "Appeal availability",
+        value:
+          "Banned members cannot use server commands or this panel; server staff must provide another contact path when one is required.",
+      },
+    );
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(reportCustomId)
+      .setLabel("Submit Report")
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!reportsEnabled),
+    new ButtonBuilder()
+      .setCustomId(appealCustomId)
+      .setLabel("Submit Appeal")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!appealsEnabled),
+  );
+  return createPanelPayload(embed, [row]);
+}
+
 function createPanelPayload(
   embed: EmbedBuilder,
   components: readonly ActionRowBuilder<ButtonBuilder>[] = [],
@@ -450,6 +525,14 @@ export function parseSuggestionOpenCustomId(customId: string): string | null {
 
 export function parseApplicationOpenCustomId(customId: string): string | null {
   return parseFeaturePanelCustomId(APPLICATION_OPEN_CUSTOM_ID_PREFIX, customId);
+}
+
+export function parseReportOpenCustomId(customId: string): string | null {
+  return parseFeaturePanelCustomId(REPORT_OPEN_CUSTOM_ID_PREFIX, customId);
+}
+
+export function parseAppealOpenCustomId(customId: string): string | null {
+  return parseFeaturePanelCustomId(APPEAL_OPEN_CUSTOM_ID_PREFIX, customId);
 }
 
 function createFeaturePanelCustomId(

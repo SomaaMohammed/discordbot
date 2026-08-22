@@ -21,6 +21,7 @@ import type { GuildDataExport, GuildSettings } from "../types.js";
 import { clearBackfillStatus } from "./activity.js";
 import { clearModerationProcessState } from "./moderation.js";
 import { clearPanelProcessState } from "./panels.js";
+import { clearAntiSpamProcessState } from "./anti-spam-enforcement.js";
 import { getInteractionLifecycle } from "./interaction-lifecycle.js";
 import { evaluateGuildManagement } from "./ticket-authorization.js";
 
@@ -227,6 +228,7 @@ export async function handleConfigCommand(
       case "bot-state": {
         const enabled = interaction.options.getBoolean("enabled", true);
         await guildRuntime.setEnabled(enabled);
+        if (!enabled) clearAntiSpamProcessState(guildRuntime.guildId);
         await replyPrivate(
           interaction,
           enabled
@@ -643,7 +645,7 @@ async function exportGuild(
   });
   await interaction.editReply({
     content:
-      "Format-6 snapshot for this server only: metadata, settings, metrics, delegated grants, panels, ticket departments/fields/tickets/responses/events, suggestion configuration/suggestions/votes/events, application forms/fields/applications/responses/events, restricted-ping roles/mappings/user cooldowns/events, and delivery identifiers. Live restricted-ping reservations are excluded.",
+      "Format-7 snapshot for this server only: metadata, settings, metrics, delegated grants, panels, ticket departments/fields/tickets/responses/events, suggestion configuration/suggestions/votes/events, application forms/fields/applications/responses/events, restricted-ping roles/mappings/user cooldowns/events, moderation configuration/cases/events, private reports/events, private appeals/events, anti-spam rules/exemptions/safe enforcement events, and portable delivery identifiers. Live delivery and enforcement leases are excluded.",
     files: [attachment],
     allowedMentions: { parse: [] },
   });
@@ -724,6 +726,7 @@ async function importGuild(
     return;
   }
   runtime.invalidateGuild(guildRuntime.guildId);
+  clearAntiSpamProcessState(guildRuntime.guildId);
   runtime.storage.importGuildData(
     guildRuntime.guildId,
     payload,
@@ -731,7 +734,7 @@ async function importGuild(
   );
   await interaction.editReply({
     content:
-      "Import replacement completed. Core Superior behavior remains active. Imported authority and external workflow bindings, including restricted-ping roles, remain disabled or unverified; inspect `/panel status`, `/ticket status`, `/suggestion status`, `/application status`, `/restrictedping list`, and `/restrictedping info`, then explicitly re-enable only freshly verified workflows and restricted roles.",
+      "Import replacement completed. Core Superior behavior remains active. Imported authority, moderation destinations, private review bindings, anti-spam rules, restricted-ping roles, and other external workflow bindings remain disabled or unverified; inspect each service and explicitly re-enable only freshly verified resources.",
     allowedMentions: { parse: [] },
   });
 }
@@ -808,9 +811,10 @@ async function purgeGuild(
   clearBackfillStatus(guildRuntime.guildId);
   clearModerationProcessState(guildRuntime.guildId);
   clearPanelProcessState(guildRuntime.guildId);
+  clearAntiSpamProcessState(guildRuntime.guildId);
   await interaction.editReply({
     content:
-      "All of this server's stored configuration, workflow data, metrics, restricted-ping cooldowns, and audit events were permanently purged.",
+      "All of this server's stored configuration, moderation and safety workflows, metrics, cooldowns, delivery records, and audit events were permanently purged.",
     allowedMentions: { parse: [] },
   });
 }

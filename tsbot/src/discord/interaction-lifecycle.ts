@@ -444,7 +444,9 @@ export function interactionPreservesInitialResponse(
     const subcommand = interaction.options.getSubcommand(false);
     return (
       (interaction.commandName === "application" ||
-        interaction.commandName === "suggestion") &&
+        interaction.commandName === "suggestion" ||
+        interaction.commandName === "report" ||
+        interaction.commandName === "appeal") &&
       subcommand === "submit"
     );
   }
@@ -464,7 +466,13 @@ export function interactionPreservesInitialResponse(
     customId.startsWith("superior:suggestion:review:") ||
     customId.startsWith("superior:application:open:") ||
     customId.startsWith("superior:application:accept:") ||
-    customId.startsWith("superior:application:reject:")
+    customId.startsWith("superior:application:reject:") ||
+    customId.startsWith("superior:report:open:") ||
+    customId.startsWith("superior:report:resolve:") ||
+    customId.startsWith("superior:report:dismiss:") ||
+    customId.startsWith("superior:appeal:open:") ||
+    customId.startsWith("superior:appeal:uphold:") ||
+    customId.startsWith("superior:appeal:overturn:")
   );
 }
 

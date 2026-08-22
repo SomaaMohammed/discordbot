@@ -230,7 +230,7 @@ describe("persistent panel compatibility", () => {
     storage.close();
   });
 
-  it("migrates v7 to v8 without changing panels, workflow bindings, or component IDs", async () => {
+  it("migrates v7 to v9 without changing panels, workflow bindings, or component IDs", async () => {
     const dbFile = temporaryDatabase("v7-panels.db");
     createV7PanelFixture(dbFile);
     const before = readCompatibilityRows(dbFile);
@@ -242,10 +242,10 @@ describe("persistent panel compatibility", () => {
     expect(migrateDatabase({ dbFile, now: () => NOW })).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v7",
-      toSchema: "current-v8",
+      toSchema: "current-v9",
     });
-    expect(validateDatabaseFile(dbFile, { expect: 8 }).schema).toBe(
-      "current-v8",
+    expect(validateDatabaseFile(dbFile, { expect: 9 }).schema).toBe(
+      "current-v9",
     );
     expect(readCompatibilityRows(dbFile)).toEqual(before);
     expect(componentIds).toEqual(persistentComponentIds());

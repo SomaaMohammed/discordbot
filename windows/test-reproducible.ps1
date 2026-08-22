@@ -6,6 +6,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "hash-utils.ps1")
 
 $WindowsDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepositoryRoot = Split-Path -Parent $WindowsDirectory
@@ -29,13 +30,13 @@ else {
 
 Write-Host "Building the first portable artifact..."
 & $BuildScript -OutputDirectory $OutputDirectory -StandaloneOutput $StandaloneArtifact
-$FirstHash = (Get-FileHash -LiteralPath $Artifact -Algorithm SHA256).Hash.ToLowerInvariant()
-$FirstStandaloneHash = (Get-FileHash -LiteralPath $StandaloneArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
+$FirstHash = Get-Sha256Hex -LiteralPath $Artifact
+$FirstStandaloneHash = Get-Sha256Hex -LiteralPath $StandaloneArtifact
 
 Write-Host "Rebuilding from clean staging to verify byte-for-byte reproducibility..."
 & $BuildScript -OutputDirectory $OutputDirectory -StandaloneOutput $StandaloneArtifact
-$SecondHash = (Get-FileHash -LiteralPath $Artifact -Algorithm SHA256).Hash.ToLowerInvariant()
-$SecondStandaloneHash = (Get-FileHash -LiteralPath $StandaloneArtifact -Algorithm SHA256).Hash.ToLowerInvariant()
+$SecondHash = Get-Sha256Hex -LiteralPath $Artifact
+$SecondStandaloneHash = Get-Sha256Hex -LiteralPath $StandaloneArtifact
 
 if ($FirstHash -ne $SecondHash) {
     throw "Portable rebuild was not byte-for-byte reproducible: $FirstHash != $SecondHash"

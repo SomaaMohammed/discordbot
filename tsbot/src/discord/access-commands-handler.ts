@@ -12,6 +12,7 @@ import type {
   ApplicationForm,
   CapabilityGrantResult,
   CapabilityRevokeResult,
+  ModerationConfiguration,
   RoleCapabilityGrant,
 } from "../types.js";
 import { ACCESS_GRANT_PAGE_SIZE } from "./access-command.js";
@@ -53,6 +54,7 @@ interface AccessRepository extends CapabilityGrantReader {
     limit?: number;
     offset?: number;
   }): ApplicationForm[];
+  getModerationConfiguration(): ModerationConfiguration | null;
 }
 
 export async function handleAccessCommand(
@@ -141,7 +143,19 @@ async function grantCapability(
   ) {
     return;
   }
-  const mutation = await verifyMutationContext(
+  if (
+    (capability === "reports.review" || capability === "appeals.review") &&
+    !(await preflightSafetyReviewerGrant(
+      interaction,
+      runtime,
+      repository,
+      role,
+      capability,
+    ))
+  ) {
+    return;
+  }
+  let mutation = await verifyMutationContext(
     interaction,
     runtime,
     role.id,
@@ -149,6 +163,28 @@ async function grantCapability(
     capability === "tickets.manage",
   );
   if (!mutation) return;
+  if (
+    (capability === "reports.review" || capability === "appeals.review") &&
+    !(await preflightSafetyReviewerGrant(
+      interaction,
+      runtime,
+      repository,
+      mutation.role,
+      capability,
+    ))
+  ) {
+    return;
+  }
+  if (capability === "reports.review" || capability === "appeals.review") {
+    mutation = await verifyMutationContext(
+      interaction,
+      runtime,
+      mutation.role.id,
+      "granted",
+      false,
+    );
+    if (!mutation) return;
+  }
   if (!runtime.isCurrent()) {
     await replyPrivate(
       interaction,
@@ -297,6 +333,75 @@ async function preflightApplicationReviewerGrant(
   return true;
 }
 
+async function preflightSafetyReviewerGrant(
+  interaction: ChatInputCommandInteraction,
+  runtime: GuildRuntime,
+  repository: AccessRepository,
+  role: Role,
+  capability: "reports.review" | "appeals.review",
+): Promise<boolean> {
+  const guild = interaction.guild;
+  if (!guild || guild.id !== runtime.guildId || role.guild.id !== guild.id) {
+    await replyPrivate(
+      interaction,
+      "Could not freshly verify the safety reviewer role in this server.",
+    );
+    return false;
+  }
+  const configuration = repository.getModerationConfiguration();
+  if (!configuration) return runtime.isCurrent();
+  if (configuration.guildId !== guild.id) {
+    await replyPrivate(
+      interaction,
+      "The moderation configuration belongs to another server. No access was granted.",
+    );
+    return false;
+  }
+  const reports = capability === "reports.review";
+  const channelId = reports
+    ? configuration.reportReviewChannelId
+    : configuration.appealReviewChannelId;
+  const verifiedAt = reports
+    ? configuration.reportBindingsVerifiedAt
+    : configuration.appealBindingsVerifiedAt;
+  if (!channelId || !verifiedAt) return runtime.isCurrent();
+  const channelValue = await guild.channels
+    .fetch(channelId, { cache: true, force: true })
+    .catch(() => null);
+  if (
+    !channelValue ||
+    channelValue.type !== ChannelType.GuildText ||
+    channelValue.guild.id !== guild.id
+  ) {
+    await replyPrivate(
+      interaction,
+      `Cannot grant \`${capability}\` while its verified private review channel is unavailable. Repair or revalidate the moderation binding first.`,
+    );
+    return false;
+  }
+  const permissions = channelValue.permissionsFor(role);
+  if (
+    !permissions?.has(PermissionFlagsBits.ViewChannel) ||
+    !permissions.has(PermissionFlagsBits.SendMessages) ||
+    !permissions.has(PermissionFlagsBits.ReadMessageHistory)
+  ) {
+    await replyPrivate(
+      interaction,
+      `Cannot grant \`${capability}\`: the role needs View Channel, Send Messages, and Read Message History in the verified private review channel.`,
+    );
+    return false;
+  }
+  const latest = repository.getModerationConfiguration();
+  if (latest?.updatedAt !== configuration.updatedAt || !runtime.isCurrent()) {
+    await replyPrivate(
+      interaction,
+      "The private review binding changed while access was being verified. No access was granted.",
+    );
+    return false;
+  }
+  return true;
+}
+
 async function revokeCapability(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
@@ -306,13 +411,45 @@ async function revokeCapability(
   if (!role) return;
   const capability = await getCapabilityOption(interaction);
   if (!capability) return;
-  const mutation = await verifyMutationContext(
+  if (
+    (capability === "reports.review" || capability === "appeals.review") &&
+    !(await preflightSafetyReviewerRevoke(
+      interaction,
+      runtime,
+      repository,
+      role,
+      capability,
+    ))
+  ) {
+    return;
+  }
+  let mutation = await verifyMutationContext(
     interaction,
     runtime,
     role.id,
     "revoked",
   );
   if (!mutation) return;
+  if (capability === "reports.review" || capability === "appeals.review") {
+    if (
+      !(await preflightSafetyReviewerRevoke(
+        interaction,
+        runtime,
+        repository,
+        mutation.role,
+        capability,
+      ))
+    ) {
+      return;
+    }
+    mutation = await verifyMutationContext(
+      interaction,
+      runtime,
+      mutation.role.id,
+      "revoked",
+    );
+    if (!mutation) return;
+  }
   if (!runtime.isCurrent()) {
     await replyPrivate(
       interaction,
@@ -344,6 +481,55 @@ async function revokeCapability(
       .join("\n"),
   );
   runtime.storage.recordCommandMetric("access.revoke");
+}
+
+async function preflightSafetyReviewerRevoke(
+  interaction: ChatInputCommandInteraction,
+  runtime: GuildRuntime,
+  repository: AccessRepository,
+  role: Role,
+  capability: "reports.review" | "appeals.review",
+): Promise<boolean> {
+  const guild = interaction.guild;
+  const configuration = repository.getModerationConfiguration();
+  if (!guild || !configuration || configuration.guildId !== guild.id) {
+    return runtime.isCurrent();
+  }
+  const reports = capability === "reports.review";
+  const reviewerRoleId = reports
+    ? configuration.reportReviewerRoleId
+    : configuration.appealReviewerRoleId;
+  if (reviewerRoleId === role.id) return runtime.isCurrent();
+  const channelId = reports
+    ? configuration.reportReviewChannelId
+    : configuration.appealReviewChannelId;
+  const verifiedAt = reports
+    ? configuration.reportBindingsVerifiedAt
+    : configuration.appealBindingsVerifiedAt;
+  if (!channelId || !verifiedAt) return runtime.isCurrent();
+  const channel = await guild.channels
+    .fetch(channelId, { cache: true, force: true })
+    .catch(() => null);
+  if (
+    !channel ||
+    channel.type !== ChannelType.GuildText ||
+    channel.guild.id !== guild.id
+  ) {
+    await replyPrivate(
+      interaction,
+      "The private review destination could not be freshly verified. No access was revoked.",
+    );
+    return false;
+  }
+  if (channel.permissionsFor(role)?.has(PermissionFlagsBits.ViewChannel)) {
+    await replyPrivate(
+      interaction,
+      `Remove this role's View Channel access from the verified private ${reports ? "report" : "appeal"} destination before revoking \`${capability}\`; otherwise existing sensitive messages would remain readable.`,
+    );
+    return false;
+  }
+  const latest = repository.getModerationConfiguration();
+  return latest?.updatedAt === configuration.updatedAt && runtime.isCurrent();
 }
 
 async function listCapabilityGrants(
@@ -503,13 +689,16 @@ async function verifyMutationContext(
     await replyPrivate(interaction, "Could not verify the current server.");
     return null;
   }
-  const [authority, verifiedRole, botMember] = await Promise.all([
-    authorizeOwnerOrAdministrator(guild, interaction.user.id),
+  const [verifiedRole, botMember] = await Promise.all([
     fetchAndValidateRole(guild, expectedRoleId),
     verifyTicketManagerHierarchy
       ? guild.members.fetchMe({ cache: true, force: true }).catch(() => null)
       : Promise.resolve(null),
   ]);
+  const authority = await authorizeOwnerOrAdministrator(
+    guild,
+    interaction.user.id,
+  );
   if (!authority.allowed) {
     await replyPrivate(
       interaction,

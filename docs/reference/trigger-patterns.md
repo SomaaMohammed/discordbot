@@ -56,6 +56,8 @@ The original option text is preserved for display after normalized duplicate det
 
 ## Precedence and moderation
 
-Reply-moderation language is parsed before casual chat. A moderation-shaped reply such as `superior timeout them: repeated spam` never falls through to a friendly response. Moderation requests require the feature, a verified reply target, administrator authority, bot Moderate Members permission, safe role hierarchy, current-guild membership, and a reason no longer than 400 characters.
+Anti-spam evaluates new messages before activity accounting or casual chat. If a configured rule successfully deletes a triggering message, that message does not produce a normal Superior reply. Phase 3 does not enforce message edits.
+
+Reply-moderation language is parsed before casual chat. A moderation-shaped reply such as `superior timeout them: repeated spam` never falls through to a friendly response. Moderation requests require the feature, a verified reply target, current moderation authority, bot Moderate Members permission, safe role hierarchy, current-guild membership, and a reason no longer than 400 characters. A Discord-confirmed timeout creates a persistent case; a rejected or failed action does not create a successful case. Reports, appeals, warnings, notes, kicks, bans, and anti-spam configuration are slash-command workflows and are never inferred from conversational text.
 
 Casual precedence is deterministic: dice and choice validation occur before exact simple aliases, and potentially overlapping simple intents use an explicit ordered list. Unsupported or ambiguous addressed text produces no action rather than guessing.

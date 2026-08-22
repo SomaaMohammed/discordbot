@@ -19,6 +19,7 @@ import {
   renderResourcesPanel,
   renderServerInfoPanel,
   renderSuperiorPanel,
+  renderSafetyLauncherPanel,
   renderTicketLauncherPanel,
   type PanelFeatureState,
   type SuperiorPanelPayload,
@@ -82,6 +83,12 @@ describe("Superior panel theme and presets", () => {
         preset: "applications",
         panelToken: "PanelToken_1234",
       },
+      safety: {
+        preset: "safety",
+        panelToken: "PanelToken_1234",
+        reportsEnabled: true,
+        appealsEnabled: true,
+      },
     } as const;
 
     expect(Object.keys(requests)).toEqual(PANEL_PRESETS);
@@ -140,6 +147,25 @@ describe("Superior panel theme and presets", () => {
         }),
       ]),
     );
+  });
+
+  it("renders safety controls independently without exposing private records", () => {
+    const payload = renderSafetyLauncherPanel("PanelToken_1234", true, false);
+    const serialized = JSON.stringify(payload);
+    const buttons = payload.components[0]!.toJSON().components;
+    expect(buttons[0]).toMatchObject({
+      label: "Submit Report",
+      disabled: false,
+      custom_id: "superior:report:open:PanelToken_1234",
+    });
+    expect(buttons[1]).toMatchObject({
+      label: "Submit Appeal",
+      disabled: true,
+      custom_id: "superior:appeal:open:PanelToken_1234",
+    });
+    expect(serialized).toContain("Privacy");
+    expect(serialized).not.toContain("Reporter ID");
+    expectSafePayload(payload);
   });
 
   it("builds a bounded server snapshot from aggregate Guild properties", () => {

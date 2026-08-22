@@ -1,7 +1,15 @@
 import { logInfo, logWarn } from "../logging.js";
 
 export type DomainOutcomeScope =
-  "activity" | "application" | "moderation" | "panel" | "suggestion" | "ticket";
+  | "activity"
+  | "anti-spam"
+  | "appeal"
+  | "application"
+  | "moderation"
+  | "panel"
+  | "report"
+  | "suggestion"
+  | "ticket";
 
 export interface SafeDomainOutcomeDetails {
   readonly recordId?: string;

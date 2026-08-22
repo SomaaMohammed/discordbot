@@ -235,7 +235,7 @@ describe("active guild storage", () => {
     const payload = storage.exportGuildData(GUILD_A);
 
     expect(payload).toMatchObject({
-      formatVersion: 6,
+      formatVersion: 7,
       guildId: GUILD_A,
       metrics: [
         {
@@ -462,6 +462,19 @@ describe("active guild storage", () => {
         importedPhase2.restrictedPingUserCooldowns.length,
       restrictedPingEvents: importedPhase2.restrictedPingEvents.length,
       mudaeWatchDeliveries: 0,
+      moderationConfigurations: 0,
+      moderationCases: 0,
+      moderationCaseEvents: 0,
+      moderationLogDeliveries: 0,
+      memberReports: 0,
+      memberReportEvents: 0,
+      caseAppeals: 0,
+      caseAppealEvents: 0,
+      antiSpamRules: 0,
+      antiSpamExemptRoles: 0,
+      antiSpamExemptChannels: 0,
+      antiSpamEnforcements: 0,
+      antiSpamEvents: 0,
     };
     expect(storage.previewGuildPurge(GUILD_A)).toEqual(expectedPurge);
     expect(storage.purgeGuildData(GUILD_A)).toEqual(expectedPurge);

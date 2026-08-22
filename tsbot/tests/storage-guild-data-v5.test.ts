@@ -56,7 +56,7 @@ describe("restricted ping guild data format 6", () => {
 
     const payload = storage.exportGuildData(GUILD);
     expect(payload).toMatchObject({
-      formatVersion: 6,
+      formatVersion: 7,
       restrictedPingRoles: [
         {
           guildId: GUILD,

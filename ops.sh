@@ -82,7 +82,7 @@ refuse_stranded_legacy_database() {
   # It is never opened, renamed, or altered here.
   local old_default="$APP_DIR/court.db"
   if [[ -e "$old_default" ]]; then
-    die "Refusing an implicit superior.db while a legacy-named database exists. Set DB_FILE explicitly, back it up, and run the documented upgrade to schema v8."
+    die "Refusing an implicit superior.db while a legacy-named database exists. Set DB_FILE explicitly, back it up, and run the documented upgrade to schema v9."
   fi
 }
 
@@ -187,12 +187,12 @@ ensure_production_build() {
 
 validate_database() {
   local database="$1"
-  local expected="${2:-8}"
+  local expected="${2:-9}"
   node "$TSBOT_DIR/dist/src/storage/check-cli.js" --db "$database" --expect "$expected"
 }
 
 create_database_backup() {
-  local expected="${1:-8}"
+  local expected="${1:-9}"
   [[ -f "$DB_FILE" ]] || die "Database does not exist: $DB_FILE"
   mkdir -p -- "$BACKUP_DIR"
   local destination
@@ -204,8 +204,8 @@ create_database_backup() {
   note "Validated backup created: $destination"
 }
 
-migrate_database_to_v8() {
-  local source_schema="${1:-7}"
+migrate_database_to_v9() {
+  local source_schema="${1:-8}"
   prepare_operation_paths
   resolve_runtime_db_file
   require_supported_node
@@ -221,16 +221,16 @@ migrate_database_to_v8() {
     die "Migration failed and rolled back; the validated schema-v${source_schema} backup was retained and the service remains stopped"
     return 1
   fi
-  validate_database "$DB_FILE" 8
+  validate_database "$DB_FILE" 9
   restrict_live_database_permissions "$DB_FILE"
   (( was_active == 0 )) || start_service
-  note "Database migration completed and validated at schema 8"
+  note "Database migration completed and validated at schema 9"
 }
 
 restore_database() {
   local source="${1:-}"
   [[ -n "$source" ]] || {
-    die "Usage: ops.sh restore <validated-schema8-backup>"
+    die "Usage: ops.sh restore <validated-schema9-backup>"
     return 1
   }
   prepare_operation_paths
@@ -259,11 +259,11 @@ restore_database() {
     return 1
   fi
   node "$TSBOT_DIR/dist/src/storage/backup-cli.js" \
-    --db "$source" --out "$candidate" --expect 8
+    --db "$source" --out "$candidate" --expect 9
   chmod 600 -- "$candidate"
-  validate_database "$candidate" 8 || {
+  validate_database "$candidate" 9 || {
     rm -f -- "$candidate"
-    die "Restore source copy failed schema-v8 validation"
+    die "Restore source copy failed schema-v9 validation"
     return 1
   }
 
@@ -298,7 +298,7 @@ restore_database() {
       install_failed=1
     fi
   fi
-  if (( install_failed == 0 )) && ! validate_database "$DB_FILE" 8; then
+  if (( install_failed == 0 )) && ! validate_database "$DB_FILE" 9; then
     install_failed=1
   fi
   if (( install_failed == 1 )); then
@@ -313,7 +313,7 @@ restore_database() {
         recovery_failed=1
       fi
     done
-    if (( had_live_main == 1 )) && ! validate_database "$DB_FILE" 8; then
+    if (( had_live_main == 1 )) && ! validate_database "$DB_FILE" 9; then
       recovery_failed=1
     fi
     if (( recovery_failed == 1 )); then
@@ -346,9 +346,9 @@ rollout() {
   npm run build
   cd -- "$APP_DIR"
   if [[ -f "$DB_FILE" ]]; then
-    validate_database "$DB_FILE" 8 || die "Rollout refuses non-v8 data; use the explicit migration workflow first"
+    validate_database "$DB_FILE" 9 || die "Rollout refuses non-v9 data; use the explicit migration workflow first"
     restrict_live_database_permissions "$DB_FILE"
-    create_database_backup 8
+    create_database_backup 9
   fi
   restart_service
   note "Rollout completed"
@@ -359,9 +359,9 @@ show_status() {
   resolve_runtime_db_file
   command -v systemctl >/dev/null 2>&1 && systemctl --no-pager status "$SERVICE_NAME" || true
   if [[ -f "$DB_FILE" && -f "$TSBOT_DIR/dist/src/storage/check-cli.js" ]]; then
-    validate_database "$DB_FILE" 8
+    validate_database "$DB_FILE" 9
   else
-    note "No schema-v8 database is currently available to validate."
+    note "No schema-v9 database is currently available to validate."
   fi
 }
 
@@ -374,17 +374,18 @@ usage() {
   cat <<'USAGE'
 Usage: ./ops.sh <command>
 
-  status                 Show service status and validate schema 8
+  status                 Show service status and validate schema 9
   start|stop|restart     Control the configured systemd service
   logs                   Show recent service logs
-  backup                 Create and validate a private schema-v8 backup
-  restore <file>         Atomically restore a validated schema-v8 backup
-  migrate-v8             Back up and transactionally migrate schema v7 to v8
-  migrate-v7             Back up and transactionally migrate schema v6 to v8
-  migrate-v6             Back up and transactionally migrate schema v5 to v8
-  migrate-v4             Back up and transactionally migrate schema v4 to v8
-  migrate-v3             Back up and transactionally migrate schema v3 to v8
-  migrate-v2             Back up and transactionally migrate schema v2 to v8
+  backup                 Create and validate a private schema-v9 backup
+  restore <file>         Atomically restore a validated schema-v9 backup
+  migrate-v8             Back up and transactionally migrate schema v8 to v9
+  migrate-v7             Back up and transactionally migrate schema v7 to v9
+  migrate-v6             Back up and transactionally migrate schema v6 to v9
+  migrate-v5             Back up and transactionally migrate schema v5 to v9
+  migrate-v4             Back up and transactionally migrate schema v4 to v9
+  migrate-v3             Back up and transactionally migrate schema v3 to v9
+  migrate-v2             Back up and transactionally migrate schema v2 to v9
   rollout                Fast-forward, validate, build, back up, and restart
 
 Environment selectors: APP_DIR, TSBOT_DIR, ENV_FILE, DB_FILE, BACKUP_DIR,
@@ -406,15 +407,16 @@ main() {
       require_supported_node
       acquire_operation_lock
       ensure_production_build
-      create_database_backup 8
+      create_database_backup 9
       ;;
     restore) shift; restore_database "${1:-}" ;;
-    migrate-v8) migrate_database_to_v8 7 ;;
-    migrate-v7) migrate_database_to_v8 6 ;;
-    migrate-v6) migrate_database_to_v8 5 ;;
-    migrate-v4) migrate_database_to_v8 4 ;;
-    migrate-v3) migrate_database_to_v8 3 ;;
-    migrate-v2) migrate_database_to_v8 2 ;;
+    migrate-v8) migrate_database_to_v9 8 ;;
+    migrate-v7) migrate_database_to_v9 7 ;;
+    migrate-v6) migrate_database_to_v9 6 ;;
+    migrate-v5) migrate_database_to_v9 5 ;;
+    migrate-v4) migrate_database_to_v9 4 ;;
+    migrate-v3) migrate_database_to_v9 3 ;;
+    migrate-v2) migrate_database_to_v9 2 ;;
     rollout) rollout ;;
     help|-h|--help|"") usage ;;
     *) usage >&2; die "Unknown operation: $command" ;;
