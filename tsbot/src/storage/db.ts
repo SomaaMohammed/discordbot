@@ -99,8 +99,8 @@ import {
 } from "./metric-keys.js";
 import {
   detectDatabaseSchema,
-  initializeV9Schema,
-  validateV9Schema,
+  initializeV10Schema,
+  validateV10Schema,
 } from "./schema.js";
 import { GuildOperationalRepository } from "./operational-repository.js";
 import { GuildAccessRepository } from "./access-repository.js";
@@ -209,6 +209,60 @@ import {
   PHASE3_GUILD_TABLES,
   readPhase3GuildData,
 } from "./guild-data-v7.js";
+import {
+  deactivatePhase4Bindings,
+  insertPhase4GuildData,
+  PHASE4_GUILD_TABLES,
+  readPhase4GuildData,
+} from "./guild-data-v8.js";
+import type { OnboardingLifecycleDefinitionSnapshot } from "../discord/onboarding-repository.js";
+import { OnboardingStorageRepository } from "./onboarding-repository.js";
+import {
+  RoleMenuRepository,
+  type RoleMenuListOptions,
+  type RoleMenuOperationListOptions,
+  type RoleMenuPostListOptions,
+} from "./role-menu-repository.js";
+import type {
+  MemberOnboardingState,
+  MemberOnboardingStateInput,
+  MemberRuleAcceptance,
+  MemberRuleAcceptanceInput,
+  MemberRuleAcceptanceResult,
+  OnboardingAuditEvent,
+  OnboardingAuditEventInput,
+  OnboardingAutorole,
+  OnboardingAutoroleAudience,
+  OnboardingAutoroleInput,
+  OnboardingConfiguration,
+  OnboardingConfigurationInput,
+  OnboardingDeliveryCompletionInput,
+  OnboardingDeliveryRecord,
+  OnboardingDeliveryReservationInput,
+  OnboardingDeliveryReservationResult,
+  OnboardingRoleOperation,
+  OnboardingRoleOperationCompletionInput,
+  OnboardingRoleOperationReservationInput,
+  OnboardingRoleOperationReservationResult,
+  OnboardingRulesActivationInput,
+  OnboardingRulesActivationResult,
+  OnboardingRulesVersion,
+  OnboardingRulesVersionInput,
+  RoleMenu,
+  RoleMenuInput,
+  RoleMenuOperation,
+  RoleMenuOperationCompletionInput,
+  RoleMenuOperationReservationInput,
+  RoleMenuOperationReservationResult,
+  RoleMenuOption,
+  RoleMenuOptionInput,
+  RoleMenuOptionUpdateInput,
+  RoleMenuPost,
+  RoleMenuPostInput,
+  RoleMenuPostState,
+  RoleMenuState,
+  RoleMenuUpdateInput,
+} from "../types.js";
 export { createOpaqueStorageId } from "./operational-repository.js";
 
 interface GuildRow {
@@ -273,7 +327,7 @@ export class BotStorage {
       const memory = new Database(":memory:", { timeout: 5_000 });
       try {
         memory.pragma("foreign_keys = ON");
-        initializeV9Schema(memory, utcNow());
+        initializeV10Schema(memory, utcNow());
         this.db = memory;
       } catch (error) {
         memory.close();
@@ -299,7 +353,7 @@ export class BotStorage {
 
     if (schema === "legacy-v1") {
       throw new Error(
-        "Database schema v1 is not supported by v9 startup. Upgrade through the final v4 release to schema v2, create an offline backup, stop every older executable, then run the current migration command.",
+        "Database schema v1 is not supported by v10 startup. Upgrade through the final v4 release to schema v2, create an offline backup, stop every older executable, then run the current migration command.",
       );
     }
     if (schema === "legacy-v2") {
@@ -329,12 +383,17 @@ export class BotStorage {
     }
     if (schema === "legacy-v7") {
       throw new Error(
-        `Database schema v7 requires an explicit migration to v9. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+        `Database schema v7 requires an explicit migration to v10. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
       );
     }
     if (schema === "legacy-v8") {
       throw new Error(
-        `Database schema v8 requires an explicit migration to v9. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+        `Database schema v8 requires an explicit migration to v10. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+      );
+    }
+    if (schema === "legacy-v9") {
+      throw new Error(
+        `Database schema v9 requires an explicit migration to v10. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
       );
     }
     if (schema === "unknown") {
@@ -347,9 +406,9 @@ export class BotStorage {
     try {
       writable.pragma("foreign_keys = ON");
       if (schema === "empty") {
-        initializeV9Schema(writable, utcNow());
+        initializeV10Schema(writable, utcNow());
       } else {
-        const issues = validateV9Schema(writable);
+        const issues = validateV10Schema(writable);
         if (issues.length > 0) {
           throw new Error(
             `Database changed after read-only classification: ${issues.join("; ")}`,
@@ -778,6 +837,61 @@ export class BotStorage {
           counts.antiSpamEvents,
           GUILD_DATA_COLLECTION_LIMITS.antiSpamEvents,
         ],
+        [
+          "onboarding rules versions",
+          counts.onboardingRulesVersions,
+          GUILD_DATA_COLLECTION_LIMITS.onboardingRulesVersions,
+        ],
+        [
+          "onboarding autoroles",
+          counts.onboardingAutoroles,
+          GUILD_DATA_COLLECTION_LIMITS.onboardingAutoroles,
+        ],
+        [
+          "member onboarding states",
+          counts.memberOnboardingStates,
+          GUILD_DATA_COLLECTION_LIMITS.memberOnboardingStates,
+        ],
+        [
+          "member rules acceptances",
+          counts.memberRuleAcceptances,
+          GUILD_DATA_COLLECTION_LIMITS.memberRuleAcceptances,
+        ],
+        [
+          "onboarding delivery records",
+          counts.onboardingDeliveryRecords,
+          GUILD_DATA_COLLECTION_LIMITS.onboardingDeliveryRecords,
+        ],
+        [
+          "onboarding role operations",
+          counts.onboardingRoleOperations,
+          GUILD_DATA_COLLECTION_LIMITS.onboardingRoleOperations,
+        ],
+        [
+          "onboarding audit events",
+          counts.onboardingAuditEvents,
+          GUILD_DATA_COLLECTION_LIMITS.onboardingAuditEvents,
+        ],
+        [
+          "role menus",
+          counts.roleMenus,
+          GUILD_DATA_COLLECTION_LIMITS.roleMenus,
+        ],
+        [
+          "role menu options",
+          counts.roleMenuOptions,
+          GUILD_DATA_COLLECTION_LIMITS.roleMenuOptions,
+        ],
+        [
+          "role menu posts",
+          counts.roleMenuPosts,
+          GUILD_DATA_COLLECTION_LIMITS.roleMenuPosts,
+        ],
+        [
+          "role menu operations",
+          counts.roleMenuOperations,
+          GUILD_DATA_COLLECTION_LIMITS.roleMenuOperations,
+        ],
       ] as const;
       for (const [label, count, maximum] of boundedCollections) {
         if (count > maximum) {
@@ -805,7 +919,7 @@ export class BotStorage {
         )
         .all(normalized) as MetricRow[];
       return {
-        formatVersion: 7,
+        formatVersion: 8,
         guildId: normalized,
         exportedAt: utcNow(),
         metadata,
@@ -818,6 +932,7 @@ export class BotStorage {
         ...readPhase2OperationalData(db, normalized),
         ...readRestrictedPingGuildData(db, normalized),
         ...readPhase3GuildData(db, normalized),
+        ...readPhase4GuildData(db, normalized),
       };
     });
     return exportSnapshot.deferred();
@@ -867,6 +982,9 @@ export class BotStorage {
         for (const table of [...PHASE3_GUILD_TABLES].reverse()) {
           db.prepare(`DELETE FROM ${table} WHERE guild_id = ?`).run(normalized);
         }
+        for (const table of [...PHASE4_GUILD_TABLES].reverse()) {
+          db.prepare(`DELETE FROM ${table} WHERE guild_id = ?`).run(normalized);
+        }
       }
       const insert = db.prepare(
         `INSERT INTO metrics (
@@ -879,12 +997,16 @@ export class BotStorage {
       if (imported.sourceFormatVersion >= 3) {
         insertImportedOperationalData(db, normalized, imported);
       }
-      if (imported.sourceFormatVersion === 7) {
+      if (imported.sourceFormatVersion >= 7) {
         insertPhase3GuildData(db, normalized, imported);
+      }
+      if (imported.sourceFormatVersion === 8) {
+        insertPhase4GuildData(db, normalized, imported);
       }
       deactivatePhase2OperationalBindings(db, normalized);
       deactivateRestrictedPingBindings(db, normalized);
       deactivatePhase3Bindings(db, normalized);
+      deactivatePhase4Bindings(db, normalized);
       saved = reviewed;
     });
     apply.immediate();
@@ -913,6 +1035,7 @@ export class BotStorage {
         ...PHASE2_GUILD_TABLES,
         ...RESTRICTED_PING_GUILD_TABLES,
         ...PHASE3_GUILD_TABLES,
+        ...PHASE4_GUILD_TABLES,
         "mudae_watch_deliveries",
       ] as const) {
         if (this.countGuildRows(table, normalized) !== 0) {
@@ -1084,6 +1207,43 @@ export class BotStorage {
         guildId,
       ),
       antiSpamEvents: this.countGuildRows("anti_spam_events", guildId),
+      onboardingConfigurations: this.countGuildRows(
+        "onboarding_configurations",
+        guildId,
+      ),
+      onboardingRulesVersions: this.countGuildRows(
+        "onboarding_rules_versions",
+        guildId,
+      ),
+      onboardingAutoroles: this.countGuildRows("onboarding_autoroles", guildId),
+      memberOnboardingStates: this.countGuildRows(
+        "member_onboarding_states",
+        guildId,
+      ),
+      memberRuleAcceptances: this.countGuildRows(
+        "member_rule_acceptances",
+        guildId,
+      ),
+      onboardingDeliveryRecords: this.countGuildRows(
+        "onboarding_delivery_records",
+        guildId,
+      ),
+      onboardingRoleOperations: this.countGuildRows(
+        "onboarding_role_operations",
+        guildId,
+      ),
+      onboardingAuditEvents: this.countGuildRows(
+        "onboarding_audit_events",
+        guildId,
+      ),
+      roleMenus: this.countGuildRows("role_menus", guildId),
+      roleMenuOptions: this.countGuildRows("role_menu_options", guildId),
+      roleMenuPosts: this.countGuildRows("role_menu_posts", guildId),
+      roleMenuOperations: this.countGuildRows("role_menu_operations", guildId),
+      roleMenuOperationItems: this.countGuildRows(
+        "role_menu_operation_items",
+        guildId,
+      ),
     };
   }
 
@@ -1095,6 +1255,7 @@ export class BotStorage {
       ...PHASE2_GUILD_TABLES,
       ...RESTRICTED_PING_GUILD_TABLES,
       ...PHASE3_GUILD_TABLES,
+      ...PHASE4_GUILD_TABLES,
     ] as const;
     return tables.reduce(
       (total, table) => total + this.estimateGuildTableBytes(table, guildId),
@@ -1109,7 +1270,8 @@ export class BotStorage {
       | "metrics"
       | (typeof PHASE2_GUILD_TABLES)[number]
       | (typeof RESTRICTED_PING_GUILD_TABLES)[number]
-      | (typeof PHASE3_GUILD_TABLES)[number],
+      | (typeof PHASE3_GUILD_TABLES)[number]
+      | (typeof PHASE4_GUILD_TABLES)[number],
     guildId: string,
   ): number {
     const db = this.requireDatabase();
@@ -1139,6 +1301,7 @@ export class BotStorage {
       | (typeof PHASE2_GUILD_TABLES)[number]
       | (typeof RESTRICTED_PING_GUILD_TABLES)[number]
       | (typeof PHASE3_GUILD_TABLES)[number]
+      | (typeof PHASE4_GUILD_TABLES)[number]
       | "mudae_watch_deliveries",
     guildId: string,
   ): number {
@@ -1161,6 +1324,8 @@ export class GuildStorage {
   private readonly memberReports: MemberReportRepository;
   private readonly caseAppeals: CaseAppealRepository;
   private readonly antiSpam: AntiSpamRepository;
+  private readonly onboarding: OnboardingStorageRepository;
+  private readonly roleMenus: RoleMenuRepository;
 
   public constructor(
     private readonly db: Database.Database,
@@ -1178,6 +1343,400 @@ export class GuildStorage {
     this.memberReports = new MemberReportRepository(db, guildId);
     this.caseAppeals = new CaseAppealRepository(db, guildId);
     this.antiSpam = new AntiSpamRepository(db, guildId);
+    this.onboarding = new OnboardingStorageRepository(db, guildId);
+    this.roleMenus = new RoleMenuRepository(db, guildId);
+  }
+
+  public getOnboardingConfiguration(): OnboardingConfiguration | null {
+    return this.onboarding.getOnboardingConfiguration();
+  }
+
+  public isOnboardingLifecycleDefinitionCurrent(
+    snapshot: OnboardingLifecycleDefinitionSnapshot,
+  ): boolean {
+    return this.onboarding.isOnboardingLifecycleDefinitionCurrent(snapshot);
+  }
+
+  public upsertOnboardingConfiguration(
+    input: OnboardingConfigurationInput,
+  ): OnboardingConfiguration {
+    return this.onboarding.upsertOnboardingConfiguration(input);
+  }
+
+  public disableOnboardingConfiguration(
+    actorId: string,
+  ): OnboardingConfiguration | null {
+    return this.onboarding.disableOnboardingConfiguration(actorId);
+  }
+
+  public createOnboardingRulesVersion(
+    input: OnboardingRulesVersionInput,
+  ): OnboardingRulesVersion {
+    return this.onboarding.createOnboardingRulesVersion(input);
+  }
+
+  public createAndActivateOnboardingRulesVersion(
+    input: OnboardingRulesActivationInput,
+  ): OnboardingRulesActivationResult {
+    return this.onboarding.createAndActivateOnboardingRulesVersion(input);
+  }
+
+  public getOnboardingRulesVersion(
+    rulesVersion: number,
+  ): OnboardingRulesVersion | null {
+    return this.onboarding.getOnboardingRulesVersion(rulesVersion);
+  }
+
+  public getCurrentOnboardingRulesVersion(): OnboardingRulesVersion | null {
+    return this.onboarding.getCurrentOnboardingRulesVersion();
+  }
+
+  public listOnboardingRulesVersions(
+    limit?: number,
+    offset?: number,
+  ): OnboardingRulesVersion[] {
+    return this.onboarding.listOnboardingRulesVersions(limit, offset);
+  }
+
+  public countOnboardingRulesVersions(): number {
+    return this.onboarding.countOnboardingRulesVersions();
+  }
+
+  public replaceOnboardingAutoroles(
+    audience: OnboardingAutoroleAudience,
+    roles: readonly OnboardingAutoroleInput[],
+    actorId: string,
+  ): OnboardingAutorole[] {
+    return this.onboarding.replaceOnboardingAutoroles(audience, roles, actorId);
+  }
+
+  public listOnboardingAutoroles(
+    audience?: OnboardingAutoroleAudience,
+    limit?: number,
+    offset?: number,
+  ): OnboardingAutorole[] {
+    return this.onboarding.listOnboardingAutoroles(audience, limit, offset);
+  }
+
+  public getMemberOnboardingState(
+    memberId: string,
+  ): MemberOnboardingState | null {
+    return this.onboarding.getMemberOnboardingState(memberId);
+  }
+
+  public upsertMemberOnboardingState(
+    input: MemberOnboardingStateInput,
+  ): MemberOnboardingState {
+    return this.onboarding.upsertMemberOnboardingState(input);
+  }
+
+  public getMemberRuleAcceptance(
+    memberId: string,
+    rulesVersion: number,
+  ): MemberRuleAcceptance | null {
+    return this.onboarding.getMemberRuleAcceptance(memberId, rulesVersion);
+  }
+
+  public listMemberRuleAcceptances(
+    memberId: string,
+    limit?: number,
+    offset?: number,
+  ): MemberRuleAcceptance[] {
+    return this.onboarding.listMemberRuleAcceptances(memberId, limit, offset);
+  }
+
+  public recordMemberRuleAcceptance(
+    input: MemberRuleAcceptanceInput,
+  ): MemberRuleAcceptanceResult {
+    return this.onboarding.recordMemberRuleAcceptance(input);
+  }
+
+  public getOnboardingDelivery(
+    deliveryId: string,
+  ): OnboardingDeliveryRecord | null {
+    return this.onboarding.getOnboardingDelivery(deliveryId);
+  }
+
+  public reserveOnboardingDelivery(
+    input: OnboardingDeliveryReservationInput,
+  ): OnboardingDeliveryReservationResult {
+    return this.onboarding.reserveOnboardingDelivery(input);
+  }
+
+  public completeOnboardingDelivery(
+    deliveryId: string,
+    input: OnboardingDeliveryCompletionInput,
+  ): OnboardingDeliveryRecord {
+    return this.onboarding.completeOnboardingDelivery(deliveryId, input);
+  }
+
+  public listOnboardingDeliveries(options?: {
+    memberId?: string;
+    states?: readonly string[];
+    kinds?: readonly string[];
+    limit?: number;
+    offset?: number;
+  }): OnboardingDeliveryRecord[] {
+    return this.onboarding.listOnboardingDeliveries(options);
+  }
+
+  public getOnboardingRoleOperation(
+    operationId: string,
+  ): OnboardingRoleOperation | null {
+    return this.onboarding.getOnboardingRoleOperation(operationId);
+  }
+
+  public reserveOnboardingRoleOperation(
+    input: OnboardingRoleOperationReservationInput,
+  ): OnboardingRoleOperationReservationResult {
+    return this.onboarding.reserveOnboardingRoleOperation(input);
+  }
+
+  public completeOnboardingRoleOperation(
+    operationId: string,
+    input: OnboardingRoleOperationCompletionInput,
+  ): OnboardingRoleOperation {
+    return this.onboarding.completeOnboardingRoleOperation(operationId, input);
+  }
+
+  public resolveOnboardingRoleOperations(
+    resolvedByOperationId: string,
+  ): OnboardingRoleOperation[] {
+    return this.onboarding.resolveOnboardingRoleOperations(
+      resolvedByOperationId,
+    );
+  }
+
+  public listOnboardingRoleOperations(options?: {
+    memberId?: string;
+    states?: readonly string[];
+    unresolvedOnly?: boolean;
+    limit?: number;
+    offset?: number;
+  }): OnboardingRoleOperation[] {
+    return this.onboarding.listOnboardingRoleOperations(options);
+  }
+
+  public appendOnboardingAudit(
+    input: OnboardingAuditEventInput,
+  ): OnboardingAuditEvent {
+    return this.onboarding.appendOnboardingAudit(input);
+  }
+
+  public listOnboardingAuditEvents(options?: {
+    memberId?: string;
+    limit?: number;
+    offset?: number;
+  }): OnboardingAuditEvent[] {
+    return this.onboarding.listOnboardingAuditEvents(options);
+  }
+
+  public invalidateOnboardingRole(roleId: string): {
+    configurationChanged: number;
+    autorolesChanged: number;
+  } {
+    return this.onboarding.invalidateOnboardingRole(roleId);
+  }
+
+  public invalidateOnboardingChannel(channelId: string): {
+    configurationChanged: number;
+  } {
+    return this.onboarding.invalidateOnboardingChannel(channelId);
+  }
+
+  public createRoleMenu(input: RoleMenuInput): RoleMenu {
+    return this.roleMenus.createRoleMenu(input);
+  }
+
+  public updateRoleMenu(
+    menuId: string,
+    input: RoleMenuUpdateInput,
+  ): RoleMenu | null {
+    return this.roleMenus.updateRoleMenu(menuId, input);
+  }
+
+  public setRoleMenuState(
+    menuId: string,
+    state: RoleMenuState,
+    actorId: string,
+    bindingsVerifiedAt: string | null = null,
+  ): RoleMenu | null {
+    return this.roleMenus.setRoleMenuState(
+      menuId,
+      state,
+      actorId,
+      bindingsVerifiedAt,
+    );
+  }
+
+  public getRoleMenuById(menuId: string): RoleMenu | null {
+    return this.roleMenus.getRoleMenuById(menuId);
+  }
+
+  public getRoleMenuBySlug(slug: string): RoleMenu | null {
+    return this.roleMenus.getRoleMenuBySlug(slug);
+  }
+
+  public listRoleMenus(options: RoleMenuListOptions = {}): RoleMenu[] {
+    return this.roleMenus.listRoleMenus(options);
+  }
+
+  public countRoleMenus(): number {
+    return this.roleMenus.countRoleMenus();
+  }
+
+  public createRoleMenuOption(
+    menuId: string,
+    input: RoleMenuOptionInput,
+  ): RoleMenuOption {
+    return this.roleMenus.createRoleMenuOption(menuId, input);
+  }
+
+  public updateRoleMenuOption(
+    menuId: string,
+    optionId: string,
+    input: RoleMenuOptionUpdateInput,
+  ): RoleMenuOption | null {
+    return this.roleMenus.updateRoleMenuOption(menuId, optionId, input);
+  }
+
+  public moveRoleMenuOption(
+    menuId: string,
+    optionId: string,
+    sortOrder: number,
+    actorId: string,
+  ): RoleMenuOption | null {
+    return this.roleMenus.moveRoleMenuOption(
+      menuId,
+      optionId,
+      sortOrder,
+      actorId,
+    );
+  }
+
+  public reorderRoleMenuOptions(
+    menuId: string,
+    optionIds: readonly string[],
+    actorId: string,
+  ): RoleMenuOption[] {
+    return this.roleMenus.reorderRoleMenuOptions(menuId, optionIds, actorId);
+  }
+
+  public removeRoleMenuOption(
+    menuId: string,
+    optionId: string,
+    actorId: string,
+  ): boolean {
+    return this.roleMenus.removeRoleMenuOption(menuId, optionId, actorId);
+  }
+
+  public getRoleMenuOption(
+    menuId: string,
+    optionId: string,
+  ): RoleMenuOption | null {
+    return this.roleMenus.getRoleMenuOption(menuId, optionId);
+  }
+
+  public listRoleMenuOptions(menuId: string): RoleMenuOption[] {
+    return this.roleMenus.listRoleMenuOptions(menuId);
+  }
+
+  public countRoleMenuOptions(menuId: string): number {
+    return this.roleMenus.countRoleMenuOptions(menuId);
+  }
+
+  public createRoleMenuPost(input: RoleMenuPostInput): RoleMenuPost {
+    return this.roleMenus.createRoleMenuPost(input);
+  }
+
+  public upsertRoleMenuPost(input: RoleMenuPostInput): RoleMenuPost {
+    return this.roleMenus.upsertRoleMenuPost(input);
+  }
+
+  public setRoleMenuPostState(
+    postId: string,
+    state: RoleMenuPostState,
+    bindingsVerifiedAt: string | null = null,
+  ): RoleMenuPost | null {
+    return this.roleMenus.setRoleMenuPostState(
+      postId,
+      state,
+      bindingsVerifiedAt,
+    );
+  }
+
+  public getRoleMenuPostById(postId: string): RoleMenuPost | null {
+    return this.roleMenus.getRoleMenuPostById(postId);
+  }
+
+  public findRoleMenuPostByMessage(
+    channelId: string,
+    messageId: string,
+  ): RoleMenuPost | null {
+    return this.roleMenus.findRoleMenuPostByMessage(channelId, messageId);
+  }
+
+  public listRoleMenuPosts(
+    options: RoleMenuPostListOptions = {},
+  ): RoleMenuPost[] {
+    return this.roleMenus.listRoleMenuPosts(options);
+  }
+
+  public countRoleMenuPosts(menuId?: string): number {
+    return this.roleMenus.countRoleMenuPosts(menuId);
+  }
+
+  public getRoleMenuOperationById(
+    operationId: string,
+  ): RoleMenuOperation | null {
+    return this.roleMenus.getRoleMenuOperationById(operationId);
+  }
+
+  public getRoleMenuOperation(operationId: string): RoleMenuOperation | null {
+    return this.roleMenus.getRoleMenuOperation(operationId);
+  }
+
+  public getRoleMenuOperationByInteraction(
+    interactionId: string,
+  ): RoleMenuOperation | null {
+    return this.roleMenus.getRoleMenuOperationByInteraction(interactionId);
+  }
+
+  public reserveRoleMenuOperation(
+    input: RoleMenuOperationReservationInput,
+  ): RoleMenuOperationReservationResult {
+    return this.roleMenus.reserveRoleMenuOperation(input);
+  }
+
+  public completeRoleMenuOperation(
+    operationId: string,
+    input: RoleMenuOperationCompletionInput,
+  ): RoleMenuOperation {
+    return this.roleMenus.completeRoleMenuOperation(operationId, input);
+  }
+
+  public listRoleMenuOperations(
+    options: RoleMenuOperationListOptions = {},
+  ): RoleMenuOperation[] {
+    return this.roleMenus.listRoleMenuOperations(options);
+  }
+
+  public invalidateRoleMenuRole(roleId: string): {
+    menusChanged: number;
+    postsChanged: number;
+  } {
+    return this.roleMenus.invalidateRoleMenuRole(roleId);
+  }
+
+  public markRoleMenuChannelMissing(channelId: string): number {
+    return this.roleMenus.markRoleMenuChannelMissing(channelId);
+  }
+
+  public markRoleMenuMessageMissing(
+    channelId: string,
+    messageId: string,
+  ): number {
+    return this.roleMenus.markRoleMenuMessageMissing(channelId, messageId);
   }
 
   public getModerationConfiguration(): ModerationConfiguration | null {

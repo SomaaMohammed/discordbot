@@ -9,6 +9,7 @@ import { validateDatabaseFile } from "../src/storage/migration.js";
 import {
   initializeV3Schema,
   initializeV4Schema,
+  initializeV9Schema,
 } from "../src/storage/schema.js";
 import {
   createV2FixtureDatabase,
@@ -24,7 +25,7 @@ afterEach(() => {
 });
 
 describe("validated SQLite backup", () => {
-  it("copies and validates schema v9 including operational data", async () => {
+  it("copies and validates schema v10 including Phase 4 operational data", async () => {
     const root = makeRoot();
     const source = path.join(root, "source.db");
     const output = path.join(root, "backup.db");
@@ -113,25 +114,154 @@ describe("validated SQLite backup", () => {
       details: { source: "backup-test" },
     });
     guild.reserveMudaeWatchDelivery("202020202020202020");
+
+    const phase4Now = "2026-01-01T00:00:00.000Z";
+    const rules = guild.createOnboardingRulesVersion({
+      title: "Backup rules",
+      body: "Acknowledge these server rules.",
+      actorId: "212121212121212121",
+    });
+    guild.upsertOnboardingConfiguration({
+      enabled: false,
+      welcomeChannelId: "222222222222222223",
+      welcomePublicEnabled: false,
+      welcomeDmEnabled: true,
+      farewellChannelId: "222222222222222224",
+      farewellPublicEnabled: false,
+      lifecycleLogChannelId: "222222222222222225",
+      rulesChannelId: "222222222222222226",
+      verificationEnabled: false,
+      currentRulesVersion: rules.rulesVersion,
+      verifiedRoleId: "222222222222222227",
+      unverifiedRoleId: "222222222222222228",
+      humanAutorolesEnabled: false,
+      botAutorolesEnabled: false,
+      accountAgeAlertHours: 24,
+      welcomeTitle: "Welcome",
+      welcomeBody: "Welcome to the backup fixture.",
+      farewellTitle: "Farewell",
+      farewellBody: "A member left the backup fixture.",
+      welcomeChannelVerifiedAt: null,
+      farewellChannelVerifiedAt: null,
+      lifecycleLogChannelVerifiedAt: null,
+      rulesChannelVerifiedAt: null,
+      verificationRolesVerifiedAt: null,
+      actorId: "212121212121212121",
+    });
+    guild.replaceOnboardingAutoroles(
+      "human",
+      [{ roleId: "222222222222222229", enabled: false }],
+      "212121212121212121",
+    );
+    guild.upsertMemberOnboardingState({
+      memberId: "232323232323232323",
+      memberKind: "human",
+      screeningState: "complete",
+      lifecycleState: "active",
+      joinedAt: phase4Now,
+      accountCreatedAt: "2025-01-01T00:00:00.000Z",
+      screeningCompletedAt: phase4Now,
+      departedAt: null,
+      lastProcessedAt: phase4Now,
+    });
+    guild.recordMemberRuleAcceptance({
+      memberId: "232323232323232323",
+      rulesVersion: rules.rulesVersion,
+      acceptedAt: phase4Now,
+    });
+    const onboardingDelivery = guild.reserveOnboardingDelivery({
+      memberId: "232323232323232323",
+      joinInstance: "backup-join-1",
+      kind: "welcome-dm",
+      claimId: "backupclm1",
+      claimExpiresAt: "2026-01-01T00:05:00.000Z",
+    });
+    guild.completeOnboardingDelivery(onboardingDelivery.delivery.deliveryId, {
+      claimId: "backupclm1",
+      state: "skipped",
+    });
+    const onboardingRoleOperation = guild.reserveOnboardingRoleOperation({
+      memberId: "232323232323232323",
+      roleId: "222222222222222227",
+      kind: "verified-add",
+      idempotencyKey: "backup.rules.1",
+    });
+    guild.completeOnboardingRoleOperation(
+      onboardingRoleOperation.operation.operationId,
+      { state: "no-change" },
+    );
+    guild.appendOnboardingAudit({
+      eventType: "backup-fixture",
+      memberId: "232323232323232323",
+      actorId: "212121212121212121",
+      rulesVersion: rules.rulesVersion,
+      outcome: "preserved",
+      details: { source: "storage-backup-test" },
+    });
+
+    const roleMenu = guild.createRoleMenu({
+      slug: "backup-colors",
+      title: "Backup colors",
+      description: "Pick a color role.",
+      mode: "toggle",
+      minSelections: 0,
+      maxSelections: 1,
+      actorId: "212121212121212121",
+    });
+    const roleMenuOption = guild.createRoleMenuOption(roleMenu.menuId, {
+      roleId: "242424242424242424",
+      label: "Gold",
+      actorId: "212121212121212121",
+    });
+    const enabledRoleMenu = guild.setRoleMenuState(
+      roleMenu.menuId,
+      "enabled",
+      "212121212121212121",
+      phase4Now,
+    );
+    if (!enabledRoleMenu) throw new Error("Expected role menu");
+    guild.createRoleMenuPost({
+      menuId: roleMenu.menuId,
+      channelId: "252525252525252525",
+      messageId: "262626262626262626",
+      definitionVersion: enabledRoleMenu.definitionVersion,
+      bindingsVerifiedAt: phase4Now,
+      state: "active",
+    });
+    const roleMenuOperation = guild.reserveRoleMenuOperation({
+      interactionId: "272727272727272727",
+      menuId: roleMenu.menuId,
+      memberId: "232323232323232323",
+      definitionVersion: enabledRoleMenu.definitionVersion,
+      selectionKey: roleMenuOption.optionId,
+      plannedAdds: [roleMenuOption.roleId],
+    });
+    guild.completeRoleMenuOperation(roleMenuOperation.operation.operationId, {
+      state: "completed",
+      addedRoleIds: [roleMenuOption.roleId],
+      removedRoleIds: [],
+      failedRoleIds: [],
+      skippedRoleIds: [],
+    });
     storage.close();
 
     const result = await backupDatabase({
       dbFile: source,
       outputFile: output,
-      expect: 9,
+      expect: 10,
     });
     expect(result).toMatchObject({
-      schema: "current-v9",
-      schemaVersion: 9,
+      schema: "current-v10",
+      schemaVersion: 10,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
     expect(result.bytes).toBeGreaterThan(0);
-    expect(validateDatabaseFile(source, { expect: 9 }).schema).toBe(
-      "current-v9",
+    expect(validateDatabaseFile(source, { expect: 10 }).schema).toBe(
+      "current-v10",
     );
-    expect(validateDatabaseFile(output, { expect: 9 }).schema).toBe(
-      "current-v9",
+    expect(validateDatabaseFile(output, { expect: 10 }).schema).toBe(
+      "current-v10",
     );
 
     const original = new Database(source, { readonly: true });
@@ -173,6 +303,20 @@ describe("validated SQLite backup", () => {
         "application_responses",
         "application_events",
         "mudae_watch_deliveries",
+        "onboarding_rules_versions",
+        "onboarding_configurations",
+        "onboarding_message_templates",
+        "onboarding_autoroles",
+        "member_onboarding_states",
+        "member_rule_acceptances",
+        "onboarding_delivery_records",
+        "onboarding_role_operations",
+        "onboarding_audit_events",
+        "role_menus",
+        "role_menu_options",
+        "role_menu_posts",
+        "role_menu_operations",
+        "role_menu_operation_items",
       ] as const) {
         const sourceRows = original
           .prepare(`SELECT * FROM ${table} ORDER BY rowid`)
@@ -206,6 +350,23 @@ describe("validated SQLite backup", () => {
       original.close();
       copied.close();
     }
+  });
+
+  it("supports an exact schema-v9 backup before migration", async () => {
+    const root = makeRoot();
+    const source = path.join(root, "source-v9.db");
+    const output = path.join(root, "backup-v9.db");
+    const db = new Database(source);
+    db.pragma("foreign_keys = ON");
+    initializeV9Schema(db, "2026-01-01T00:00:00.000Z");
+    db.close();
+
+    await expect(
+      backupDatabase({ dbFile: source, outputFile: output, expect: 9 }),
+    ).resolves.toMatchObject({ schema: "legacy-v9", schemaVersion: 9 });
+    expect(validateDatabaseFile(output, { expect: 9 }).schema).toBe(
+      "legacy-v9",
+    );
   });
 
   it("supports exact v2 pre-migration backups", async () => {
@@ -268,7 +429,7 @@ describe("validated SQLite backup", () => {
     fs.writeFileSync(output, "operator-owned");
 
     await expect(
-      backupDatabase({ dbFile: source, outputFile: output, expect: 9 }),
+      backupDatabase({ dbFile: source, outputFile: output, expect: 10 }),
     ).rejects.toThrow(/already exists/);
     expect(fs.readFileSync(output, "utf8")).toBe("operator-owned");
 

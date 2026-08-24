@@ -1638,7 +1638,7 @@ describe("Phase 3 guild storage", () => {
     storage.close();
   });
 
-  it("round-trips format 7 as dormant data, preserves legacy imports, and purges", () => {
+  it("round-trips format 8 as dormant data, preserves legacy imports, and purges", () => {
     const source = createStorage("export-source");
     const sourceGuild = source.storage.forGuild(GUILD_A);
     configure(sourceGuild);
@@ -1710,14 +1710,14 @@ describe("Phase 3 guild storage", () => {
         },
       ).status,
     ).toBe("changed");
-    const exportV7 = source.storage.exportGuildData(GUILD_A);
-    expect(exportV7).toMatchObject({
-      formatVersion: 7,
+    const exportV8 = source.storage.exportGuildData(GUILD_A);
+    expect(exportV8).toMatchObject({
+      formatVersion: 8,
       moderationConfiguration: { casesEnabled: true, antiSpamEnabled: true },
       memberReports: [{ linkedCaseId: portableResultCase.caseId }],
       antiSpamRules: [{ ruleType: "duplicate", enabled: true }],
     });
-    expect(exportV7.moderationCases).toEqual(
+    expect(exportV8.moderationCases).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ caseId: moderationCase.caseId }),
         expect.objectContaining({ caseId: portableResultCase.caseId }),
@@ -1727,7 +1727,7 @@ describe("Phase 3 guild storage", () => {
     const destination = createStorage("export-destination");
     destination.storage.importGuildData(
       GUILD_A,
-      exportV7,
+      exportV8,
       destination.storage.getGuildSettings(GUILD_A)!,
     );
     const importedGuild = destination.storage.forGuild(GUILD_A);
@@ -1752,7 +1752,7 @@ describe("Phase 3 guild storage", () => {
       privateNote: "Portable private note.",
     });
     expect(importedGuild.getAntiSpamRule("duplicate")?.enabled).toBe(false);
-    const malformed = structuredClone(exportV7);
+    const malformed = structuredClone(exportV8);
     const linkedIndex = malformed.moderationCases.findIndex(
       ({ caseId }) => caseId === portableResultCase.caseId,
     );
@@ -1781,7 +1781,7 @@ describe("Phase 3 guild storage", () => {
     });
 
     const legacyPayload = {
-      ...exportV7,
+      ...exportV8,
       formatVersion: 6,
     } as unknown as GuildDataExport;
     destination.storage.importGuildData(

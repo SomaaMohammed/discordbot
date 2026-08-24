@@ -62,6 +62,9 @@ describe("/panel command definition", () => {
     expect(preset.required).toBe(true);
     expect(preset.choices?.map(({ value }) => value)).toEqual(PANEL_PRESETS);
     expect(preset.choices).toHaveLength(PANEL_PRESETS.length);
+    expect(preset.choices?.map(({ value }) => value)).toEqual(
+      expect.arrayContaining(["verification", "roles"]),
+    );
     expect(channel.type).toBe(ApplicationCommandOptionType.Channel);
     expect(channel.required).toBe(true);
     expect(channel.channel_types).toEqual([
@@ -70,9 +73,9 @@ describe("/panel command definition", () => {
     ]);
   });
 
-  it("exposes bounded resource fields and exactly five optional link pairs", () => {
+  it("exposes bounded resource fields, a role-menu binding, and five link pairs", () => {
     const post = findSubcommand("post");
-    expect(post.options).toHaveLength(15);
+    expect(post.options).toHaveLength(16);
 
     expect(findOption(post, "resource_title")).toMatchObject({
       type: ApplicationCommandOptionType.String,
@@ -85,6 +88,12 @@ describe("/panel command definition", () => {
       required: false,
       min_length: 1,
       max_length: RESOURCE_PANEL_LIMITS.body,
+    });
+    expect(findOption(post, "role_menu")).toMatchObject({
+      type: ApplicationCommandOptionType.String,
+      required: false,
+      min_length: 1,
+      max_length: 32,
     });
     for (let index = 1; index <= RESOURCE_PANEL_LIMITS.links; index += 1) {
       expect(findOption(post, `link_${index}_label`)).toMatchObject({

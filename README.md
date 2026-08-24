@@ -1,6 +1,6 @@
 # Superior
 
-Superior 6.1.0 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
+Superior 6.2.0 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
 
 ## Windows quick start
 
@@ -15,8 +15,10 @@ The first launch places the immutable bundled runtime in the current Windows use
 ## Active capabilities
 
 - `/config` reports or changes the explicit bot-state switch, log channel, timezone, invocation terms, moderation limits, and reusable greetings. `/data` provides export, owner-only import, and owner-confirmed purge.
-- `/access` lets the guild owner or a freshly verified Administrator grant one of eleven narrow management capabilities to a safe guild role.
-- `/panel` posts and tracks fixed Superior `help`, `server-info`, `resources`, `tickets`, `suggestions`, `applications`, and `safety` panels.
+- `/access` lets the guild owner or a freshly verified Administrator grant one of thirteen narrow management capabilities to a safe guild role, including separate onboarding and self-service-role configuration authority.
+- `/onboarding` configures bounded welcome/farewell delivery, a private member-lifecycle log, versioned rules acknowledgement, safe human/bot automatic roles, member status, and explicit recovery. Discord Membership Screening is respected and never bypassed.
+- `/rolemenu` creates, publishes, disables, archives, inspects, and recovers persistent `toggle`, `exclusive`, and `limited` self-service role menus. Legacy `/superior rolepanel` and `rolepanelmulti` messages retain their existing component behavior.
+- `/panel` posts and tracks fixed Superior `help`, `server-info`, `resources`, `tickets`, `suggestions`, `applications`, `safety`, `verification`, and `roles` panels.
 - `/ticket` manages up to 10 routed departments, each with its own category, closure log, support role, and 1–5-field intake form. It also posts launchers and reconciles interrupted tickets.
 - `/suggestion` provides persisted submissions, voting, optional discussion threads, bounded cooldowns, staff review, withdrawals, and missing-message recovery.
 - `/application` provides private configurable application forms, private review delivery, claiming, decisions, applicant status/withdrawal, and recovery.
@@ -33,6 +35,10 @@ The first launch places the immutable bundled runtime in the current Windows use
 - The explicit `/config bot-state` switch is the emergency global disable. Disabled, departed, cross-guild, and unsupported DM contexts do not run guild behavior.
 - The owner and Administrators retain ultimate authority. Delegated roles receive only the exact capability granted, including the separated `moderation.configure`, `moderation.manage`, `reports.review`, and `appeals.review` boundaries.
 - `/access` itself is never delegated. Privileged actions re-fetch the actor and relevant role or Discord resource; command visibility is not treated as authorization.
+- Welcome, farewell, verification, automatic-role, and role-menu workflows are disabled until configured against current same-guild resources. Imported bindings remain dormant, imported automatic roles remain disabled, and import never mutates a Discord member.
+- Rules acceptance is an acknowledgement of the guild's current rules version, not a contract or external identity check. Superior assigns the verified role before attempting to remove an optional unverified role; partial Discord success is recorded for bounded recovery rather than described as atomic.
+- Human automatic roles and verification roles are deferred while Discord marks a member pending under native Membership Screening. Bot and human automatic roles are separate, dangerous or unmanageable roles are rejected, and account-age alerts are informational private-log events only—not proof of abuse or grounds for automatic punishment.
+- Administrator-authored lifecycle templates support only `{user}`, `{server}`, `{member_count}`, `{account_created}`, `{joined_at}`, and `{rules}`. Rendering is bounded, Markdown-safe, and mention-suppressed; public or DM delivery failure does not break lifecycle bookkeeping.
 - Ticket configuration does not grant access to ticket contents. Suggestion/application/moderation configuration does not grant review access, and a configure-only delegate cannot assign a new workflow content role that they hold without the matching content authority. Department support roles and reviewer roles remain workflow-specific content authorities.
 - New and recovered ticket channels include up to 25 verified `tickets.manage` roles. Existing ticket channels require `/ticket recover` after a management grant or revoke. Application-review grants and form enablement require the delegated role to have current access to every affected private review channel; Superior never rewrites those operator-managed application-channel permissions.
 - Ticket launchers route to one of at most 10 enabled departments. A member may have one active ticket per department and no more than three active tickets across the guild.
@@ -42,9 +48,9 @@ The first launch places the immutable bundled runtime in the current Windows use
 - Reports preserve the reporter's identity and explanation only inside the authorized private review boundary and never notify the reported member automatically. Appeals expose only eligible member-facing case information; banned users cannot use the in-guild slash-command flow.
 - Anti-spam rules remain disabled after migration and import. The detector ignores bots, webhooks, the owner, Administrators, and configured live exemptions; it never persists raw message content, and Phase 3 does not enforce message edits.
 - Restricted role pings require a live same-guild mapping, exact channel or explicitly enabled parent-thread match, current role membership, current user and bot channel permissions, and both per-user and per-role cooldowns. The bot never makes a role mentionable, and the outgoing message permits only the one authorized role mention.
-- Schema v9 adds normalized, guild-scoped moderation, report, appeal, anti-spam, audit, and delivery records. The supported v8-to-v9 migration preserves every existing row and external Discord identifier, adds no invented historical cases, and leaves new services and anti-spam rules disabled.
-- Startup creates v9 only for a missing or empty database and refuses unmigrated, partial, malformed, and unknown layouts. Back up and stop the process before migration, and never run a pre-v9 executable after a database has migrated.
-- Guild export format 7 contains the complete portable tenant product model. Imports preserve readable history but leave imported authority, external Discord-resource bindings, and anti-spam enforcement dormant until their explicit current-resource verification paths succeed.
+- Schema v10 adds normalized, guild-scoped onboarding configuration, immutable rule versions and acceptances, member lifecycle/recovery records, automatic-role configuration, role menus/options/posts, and bounded audit records. The supported v9-to-v10 migration preserves every existing row and Discord identifier, invents no member history, and leaves Phase 4 services disabled.
+- Startup creates v10 only for a missing or empty database and refuses unmigrated, partial, malformed, and unknown layouts. Back up and stop the process before migration, and never run a pre-v10 executable after a database has migrated.
+- Guild export format 8 contains the complete portable tenant product model. Imports preserve readable acceptance and workflow history but leave authority, external Discord-resource bindings, automatic roles, verification, role menus, and anti-spam enforcement dormant until their explicit current-resource verification paths succeed.
 
 Superior remains a single-process SQLite deployment. Database constraints and short transactions protect concurrent interactions inside that process, but a shared SQLite file must not be written by multiple bot processes.
 
@@ -69,7 +75,7 @@ Do not use `npm run dev` or `npm start` as a smoke test: both can log in to Disc
 
 - [Configuration, commands, and Discord permissions](docs/configuration.md)
 - [Windows portable guide](docs/windows.md)
-- [Development architecture and schema v9](docs/development.md)
+- [Development architecture and schema v10](docs/development.md)
 - [Operations, migration, backup, recovery, and rollback](docs/operations.md)
 - [Member and delegated capabilities](docs/reference/member-capabilities.md)
 - [Natural-chat trigger reference](docs/reference/trigger-patterns.md)

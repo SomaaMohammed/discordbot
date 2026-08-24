@@ -645,7 +645,7 @@ async function exportGuild(
   });
   await interaction.editReply({
     content:
-      "Format-7 snapshot for this server only: metadata, settings, metrics, delegated grants, panels, ticket departments/fields/tickets/responses/events, suggestion configuration/suggestions/votes/events, application forms/fields/applications/responses/events, restricted-ping roles/mappings/user cooldowns/events, moderation configuration/cases/events, private reports/events, private appeals/events, anti-spam rules/exemptions/safe enforcement events, and portable delivery identifiers. Live delivery and enforcement leases are excluded.",
+      "Format-8 snapshot for this server only: metadata, settings, metrics, delegated grants, panels, ticket departments/fields/tickets/responses/events, suggestion configuration/suggestions/votes/events, application forms/fields/applications/responses/events, restricted-ping roles/mappings/user cooldowns/events, moderation configuration/cases/events, private reports/events, private appeals/events, anti-spam rules/exemptions/safe enforcement events, onboarding configuration/templates/rules/member state/acceptances/automatic roles/delivery and audit history, persistent role menus/options/posts/operation history, and portable delivery identifiers. Active external effects are never replayed; imported Phase 4 reservations are terminalized and resource bindings remain dormant until verified.",
     files: [attachment],
     allowedMentions: { parse: [] },
   });

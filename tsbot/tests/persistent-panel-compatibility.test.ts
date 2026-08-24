@@ -230,7 +230,7 @@ describe("persistent panel compatibility", () => {
     storage.close();
   });
 
-  it("migrates v7 to v9 without changing panels, workflow bindings, or component IDs", async () => {
+  it("migrates v7 to v10 without changing panels, workflow bindings, or component IDs", async () => {
     const dbFile = temporaryDatabase("v7-panels.db");
     createV7PanelFixture(dbFile);
     const before = readCompatibilityRows(dbFile);
@@ -242,10 +242,10 @@ describe("persistent panel compatibility", () => {
     expect(migrateDatabase({ dbFile, now: () => NOW })).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v7",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
     });
-    expect(validateDatabaseFile(dbFile, { expect: 9 }).schema).toBe(
-      "current-v9",
+    expect(validateDatabaseFile(dbFile, { expect: 10 }).schema).toBe(
+      "current-v10",
     );
     expect(readCompatibilityRows(dbFile)).toEqual(before);
     expect(componentIds).toEqual(persistentComponentIds());
@@ -765,8 +765,8 @@ function expectStaticPanelCompatibility(storage: BotStorage): void {
       links: Array<{ label: string; url: string }>;
     },
   });
-  const buttons = resourcePayload.components.flatMap(
-    (row) => row.toJSON().components,
+  const buttons: unknown[] = resourcePayload.components.flatMap(
+    (row) => [...row.toJSON().components] as unknown[],
   );
   expect(buttons).toEqual([
     expect.objectContaining({

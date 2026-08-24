@@ -23,12 +23,15 @@ Core replies and panels normally need View Channels, Send Messages, Embed Links,
 | Reports and appeals         | Each review destination must be a standard private text channel where `@everyone` cannot View Channel; Superior and the corresponding reviewer role need View Channel, Send Messages, and Read Message History, and Superior also needs Embed Links and Attach Files                |
 | Anti-spam                   | Manage Messages in every enforced channel; delete-and-timeout additionally needs Moderate Members and a safe role hierarchy                                                                                                                                                         |
 | Role panels                 | Manage Roles and a bot role above every managed role                                                                                                                                                                                                                                |
+| Onboarding delivery         | View Channel, Send Messages, Embed Links, and Read Message History in each welcome, farewell, rules, or private lifecycle-log channel used; direct messages are best effort                                                                                                         |
+| Verification and autoroles  | Manage Roles plus a bot role above every verified, unverified, human-autorole, and bot-autorole target; native pending members are deferred                                                                                                                                         |
+| Persistent role menus       | View Channel, Send Messages, Embed Links, Read Message History, and Manage Roles, with Superior's highest role above every option role                                                                                                                                              |
 | Restricted role pings       | View Channel and Mention Everyone in every configured destination, plus Send Messages for a direct channel or Send Messages in Threads for an authorized thread/post                                                                                                                |
 | Ticket departments          | Manage Channels and Manage Roles; each category must allow View Channel, Send Messages, Read Message History, Embed Links, Attach Files, Manage Channels, and Manage Roles; each closure-log channel also needs Attach Files                                                        |
 | Suggestions                 | The public channel needs View Channel, Send Messages, Read Message History, and Embed Links; discussion mode additionally needs Create Public Threads and Send Messages in Threads in a standard text channel; an optional review channel needs the core message permissions        |
 | Staff applications          | The private review channel must be a standard text channel where `@everyone` cannot View Channel; Superior needs View Channel, Send Messages, Read Message History, and Embed Links, while the configured reviewer role needs View Channel, Send Messages, and Read Message History |
 
-`Mention Everyone` is needed when an administrator explicitly chooses that announcement option or when Superior sends an approved mention of a normally non-mentionable restricted-ping role. Ordinary members do not need Mention Everyone. Keep Superior's highest role above roles it must manage or members it must moderate; restricted pings do not manage roles and therefore do not require a hierarchy relationship. A reviewer role must have effective access to its own private report or appeal destination. Superior verifies effective channel permissions, current resources, and role hierarchy whenever the operation needs it.
+`Mention Everyone` is needed when an administrator explicitly chooses that announcement option or when Superior sends an approved mention of a normally non-mentionable restricted-ping role. Onboarding templates and role menus never need it and suppress automatic mentions. Ordinary members do not need Mention Everyone. Keep Superior's highest role above roles it must manage or members it must moderate; restricted pings do not manage roles and therefore do not require a hierarchy relationship. A reviewer role must have effective access to its own private report or appeal destination. Superior verifies effective channel permissions, current resources, and role hierarchy whenever the operation needs it.
 
 ## Process environment
 
@@ -47,7 +50,7 @@ Copy `.env.example` to `.env` in the application root. For a Windows portable bu
 
 Use global registration for production. Discord can take time to propagate global command changes. Use guild registration only for controlled development because updates appear faster. Never put a production guild ID into source code.
 
-Discord cannot vary slash-command visibility by a guild's delegated grants. `/panel`, `/ticket`, `/suggestion`, `/application`, `/moderation`, and `/automod` therefore expose relevant command choices and enforce the exact permission at runtime. A visible command is not evidence that the member may use it. `/access` and `/restrictedping` are Administrator-restricted in Discord and also perform a fresh owner-or-Administrator check at runtime. Report and appeal review controls repeat authorization at use time even when a member can see the private channel.
+Discord cannot vary slash-command visibility by a guild's delegated grants. `/panel`, `/ticket`, `/suggestion`, `/application`, `/moderation`, `/automod`, `/onboarding`, and `/rolemenu` therefore expose relevant command choices and enforce the exact permission at runtime. A visible command is not evidence that the member may use it. `/access` and `/restrictedping` are Administrator-restricted in Discord and also perform a fresh owner-or-Administrator check at runtime. Member verification and role-menu components repeat guild, member, resource, version, and binding checks on every use.
 
 ## Immediate defaults and optional configuration
 
@@ -68,6 +71,8 @@ Configure only the external-resource workflows the guild needs:
 - Register each restricted role and destination with `/restrictedping add`, review it with `/restrictedping info`, and leave the Discord role's **Allow anyone to @mention this role** setting off.
 - Configure moderation logging and the private report/appeal destinations with `/moderation configure`, verify `/moderation status`, then post the `safety` panel if wanted.
 - Configure individual `/automod rule` entries and exemptions, inspect them with `/automod status`, and enable a rule only after `/automod test` and a permission review.
+- Configure welcome/farewell, the private lifecycle log, rules, verification, and automatic roles with `/onboarding`; inspect status and publish the verification panel only after every current binding passes validation.
+- Create a disabled role menu with `/rolemenu create`, add and order safe options, inspect status, enable it, then publish it through `/rolemenu post` or the fixed `roles` panel.
 - If routine management should be delegated, use `/access grant` only after the relevant roles exist and have been reviewed.
 
 `/config bot-state enabled:false` stops guild behavior without deleting data. Removing Superior from a guild marks that tenant inactive and retains its rows and persistent-panel bindings so a later rejoin works without reposting. `/data purge` is owner-only and permanently removes only that guild's live rows after exact confirmation; neither departure nor purge deletes Discord-hosted messages, logs, exports, or backups.
@@ -76,23 +81,27 @@ Configure only the external-resource workflows the guild needs:
 
 Only the guild owner or a freshly re-fetched member with Administrator permission can run `/access grant`, `/access revoke`, `/access list`, or `/access status`. Grants target roles. Superior rejects `@everyone`, managed/integration roles, deleted roles, roles from another guild, and duplicate active grants. Delegates cannot use `/access`.
 
-The eleven capabilities are intentionally separate:
+The thirteen capabilities are intentionally separate:
 
-| Capability               | Allows                                                                                         | Does not imply                                        |
-| ------------------------ | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `panels.manage`          | List, post, refresh, and inspect fixed panels                                                  | Ticket, suggestion, or application configuration      |
-| `tickets.configure`      | Configure departments and fields, enable/disable them, post launchers, and inspect health      | Reading or managing private ticket contents           |
-| `tickets.manage`         | Recover tickets and manage private ticket controls                                             | Editing departments or delegated access               |
-| `suggestions.configure`  | Configure/disable suggestions, post launchers, and recover public delivery                     | Reviewing suggestion content                          |
-| `suggestions.review`     | List and transition suggestions                                                                | Changing service configuration                        |
-| `applications.configure` | Configure forms/questions and post launchers                                                   | Reading or deciding private applications              |
-| `applications.review`    | Review, claim, decide, and recover applications                                                | Changing form configuration                           |
-| `moderation.configure`   | Configure moderation logging, report/appeal bindings, anti-spam, exemptions, and safety panels | Managing sanctions or reading private reports/appeals |
-| `moderation.manage`      | Warn, note, timeout/untimeout, kick, ban/unban, inspect, amend, void, and recover cases        | Changing configuration or delegated access            |
-| `reports.review`         | Inspect, claim/release, resolve, dismiss, and recover confidential reports                     | Configuring destinations or reviewing appeals         |
-| `appeals.review`         | Inspect, claim/release, uphold, overturn, and recover confidential appeals                     | Configuring destinations or reviewing reports         |
+| Capability               | Allows                                                                                          | Does not imply                                        |
+| ------------------------ | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `panels.manage`          | List, post, refresh, and inspect fixed panels                                                   | Ticket, suggestion, or application configuration      |
+| `tickets.configure`      | Configure departments and fields, enable/disable them, post launchers, and inspect health       | Reading or managing private ticket contents           |
+| `tickets.manage`         | Recover tickets and manage private ticket controls                                              | Editing departments or delegated access               |
+| `suggestions.configure`  | Configure/disable suggestions, post launchers, and recover public delivery                      | Reviewing suggestion content                          |
+| `suggestions.review`     | List and transition suggestions                                                                 | Changing service configuration                        |
+| `applications.configure` | Configure forms/questions and post launchers                                                    | Reading or deciding private applications              |
+| `applications.review`    | Review, claim, decide, and recover applications                                                 | Changing form configuration                           |
+| `moderation.configure`   | Configure moderation logging, report/appeal bindings, anti-spam, exemptions, and safety panels  | Managing sanctions or reading private reports/appeals |
+| `moderation.manage`      | Warn, note, timeout/untimeout, kick, ban/unban, inspect, amend, void, and recover cases         | Changing configuration or delegated access            |
+| `reports.review`         | Inspect, claim/release, resolve, dismiss, and recover confidential reports                      | Configuring destinations or reviewing appeals         |
+| `appeals.review`         | Inspect, claim/release, uphold, overturn, and recover confidential appeals                      | Configuring destinations or reviewing reports         |
+| `onboarding.configure`   | Configure lifecycle delivery, rules, verification, automatic roles, panels, and member recovery | Self-service role-menu configuration or moderation    |
+| `roles.configure`        | Create, edit, publish, enable, disable, archive, inspect, and recover persistent role menus     | Onboarding, moderation, tickets, or private reviews   |
 
 Owner and Administrator access is evaluated before delegated storage, so they retain recovery authority even if a grant or delegated role is stale. Every delegated action re-fetches the member and matching role. Removing or managing a granted role makes its authorization unusable. Revoke grants before deleting their roles when practical; `/access list` identifies a role that has already disappeared.
+
+`onboarding.configure` and `roles.configure` are independent. Neither implies the other, moderation authority, ticket access, report/appeal/application/suggestion review, or permission to manage `/access`. For a non-owner role-menu configurator, the configurator's freshly fetched highest role must also remain above every self-service role they select.
 
 A configure-only delegate cannot create or change a ticket support role, suggestion reviewer role, application reviewer role, report reviewer role, or appeal reviewer role to a role they currently hold unless they also have the matching content-review authority. An unchanged existing workflow role does not prevent unrelated metadata edits. The guild owner and a freshly verified Administrator remain the authorities for intentional overlap.
 
@@ -100,6 +109,65 @@ Discord channel visibility is a separate boundary from Superior's action authori
 
 - At most 25 active `tickets.manage` roles can be represented in a private ticket channel. New and recovered tickets receive freshly verified manager-role overwrites. After a grant, recover each existing active ticket that the role should access. A revoke blocks controls immediately, then each active ticket must be recovered to remove the prior bot-managed role overwrite. Recovery reads Superior's ACL marker, removes stale bot-managed support/manager overwrites, and preserves unrelated manual overwrites.
 - Before `applications.review` is granted, the target role must already have View Channel, Send Messages, and Read Message History in every locally binding-verified form destination, including disabled forms whose history and recovery controls remain available. Enabling a form repeats that check for every active review delegate. Superior does not edit application review-channel ACLs. After revocation, remove the role's Discord channel access separately when it is no longer appropriate.
+
+## Member onboarding and lifecycle delivery
+
+Phase 4 onboarding is guild-scoped and disabled by default after fresh creation, migration, and import. `/onboarding status` reports the enabled state, welcome/farewell and private-log health, current rules version, verification roles, automatic roles, native-screening behavior, and unresolved recovery work. Owners, Administrators, and a freshly verified `onboarding.configure` delegate may use the configuration and recovery operations; member-facing acknowledgement never grants configuration authority.
+
+Configuration can bind a public welcome channel, best-effort welcome DM, public farewell channel, private lifecycle-log channel, optional rules channel, verified role, optional unverified role, separate bounded human and bot automatic-role lists, and an optional account-age alert threshold. Selected channels and roles are fetched again from the current guild, effective bot permissions and role hierarchy are checked, and a binding-verification timestamp is stored only after success. A deleted or imported resource is unhealthy and cannot silently activate.
+
+Welcome and farewell titles and bodies are bounded administrator-authored templates rendered in Superior's fixed gold theme. Only these placeholders are supported:
+
+| Placeholder         | Rendered value                                                           |
+| ------------------- | ------------------------------------------------------------------------ |
+| `{user}`            | Escaped, non-mentioning member display                                   |
+| `{server}`          | Escaped guild name                                                       |
+| `{member_count}`    | Current approximate member count                                         |
+| `{account_created}` | Discord timestamp for account creation                                   |
+| `{joined_at}`       | Discord timestamp for guild join, when available                         |
+| `{rules}`           | Current configured rules-channel reference, when that binding is healthy |
+
+Unknown placeholders, nested/executable syntax, custom colors/footer branding, arbitrary component identifiers, and content exceeding Discord message/embed limits are rejected. Rendering escapes unsafe Markdown and uses `allowedMentions: { parse: [] }`; `{user}` is never an automatic ping, and templates cannot create `@everyone`, `@here`, user, or role mentions. Terminal logs record only safe delivery type/outcome metadata, never the template, rendered private text, or DM contents.
+
+On `guildMemberAdd`, Superior records bounded safe lifecycle metadata and then attempts eligible delivery. A public welcome failure, a private-log failure, or a refused DM does not abort the remaining bookkeeping; DM failure is ordinary best-effort delivery and is never blamed on the member. On `guildMemberRemove`, a public farewell and private lifecycle event contain no moderation, ticket, report, appeal, application, or other private workflow detail. The private log may also receive fixed events for bot joins/leaves, verification acceptance/recovery, automatic-role failure, and an account younger than the configured threshold. Account age is informational only, is not proof of abuse, and never triggers a kick, ban, timeout, quarantine, public label, or risk score.
+
+`/onboarding member member:<user>` is a private administrative lookup for native-screening state, current/older rules acceptance, configured onboarding roles held, outstanding recovery, join/account timestamps, and recent bounded onboarding audit entries. It does not join this view with moderation cases, reports, appeals, tickets, applications, or member message content. `/onboarding disable` stops new onboarding delivery without erasing rule versions, acceptance history, or recovery records.
+
+## Rules acknowledgement and verification
+
+Rules use immutable guild-local versions. A title is limited to 256 characters and the body to 3,967 characters after safe Markdown escaping, reserving the rest of Discord's embed-description limit for Superior's fixed acknowledgement notice. Editing the active title/body creates the next version and retains at most 25 versions; a version referenced by acceptance history is never destructively deleted. Changing rules does not mass-remove verified roles or silently revoke Discord access. Administrators may request re-acknowledgement, and member status distinguishes acceptance of the current version from an older version.
+
+`/onboarding panel` publishes the fixed `verification` panel for the current enabled configuration and rules version. Pressing **Accept Rules** means only that the member acknowledges the server rules presented by the guild; it is not a legal agreement, identity verification, age verification, captcha, or substitute for Discord enforcement. Superior verifies the exact panel, guild, message binding, current rules version, human member, roles, hierarchy, permissions, and runtime generation before changing state. An obsolete or copied component fails privately and directs the member to the current panel.
+
+Acceptance is idempotent and serialized for the member/version. Superior first adds the verified role. Only after Discord confirms that addition does it store the accepted state and attempt to remove the optional unverified role. Failure to add the verified role creates no acceptance claim; failure to remove the unverified role preserves the successful acceptance and creates bounded recoverable work. Repeated or concurrent clicks never create duplicate acceptance events, a member cannot accept for someone else, and bots cannot use member verification.
+
+Discord's native Membership Screening remains authoritative for pending members. While `member.pending` is true, Superior does not assign human automatic roles or a verification role and does not bypass screening. A later `guildMemberUpdate` resumes deferred work after Discord clears the pending state; repeated updates are idempotent. Superior's rules acknowledgement complements native screening and does not replace it.
+
+## Safe automatic roles and onboarding recovery
+
+Automatic roles are separate lists for humans and bots, limited to 10 each, and remain disabled after migration or import until explicit revalidation. Superior rejects `@everyone`, deleted/cross-guild roles, managed/integration/bot/booster roles, roles at or above Superior's highest role, and roles carrying Administrator, Manage Server, Manage Roles, Manage Channels, Kick Members, Ban Members, Moderate Members, Manage Messages, Manage Webhooks, or Mention Everyone. A verified or unverified role cannot also appear in either automatic-role list. Human roles are never applied to bots, bot roles are never applied to humans, and no configured role is assigned while native screening is pending.
+
+Role mutations are bounded and re-fetch the current bot/member/role resources. Per-role results are recorded accurately; partial assignment stays recoverable and is never reported as complete. Configuration changes do not scan the guild. `/onboarding recover member:<user>` is the explicit idempotent path for one member's deferred screening work, incomplete automatic-role assignment, verified/unverified partial state, and safe delivery checkpoints. A deleted automatic-role row can be removed with `/onboarding autorole ... action:remove role_id:<id>` after the deletion event makes it dormant. Phase 4 deliberately offers no bulk member backfill and never performs an unbounded member fetch.
+
+Channel or role deletion makes the affected binding unhealthy. Recovery verifies the current actor and `onboarding.configure`, current configuration version, current Discord resources and permissions, and the latest runtime generation before it changes Discord or a checkpoint. It does not overwrite newer settings, repeat an unsafe external effect, expose private history, or disturb unrelated roles/channel permissions. A failed send with no Discord receipt may be retried; an ambiguous reserved delivery is left for inspection and is not automatically reclaimed, while an ambiguous reservation imported from another database is marked skipped.
+
+## Persistent self-service role menus
+
+`/rolemenu` is the first-class persistent replacement for new one-off self-service role panels. A guild may store at most 25 menus with unique lowercase slugs; each menu has a stable opaque ID, title, bounded description, enabled/archive state, selection mode, minimum/maximum selection rules, optional prerequisite role, sort order, definition version, binding-verification state, and actor/timestamps. Each menu has at most 25 ordered options containing a stable option ID, safe role, label, optional description, and optional Unicode emoji. One published panel contains one select menu. Custom IDs stay below Discord's 100-character limit and identify the opaque menu/version rather than encoding arbitrary role IDs.
+
+The modes are:
+
+- `toggle`: selected options are independently added and unselected menu options are removed, subject to the configured minimum/maximum;
+- `exclusive`: at most one option role from that menu is held; and
+- `limited`: several option roles may be selected up to the configured maximum.
+
+Owners, Administrators, and a freshly verified `roles.configure` delegate use `/rolemenu list|create|edit|status|enable|disable|archive|recover`, `/rolemenu option add|edit|remove|move`, and `/rolemenu post`. Creation and import start disabled. Archiving preserves history and prevents posting or interaction; disabling prevents new changes but never strips existing member roles. Editing role choices increments the definition version so an old post becomes stale unless it is safely replaced.
+
+Every option role is freshly validated during configuration, posting, and selection under the same dangerous-permission, managed-role, tenant, and Superior-hierarchy exclusions as automatic roles. A non-owner configurator must remain above every selected role. The optional prerequisite role must be current, same-guild, non-managed, not `@everyone`, and actually held by the selecting member; it is a gate and is not assigned by the menu.
+
+On interaction, Superior resolves the stored opaque menu and exact guild/channel/message/version binding, re-fetches the member and every referenced role, verifies Manage Roles/hierarchy and any prerequisite, validates the complete minimum/maximum plan, and serializes work per member/menu. Additions occur before removals when that protects prior access. If an addition fails, no prior menu role is removed. If additions succeed and a removal partially fails, the exact confirmed result and recovery work are stored and reported privately. Only roles represented by that menu may be removed; unrelated roles are never touched. Repeated selections are idempotent, copied/cross-guild IDs fail closed, and deleted roles/messages are reported unhealthy without scanning all members.
+
+`/rolemenu recover` verifies a missing message, stale definition, deleted option/prerequisite role, imported unverified binding, or partial member operation against current resources. Supply `member:` to retry that member's newest unresolved current-definition plan; additions still precede removals, and the original partial outcome remains in history beside the recovery operation. Reposting stays guild-scoped and does not reconstruct usage by fetching every guild member. Existing `/superior rolepanel` and `/superior rolepanelmulti` custom IDs remain on their legacy route and are never reinterpreted as persistent menu records.
 
 ## Restricted role pings
 
@@ -177,17 +245,19 @@ Detection windows are bounded in memory and cleared on guild disable, purge/remo
 
 ## Fixed panels
 
-Superior has seven fixed gold presets:
+Superior has nine fixed gold presets:
 
 - `help`: active member services and management command families;
 - `server-info`: a bounded guild snapshot;
 - `resources`: administrator-supplied title/body plus up to five unique HTTPS links;
 - `tickets`: the current department launcher;
 - `suggestions`: the suggestion submission launcher; and
-- `applications`: the private staff-application launcher; and
-- `safety`: private report and eligible in-guild appeal launchers with a concise privacy explanation.
+- `applications`: the private staff-application launcher;
+- `safety`: private report and eligible in-guild appeal launchers with a concise privacy explanation;
+- `verification`: the current rules-version acknowledgement launcher; and
+- `roles`: a launcher bound to one stored persistent role menu.
 
-`/panel post` targets a text or announcement channel and records the exact bot-authored message so `replace_existing` can refresh it safely. `/panel status` privately lists a bounded set of tracked panels and current feature health. Operational presets are refused when their stored configuration is disabled, missing, belongs to another guild, or fails current resource/permission checks. The safety panel enables only controls whose report/appeal service is currently verified and never displays a case or private record publicly. Member-controlled text cannot select arbitrary styling and all payloads suppress automatic mentions.
+`/panel post` targets a text or announcement channel and records the exact bot-authored message so `replace_existing` can refresh it safely. `/panel status` privately lists a bounded set of tracked panels and current feature health. Operational presets are refused when their stored configuration is disabled, missing, belongs to another guild, is imported but unverified, or fails current resource/permission checks. The safety panel enables only controls whose report/appeal service is verified; verification points to the current onboarding rules version; roles selects a stored enabled role menu rather than embedding arbitrary roles. Member-controlled text cannot select arbitrary styling and all payloads suppress automatic mentions.
 
 ## Ticket departments and forms
 
@@ -233,20 +303,21 @@ Only the applicant can use `/application status` for their records or `/applicat
 
 ## Export, import, purge, and recovery review
 
-`/data export` lets the owner or an Administrator download a bounded same-guild format-7 snapshot. It contains the existing portable model plus moderation configuration/cases/events, reports/events, appeals/events, anti-spam rules/exemptions/safe enforcement metadata, and legitimately portable delivery checkpoints.
+`/data export` lets the owner or an Administrator download a bounded same-guild format-8 snapshot. It contains the complete existing portable model plus onboarding configuration, immutable rules versions, member acceptance/state, automatic-role configuration, bounded lifecycle/audit data, role menus/options/posts, and portable recovery/delivery metadata.
 
 `/data import` is owner-only, requires exact same-guild confirmation, validates collection limits and references, and runs in one transaction:
 
-- Format 7 replaces settings, metrics, and the complete portable operational model while preserving non-portable internal delivery deduplication.
+- Format 8 replaces settings, metrics, and the complete portable operational model while preserving non-portable internal delivery deduplication.
+- Legacy format 7 replaces its complete schema-v9-era model and leaves all Phase 4 collections empty/default-disabled.
 - Legacy format 6 replaces its complete schema-v8-era model and leaves Phase 3 configuration and records empty/default-disabled.
 - Legacy format 5 replaces its schema-v7 portable model, converts settings to the current safe defaults, preserves the operational collections represented by that format, and leaves Phase 3 empty/default-disabled.
 - Legacy format 4 replaces its complete schema-v5 model and leaves restricted-ping and Phase 3 collections empty/default-disabled.
 - Legacy format 3 replaces settings, metrics, panels, and the Phase 1 ticket model, converting it to a `General Support` department with Subject/Details responses. Phase 2 collections absent from the file are cleared, and Phase 3 is empty/default-disabled.
 - Legacy format 2 replaces settings and metrics while preserving all current operational rows.
 
-Every import leaves the core guild bot active. Imported delegated grants are inactive; external ticket, application, suggestion, restricted-ping, moderation-log, report, appeal, and resource bindings remain dormant or unverified until the corresponding configuration or recovery path checks current Discord resources and permissions. Imported anti-spam rules remain disabled and imported sanctions are never replayed. Imported historical records remain readable to authorized staff. Keep a protected pre-import export or operator backup when rollback may be necessary.
+Every import leaves the core guild bot active. Imported delegated grants are inactive; external ticket, application, suggestion, restricted-ping, moderation-log, report, appeal, resource, onboarding-channel, verification-panel, and role-menu-message bindings remain dormant or unverified until the corresponding configuration or recovery path checks current Discord resources and permissions. Imported anti-spam and automatic roles remain disabled. Imported verification and role menus remain disabled until current roles/channels are validated and an authorized actor explicitly enables them. Imported acceptance history is readable but never assigns a role, and imported sanctions are never replayed. Keep a protected pre-import export or operator backup when rollback may be necessary.
 
-Import and purge affect only the live SQLite database. They do not delete downloaded exports, backups, SQLite free pages, Discord panels, ticket/application/suggestion/report/appeal messages, ticket channels, moderation logs, transcripts, review logs, discussion threads, prior sanctions, or direct messages.
+Import and purge affect only the live SQLite database. They do not delete downloaded exports, backups, SQLite free pages, Discord panels, welcome/farewell/lifecycle messages, role-menu messages or assigned roles, ticket/application/suggestion/report/appeal messages, ticket channels, moderation logs, transcripts, review logs, discussion threads, prior sanctions, or direct messages.
 
 ## Command reference
 
@@ -255,7 +326,9 @@ Import and purge affect only the live SQLite database. They do not delete downlo
 - `/access`: grant, revoke, list, and status for delegated role capabilities.
 - `/pingrole role:<role>`: request one authorized restricted role ping in the current channel or allowed child thread/post.
 - `/restrictedping`: add/remove/list/info/enable/disable restricted role mappings, clean stale role/channel IDs, and configure cooldown/thread policy; owner-or-Administrator only.
-- `/panel`: list, post, and status for all seven fixed presets.
+- `/onboarding`: status/configure, welcome, farewell, rules, verification, autorole, panel, member, recover, and disable operations.
+- `/rolemenu`: list/create/edit/status/enable/disable/archive/recover/post and option add/edit/remove/move.
+- `/panel`: list, post, and status for all nine fixed presets.
 - `/ticket`: status, panel, disable, recover; department list/create/edit/enable/disable/delete/health; field add/edit/remove/move.
 - `/suggestion`: submit, status, withdraw, configure, panel, list, review, disable, and recover.
 - `/application`: submit, status, withdraw, panel, recover; form list/create/edit/enable/disable/delete; field add/edit/remove/move.
@@ -272,6 +345,6 @@ The `roleinfo`, `channelinfo`, `snowflake`, and `timestamp` utilities validate b
 
 ## Lifecycle and isolation
 
-Events and interactions are rejected when the guild is missing, disabled, inactive, removed, purged, or has changed generation during asynchronous work. Guild resources are revalidated against the interaction guild. Discord API work stays outside long SQLite transactions, list operations are bounded or paginated, and successful metrics are written only after the corresponding reply succeeds.
+Events and interactions are rejected when the guild is missing, disabled, inactive, removed, purged, or has changed generation during asynchronous work. `guildMemberAdd`, `guildMemberRemove`, and native-screening `guildMemberUpdate` work enters the same shutdown-aware tracker as commands and messages; no new work starts after shutdown begins and graceful drain includes in-flight member work. Guild resources are revalidated against the interaction guild. Discord API work stays outside long SQLite transactions, list operations are bounded or paginated, and successful metrics are written only after the corresponding reply succeeds.
 
 Only one Superior process may write a database. Running several processes against a shared SQLite file is unsupported even on a network filesystem. Future multi-process deployment requires a different coordination/storage design; no configuration flag enables it in this release.

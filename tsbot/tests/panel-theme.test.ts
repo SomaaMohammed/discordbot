@@ -89,6 +89,32 @@ describe("Superior panel theme and presets", () => {
         reportsEnabled: true,
         appealsEnabled: true,
       },
+      verification: {
+        preset: "verification",
+        customId: "superior:verify:PanelToken_1234:1",
+        rulesVersion: 1,
+        rulesTitle: "Server Rules",
+        rulesBody: "Treat members with respect.",
+        reacceptanceRequested: false,
+      },
+      roles: {
+        preset: "roles",
+        customId: "superior:rolemenu:MenuToken_1234:PostToken_1234:1",
+        title: "Member Roles",
+        description: "Choose the roles you want.",
+        mode: "toggle",
+        minSelections: 0,
+        maxSelections: 1,
+        requiredRoleId: null,
+        options: [
+          {
+            optionId: "OptionToken_1234",
+            label: "Updates",
+            description: null,
+            emoji: null,
+          },
+        ],
+      },
     } as const;
 
     expect(Object.keys(requests)).toEqual(PANEL_PRESETS);
@@ -229,8 +255,8 @@ describe("resources panel normalization", () => {
     expect(
       row?.components.every(
         (component) =>
-          component.style === ButtonStyle.Link &&
           "url" in component &&
+          component.style === ButtonStyle.Link &&
           component.url.startsWith("https://"),
       ),
     ).toBe(true);

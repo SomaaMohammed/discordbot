@@ -6,9 +6,11 @@ import {
 } from "../guild-settings.js";
 import {
   MAX_TICKET_EVENTS_PER_TICKET,
+  GUILD_CAPABILITIES,
   TICKET_EVENT_TYPES,
   TICKET_STATES,
   type GuildDataExport,
+  type GuildCapability,
   type GuildMetricExport,
   type GuildRecord,
   type GuildSettings,
@@ -43,6 +45,12 @@ import {
   parsePhase3GuildData,
   PHASE3_COLLECTION_LIMITS,
 } from "./guild-data-v7.js";
+import {
+  emptyPhase4GuildData,
+  insertPhase4GuildData,
+  parsePhase4GuildData,
+  PHASE4_COLLECTION_LIMITS,
+} from "./guild-data-v8.js";
 
 const MAX_IMPORTED_METRICS = 50_000;
 const LEGACY_V3_PANEL_PRESETS = [
@@ -51,16 +59,45 @@ const LEGACY_V3_PANEL_PRESETS = [
   "resources",
   "tickets",
 ] as const;
+const FORMAT_7_PANEL_PRESETS = [
+  "help",
+  "server-info",
+  "resources",
+  "tickets",
+  "suggestions",
+  "applications",
+  "safety",
+] as const satisfies readonly PanelPreset[];
+const FORMAT_8_PANEL_PRESETS = [
+  ...FORMAT_7_PANEL_PRESETS,
+  "verification",
+  "roles",
+] as const satisfies readonly PanelPreset[];
+const FORMAT_7_CAPABILITIES = [
+  "panels.manage",
+  "tickets.configure",
+  "tickets.manage",
+  "suggestions.configure",
+  "suggestions.review",
+  "applications.configure",
+  "applications.review",
+  "moderation.configure",
+  "moderation.manage",
+  "reports.review",
+  "appeals.review",
+] as const satisfies readonly GuildCapability[];
+const FORMAT_6_CAPABILITIES = FORMAT_7_CAPABILITIES.slice(0, 7);
 
 export const GUILD_DATA_COLLECTION_LIMITS = Object.freeze({
   metrics: MAX_IMPORTED_METRICS,
   ...PHASE2_COLLECTION_LIMITS,
   ...RESTRICTED_PING_COLLECTION_LIMITS,
   ...PHASE3_COLLECTION_LIMITS,
+  ...PHASE4_COLLECTION_LIMITS,
 });
 
 export interface ParsedGuildDataImport extends GuildDataExport {
-  sourceFormatVersion: 2 | 3 | 4 | 5 | 6 | 7;
+  sourceFormatVersion: 2 | 3 | 4 | 5 | 6 | 7 | 8;
 }
 
 type LegacyTicketRecord = Omit<TicketRecord, "departmentId">;
@@ -90,10 +127,11 @@ export function parseGuildDataExport(
     candidate.formatVersion !== 4 &&
     candidate.formatVersion !== 5 &&
     candidate.formatVersion !== 6 &&
-    candidate.formatVersion !== 7
+    candidate.formatVersion !== 7 &&
+    candidate.formatVersion !== 8
   ) {
     throw new TypeError(
-      "Guild import formatVersion must be 2, 3, 4, 5, 6, or 7",
+      "Guild import formatVersion must be 2, 3, 4, 5, 6, 7, or 8",
     );
   }
   if (
@@ -103,7 +141,9 @@ export function parseGuildDataExport(
     throw new TypeError("Guild import must belong to the current guild");
   }
   const settings =
-    candidate.formatVersion === 6 || candidate.formatVersion === 7
+    candidate.formatVersion === 6 ||
+    candidate.formatVersion === 7 ||
+    candidate.formatVersion === 8
       ? sanitizeGuildSettings(candidate.settings)
       : upgradeLegacyExportSettings(candidate.settings);
   if (!Array.isArray(candidate.metrics)) {
@@ -166,8 +206,22 @@ export function parseGuildDataExport(
     candidate.formatVersion === 4 ||
     candidate.formatVersion === 5 ||
     candidate.formatVersion === 6 ||
-    candidate.formatVersion === 7
-      ? parsePhase2OperationalData(candidate, guildId)
+    candidate.formatVersion === 7 ||
+    candidate.formatVersion === 8
+      ? parsePhase2OperationalData(
+          candidate,
+          guildId,
+          candidate.formatVersion === 8
+            ? FORMAT_8_PANEL_PRESETS
+            : candidate.formatVersion === 7
+              ? FORMAT_7_PANEL_PRESETS
+              : undefined,
+          candidate.formatVersion === 8
+            ? GUILD_CAPABILITIES
+            : candidate.formatVersion === 7
+              ? FORMAT_7_CAPABILITIES
+              : FORMAT_6_CAPABILITIES,
+        )
       : candidate.formatVersion === 3
         ? upgradeLegacyV3OperationalData({
             ticketConfiguration,
@@ -180,16 +234,24 @@ export function parseGuildDataExport(
   const restrictedPings =
     candidate.formatVersion === 5 ||
     candidate.formatVersion === 6 ||
-    candidate.formatVersion === 7
+    candidate.formatVersion === 7 ||
+    candidate.formatVersion === 8
       ? parseRestrictedPingGuildData(candidate, guildId)
       : emptyRestrictedPingGuildData();
   const phase3 =
-    candidate.formatVersion === 7
+    candidate.formatVersion === 7 || candidate.formatVersion === 8
       ? parsePhase3GuildData(candidate, guildId)
       : emptyPhase3GuildData();
+  const phase4 =
+    candidate.formatVersion === 8
+      ? parsePhase4GuildData(candidate, guildId)
+      : emptyPhase4GuildData();
+  if (candidate.formatVersion === 8) {
+    validatePhase4PanelReferences(operational.postedPanels, phase4);
+  }
   return {
     sourceFormatVersion: candidate.formatVersion,
-    formatVersion: 7,
+    formatVersion: 8,
     guildId,
     exportedAt,
     metadata: candidate.metadata as GuildRecord,
@@ -198,7 +260,131 @@ export function parseGuildDataExport(
     ...operational,
     ...restrictedPings,
     ...phase3,
+    ...phase4,
   };
+}
+
+export function validatePhase4PanelReferences(
+  panels: readonly PostedPanel[],
+  phase4: Phase4PanelReferenceData,
+): void {
+  const rulesVersions = new Set(
+    phase4.onboardingRulesVersions.map(({ rulesVersion }) => rulesVersion),
+  );
+  const menus = new Map(phase4.roleMenus.map((menu) => [menu.menuId, menu]));
+  const posts = new Map(
+    phase4.roleMenuPosts.map((post) => [post.postId, post]),
+  );
+  for (const panel of panels) {
+    if (panel.preset === "verification") {
+      if (!phase4.onboardingConfiguration) {
+        throw new TypeError(
+          "Imported verification panel has no onboarding configuration",
+        );
+      }
+      const configuration = requireExactPanelConfiguration(
+        panel.configuration,
+        ["bindingsVerifiedAt", "rulesVersion"],
+        "verification",
+      );
+      const rulesVersion = configuration.rulesVersion;
+      if (
+        !Number.isSafeInteger(rulesVersion) ||
+        Number(rulesVersion) < 1 ||
+        !rulesVersions.has(Number(rulesVersion))
+      ) {
+        throw new TypeError(
+          "Imported verification panel references an unknown rules version",
+        );
+      }
+      validateImportedBindingTimestamp(
+        configuration.bindingsVerifiedAt,
+        "verification panel",
+      );
+      continue;
+    }
+    if (panel.preset !== "roles") continue;
+    const configuration = requireExactPanelConfiguration(
+      panel.configuration,
+      ["bindingsVerifiedAt", "definitionVersion", "menuId", "postId"],
+      "roles",
+    );
+    const menuId = assertOpaqueStorageId(
+      configuration.menuId,
+      "roles panel menu ID",
+    );
+    const postId = assertOpaqueStorageId(
+      configuration.postId,
+      "roles panel post ID",
+    );
+    const definitionVersion = Number(configuration.definitionVersion);
+    const menu = menus.get(menuId);
+    const post = posts.get(postId);
+    if (
+      !Number.isSafeInteger(definitionVersion) ||
+      definitionVersion < 1 ||
+      !menu ||
+      !post ||
+      postId !== panel.panelId ||
+      post.menuId !== menuId ||
+      post.channelId !== panel.channelId ||
+      post.messageId !== panel.messageId ||
+      post.definitionVersion !== definitionVersion
+    ) {
+      throw new TypeError(
+        "Imported roles panel has an inconsistent menu/message binding",
+      );
+    }
+    validateImportedBindingTimestamp(
+      configuration.bindingsVerifiedAt,
+      "roles panel",
+    );
+  }
+}
+
+export interface Phase4PanelReferenceData {
+  readonly onboardingConfiguration: object | null;
+  readonly onboardingRulesVersions: ReadonlyArray<{
+    readonly rulesVersion: number;
+  }>;
+  readonly roleMenus: ReadonlyArray<{ readonly menuId: string }>;
+  readonly roleMenuPosts: ReadonlyArray<{
+    readonly postId: string;
+    readonly menuId: string;
+    readonly channelId: string;
+    readonly messageId: string;
+    readonly definitionVersion: number;
+  }>;
+}
+
+function requireExactPanelConfiguration(
+  value: unknown,
+  expectedKeys: readonly string[],
+  label: string,
+): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`Imported ${label} panel configuration is invalid`);
+  }
+  const configuration = value as Record<string, unknown>;
+  const actualKeys = Object.keys(configuration).sort();
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== [...expectedKeys].sort()[index])
+  ) {
+    throw new TypeError(
+      `Imported ${label} panel configuration has unsupported fields`,
+    );
+  }
+  return configuration;
+}
+
+function validateImportedBindingTimestamp(value: unknown, label: string): void {
+  if (value === null) return;
+  try {
+    normalizeImportedTimestamp(value);
+  } catch {
+    throw new TypeError(`Imported ${label} binding timestamp is invalid`);
+  }
 }
 
 function upgradeLegacyExportSettings(input: unknown): GuildSettings {
@@ -526,7 +712,7 @@ export function insertImportedOperationalData(
   insertRestrictedPingGuildData(db, guildId, imported);
 }
 
-export { insertPhase3GuildData };
+export { insertPhase3GuildData, insertPhase4GuildData };
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {

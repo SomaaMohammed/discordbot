@@ -35,6 +35,11 @@ import {
   type InteractionLifecycle,
 } from "./interaction-lifecycle.js";
 import { startImmediateInteractionResponse } from "./immediate-interaction-response.js";
+import {
+  handleGuildMemberAdded,
+  handleGuildMemberRemoved,
+  handleGuildMemberUpdated,
+} from "./member-lifecycle-discord.js";
 
 export interface DiscordClientWorkLifecycle {
   stop: () => void;
@@ -342,25 +347,44 @@ export function createDiscordClient(
     return workTracker
       .run(async () => {
         if (!runtime.storage.getGuild(role.guild.id)) return;
-        const cleanup = runtime.storage
-          .forGuild(role.guild.id)
-          .cleanupRestrictedPingRole(role.id);
-        if (cleanup.mappingsDeleted === 0 && cleanup.rolesDeleted === 0) return;
+        const storage = runtime.storage.forGuild(role.guild.id);
+        const cleanup = storage.cleanupRestrictedPingRole(role.id);
+        const onboarding =
+          typeof storage.invalidateOnboardingRole === "function"
+            ? storage.invalidateOnboardingRole(role.id)
+            : { configurationChanged: 0, autorolesChanged: 0 };
+        const roleMenus =
+          typeof storage.invalidateRoleMenuRole === "function"
+            ? storage.invalidateRoleMenuRole(role.id)
+            : { menusChanged: 0, postsChanged: 0 };
+        if (
+          cleanup.mappingsDeleted === 0 &&
+          cleanup.rolesDeleted === 0 &&
+          onboarding.configurationChanged === 0 &&
+          onboarding.autorolesChanged === 0 &&
+          roleMenus.menusChanged === 0 &&
+          roleMenus.postsChanged === 0
+        )
+          return;
         runtime.invalidateGuild(role.guild.id);
         logInfo(
-          "restricted-ping-lifecycle",
-          "Deleted role configuration cleaned up",
+          "discord-resource-lifecycle",
+          "Deleted role bindings were made dormant",
           {
             guildId: role.guild.id,
             roleId: role.id,
             rolesDeleted: cleanup.rolesDeleted,
             mappingsDeleted: cleanup.mappingsDeleted,
             userCooldownsDeleted: cleanup.userCooldownsDeleted,
+            onboardingConfigurationsChanged: onboarding.configurationChanged,
+            onboardingAutorolesChanged: onboarding.autorolesChanged,
+            roleMenusChanged: roleMenus.menusChanged,
+            roleMenuPostsChanged: roleMenus.postsChanged,
           },
         );
       })
       .catch((error) => {
-        logError("restricted-ping-lifecycle", "Role deletion cleanup failed", {
+        logError("discord-resource-lifecycle", "Role deletion cleanup failed", {
           guildId: role.guild.id,
           roleId: role.id,
           error,
@@ -374,14 +398,27 @@ export function createDiscordClient(
         if (channel.isDMBased()) return;
         const guildId = channel.guild.id;
         if (!runtime.storage.getGuild(guildId)) return;
-        const cleanup = runtime.storage
-          .forGuild(guildId)
-          .cleanupRestrictedPingChannel(channel.id);
-        if (cleanup.mappingsDeleted === 0 && cleanup.rolesDeleted === 0) return;
+        const storage = runtime.storage.forGuild(guildId);
+        const cleanup = storage.cleanupRestrictedPingChannel(channel.id);
+        const onboarding =
+          typeof storage.invalidateOnboardingChannel === "function"
+            ? storage.invalidateOnboardingChannel(channel.id)
+            : { configurationChanged: 0 };
+        const roleMenuPostsChanged =
+          typeof storage.markRoleMenuChannelMissing === "function"
+            ? storage.markRoleMenuChannelMissing(channel.id)
+            : 0;
+        if (
+          cleanup.mappingsDeleted === 0 &&
+          cleanup.rolesDeleted === 0 &&
+          onboarding.configurationChanged === 0 &&
+          roleMenuPostsChanged === 0
+        )
+          return;
         runtime.invalidateGuild(guildId);
         logInfo(
-          "restricted-ping-lifecycle",
-          "Deleted channel mappings cleaned up",
+          "discord-resource-lifecycle",
+          "Deleted channel bindings were made dormant",
           {
             guildId,
             channelId: channel.id,
@@ -389,12 +426,14 @@ export function createDiscordClient(
             rolesDeleted: cleanup.rolesDeleted,
             mappingsDeleted: cleanup.mappingsDeleted,
             userCooldownsDeleted: cleanup.userCooldownsDeleted,
+            onboardingConfigurationsChanged: onboarding.configurationChanged,
+            roleMenuPostsChanged,
           },
         );
       })
       .catch((error) => {
         logError(
-          "restricted-ping-lifecycle",
+          "discord-resource-lifecycle",
           "Channel deletion cleanup failed",
           {
             guildId: channel.isDMBased() ? "dm" : channel.guild.id,
@@ -402,6 +441,93 @@ export function createDiscordClient(
             error,
           },
         );
+      });
+  });
+
+  client.on("messageDelete", (message) => {
+    return workTracker
+      .run(async () => {
+        if (!message.guildId || !runtime.storage.getGuild(message.guildId))
+          return;
+        const storage = runtime.storage.forGuild(message.guildId);
+        const changed =
+          typeof storage.markRoleMenuMessageMissing === "function"
+            ? storage.markRoleMenuMessageMissing(message.channelId, message.id)
+            : 0;
+        if (changed === 0) return;
+        logInfo(
+          "discord-resource-lifecycle",
+          "Deleted role-menu message marked missing",
+          {
+            guildId: message.guildId,
+            channelId: message.channelId,
+            messageId: message.id,
+            roleMenuPostsChanged: changed,
+          },
+        );
+      })
+      .catch((error) => {
+        logClassifiedError("discord-resource-lifecycle", error, {
+          guildId: message.guildId ?? "dm",
+          channelId: message.channelId,
+          messageId: message.id,
+          stage: "message-delete",
+          outcome: "failed",
+        });
+      });
+  });
+
+  client.on("guildMemberAdd", (member) => {
+    return workTracker
+      .run(() =>
+        handleGuildMemberAdded(runtime, member, () => workTracker.isAccepting),
+      )
+      .catch((error) => {
+        logClassifiedError("onboarding-lifecycle", error, {
+          guildId: member.guild.id,
+          memberId: member.id,
+          stage: "guild-member-add",
+          outcome: "failed",
+        });
+      });
+  });
+
+  client.on("guildMemberUpdate", (oldMember, newMember) => {
+    return workTracker
+      .run(() =>
+        handleGuildMemberUpdated(
+          runtime,
+          oldMember,
+          newMember,
+          () => workTracker.isAccepting,
+        ),
+      )
+      .catch((error) => {
+        logClassifiedError("onboarding-lifecycle", error, {
+          guildId: newMember.guild.id,
+          memberId: newMember.id,
+          stage: "guild-member-update",
+          outcome: "failed",
+        });
+      });
+  });
+
+  client.on("guildMemberRemove", (member) => {
+    return workTracker
+      .run(() =>
+        handleGuildMemberRemoved(
+          runtime,
+          member,
+          () => workTracker.isAccepting,
+        ),
+      )
+      .catch((error) => {
+        logClassifiedError("onboarding-lifecycle", error, {
+          guildId: member.guild.id,
+          memberId: member.id,
+          stage: "guild-member-remove",
+          outcome: "failed",
+        });
       });
   });
 

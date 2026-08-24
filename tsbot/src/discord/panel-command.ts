@@ -62,6 +62,14 @@ export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
             .setRequired(false)
             .setMinLength(1)
             .setMaxLength(RESOURCE_PANEL_LIMITS.body),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("role_menu")
+            .setDescription("Stored role-menu slug (required for roles)")
+            .setRequired(false)
+            .setMinLength(1)
+            .setMaxLength(32),
         );
 
       for (let index = 1; index <= RESOURCE_PANEL_LIMITS.links; index += 1) {

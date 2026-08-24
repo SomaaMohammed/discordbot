@@ -114,7 +114,7 @@ describe("guild data export format 6", () => {
 
     const payload = storage.exportGuildData(GUILD);
     expect(payload).toMatchObject({
-      formatVersion: 7,
+      formatVersion: 8,
       delegatedCapabilityGrants: [{ active: true }],
       ticketDepartments: [{ departmentId: "department_a", enabled: true }],
       ticketDepartmentFields: [{ fieldId: "question_a" }],

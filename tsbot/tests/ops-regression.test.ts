@@ -47,7 +47,7 @@ describe("operations safeguards", () => {
       "git merge --ff-only --no-overwrite-ignore FETCH_HEAD",
     );
     expect(source).not.toContain("git pull");
-    expect(source).toContain('validate_database "$candidate" 9');
+    expect(source).toContain('validate_database "$candidate" 10');
     expect(source).toContain("Database restored atomically");
     expect(source).toContain('rollback_dir="$db_dir/.superior-rollback.$$.d"');
     expect(source).toContain('"$rollback_dir/original.db"');
@@ -56,13 +56,14 @@ describe("operations safeguards", () => {
     expect(source).toContain('"$source" -ef "$DB_FILE"');
     expect(source).toContain("backup-cli.js");
     expect(source).toContain("automatic recovery was incomplete");
-    expect(source).toContain("migrate-v8) migrate_database_to_v9 8");
-    expect(source).toContain("migrate-v7) migrate_database_to_v9 7");
-    expect(source).toContain("migrate-v6) migrate_database_to_v9 6");
-    expect(source).toContain("migrate-v5) migrate_database_to_v9 5");
-    expect(source).toContain("migrate-v4) migrate_database_to_v9 4");
-    expect(source).toContain("migrate-v3) migrate_database_to_v9 3");
-    expect(source).toContain("migrate-v2) migrate_database_to_v9 2");
+    expect(source).toContain("migrate-v9) migrate_database_to_v10 9");
+    expect(source).toContain("migrate-v8) migrate_database_to_v10 8");
+    expect(source).toContain("migrate-v7) migrate_database_to_v10 7");
+    expect(source).toContain("migrate-v6) migrate_database_to_v10 6");
+    expect(source).toContain("migrate-v5) migrate_database_to_v10 5");
+    expect(source).toContain("migrate-v4) migrate_database_to_v10 4");
+    expect(source).toContain("migrate-v3) migrate_database_to_v10 3");
+    expect(source).toContain("migrate-v2) migrate_database_to_v10 2");
     expect(source).toContain("migrate-cli.js");
     expect(source).toContain(
       "validated schema-v${source_schema} backup was retained and the service remains stopped",
@@ -278,7 +279,7 @@ describe("operations safeguards", () => {
   );
 
   it.skipIf(!bashAvailable)(
-    "leaves the service stopped after a failed v2-to-v9 migration",
+    "leaves the service stopped after a failed v2-to-v10 migration",
     () => {
       const testRoot = fs.mkdtempSync(
         path.join(os.tmpdir(), "superior-ops-migrate-failure-"),
@@ -305,7 +306,7 @@ describe("operations safeguards", () => {
           stop_service() { :; }
           start_service() { : > "$test_root/restarted"; }
           node() { return 1; }
-          if migrate_database_to_v9 2; then
+          if migrate_database_to_v10 2; then
             exit 91
           fi
           [[ ! -e "$test_root/restarted" ]]

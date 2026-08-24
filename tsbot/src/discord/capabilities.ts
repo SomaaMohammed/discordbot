@@ -21,6 +21,9 @@ export const CAPABILITY_DESCRIPTIONS: Readonly<
   "moderation.manage": "Manage moderation cases and member sanctions",
   "reports.review": "Review and decide private member reports",
   "appeals.review": "Review and decide case appeals",
+  "onboarding.configure":
+    "Configure member onboarding, rules, verification, and automatic roles",
+  "roles.configure": "Configure persistent self-service role menus",
 });
 
 export const CAPABILITY_CHOICES = GUILD_CAPABILITIES.map((capability) => ({

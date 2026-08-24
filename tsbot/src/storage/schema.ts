@@ -4,14 +4,31 @@ import {
   isDiscordSnowflake,
   parseGuildSettingsJson,
 } from "../guild-settings.js";
+import { normalizeOnboardingTemplatePair } from "../discord/onboarding-template.js";
+import {
+  normalizeRulesBody,
+  normalizeRulesTitle,
+} from "../discord/verification-components.js";
+import {
+  MAX_ROLE_MENU_SELECTION_KEY_LENGTH,
+  ONBOARDING_RULES_BODY_MAXIMUM,
+  type PostedPanel,
+} from "../types.js";
+import { normalizeOptionalUnicodeEmoji } from "../unicode-emoji.js";
 import {
   LEGACY_GUILD_SETTINGS_VERSION,
   parseLegacyGuildSettingsV2Json,
 } from "./guild-settings-v2.js";
 import { isActiveMetricKey } from "./metric-keys.js";
 import { validateModerationCaseMetadata } from "./moderation-case-metadata.js";
+import { normalizeRoleMenuText } from "./role-menu-normalization.js";
+import {
+  validatePhase4PanelReferences,
+  type Phase4PanelReferenceData,
+} from "./guild-data.js";
 
-export const CURRENT_SCHEMA_VERSION = 9 as const;
+export const CURRENT_SCHEMA_VERSION = 10 as const;
+export const LEGACY_V9_SCHEMA_VERSION = 9 as const;
 export const LEGACY_V8_SCHEMA_VERSION = 8 as const;
 export const LEGACY_V7_SCHEMA_VERSION = 7 as const;
 export const LEGACY_V6_SCHEMA_VERSION = 6 as const;
@@ -57,7 +74,8 @@ export type DatabaseSchemaKind =
   | "legacy-v6"
   | "legacy-v7"
   | "legacy-v8"
-  | "current-v9"
+  | "legacy-v9"
+  | "current-v10"
   | "unknown";
 
 export const SCHEMA_MIGRATIONS_TABLE_SQL = `
@@ -2017,6 +2035,449 @@ const V9_INDEX_SQL: Record<(typeof V9_EXPLICIT_INDEX_NAMES)[number], string> = {
     "CREATE INDEX idx_anti_spam_events_guild_number ON anti_spam_events (guild_id, event_number DESC)",
 };
 
+export const V10_DELEGATED_CAPABILITY_GRANTS_TABLE_SQL = `
+CREATE TABLE delegated_capability_grants (
+  guild_id TEXT NOT NULL,
+  principal_type TEXT NOT NULL CHECK (principal_type = 'role'),
+  principal_id TEXT NOT NULL CHECK (length(principal_id) BETWEEN 17 AND 20 AND principal_id NOT GLOB '*[^0-9]*'),
+  capability TEXT NOT NULL CHECK (capability IN (
+    'panels.manage', 'tickets.configure', 'tickets.manage',
+    'suggestions.configure', 'suggestions.review',
+    'applications.configure', 'applications.review',
+    'moderation.configure', 'moderation.manage', 'reports.review', 'appeals.review',
+    'onboarding.configure', 'roles.configure'
+  )),
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  granted_by TEXT NOT NULL CHECK (length(granted_by) BETWEEN 17 AND 20 AND granted_by NOT GLOB '*[^0-9]*'),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, principal_type, principal_id, capability),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const V10_POSTED_PANELS_TABLE_SQL = `
+CREATE TABLE posted_panels (
+  guild_id TEXT NOT NULL,
+  panel_id TEXT NOT NULL CHECK (length(panel_id) BETWEEN 8 AND 24 AND panel_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  preset TEXT NOT NULL CHECK (preset IN ('help', 'server-info', 'resources', 'tickets', 'suggestions', 'applications', 'safety', 'verification', 'roles')),
+  channel_id TEXT NOT NULL CHECK (length(channel_id) BETWEEN 17 AND 20 AND channel_id NOT GLOB '*[^0-9]*'),
+  message_id TEXT NOT NULL CHECK (length(message_id) BETWEEN 17 AND 20 AND message_id NOT GLOB '*[^0-9]*'),
+  configuration_json TEXT NOT NULL DEFAULT '{}' CHECK (length(CAST(configuration_json AS BLOB)) BETWEEN 2 AND 16000 AND json_valid(configuration_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, panel_id),
+  UNIQUE (guild_id, preset, channel_id),
+  UNIQUE (guild_id, channel_id, message_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const ONBOARDING_RULES_VERSIONS_TABLE_SQL = `
+CREATE TABLE onboarding_rules_versions (
+  guild_id TEXT NOT NULL,
+  rules_version INTEGER NOT NULL CHECK (rules_version BETWEEN 1 AND 2147483647),
+  title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 256),
+  body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND ${ONBOARDING_RULES_BODY_MAXIMUM}),
+  reacceptance_requested INTEGER NOT NULL DEFAULT 0 CHECK (reacceptance_requested IN (0, 1)),
+  created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 17 AND 20 AND created_by NOT GLOB '*[^0-9]*'),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, rules_version),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const ONBOARDING_CONFIGURATIONS_TABLE_SQL = `
+CREATE TABLE onboarding_configurations (
+  guild_id TEXT NOT NULL PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  welcome_channel_id TEXT CHECK (welcome_channel_id IS NULL OR (length(welcome_channel_id) BETWEEN 17 AND 20 AND welcome_channel_id NOT GLOB '*[^0-9]*')),
+  welcome_public_enabled INTEGER NOT NULL DEFAULT 0 CHECK (welcome_public_enabled IN (0, 1)),
+  welcome_dm_enabled INTEGER NOT NULL DEFAULT 0 CHECK (welcome_dm_enabled IN (0, 1)),
+  farewell_channel_id TEXT CHECK (farewell_channel_id IS NULL OR (length(farewell_channel_id) BETWEEN 17 AND 20 AND farewell_channel_id NOT GLOB '*[^0-9]*')),
+  farewell_public_enabled INTEGER NOT NULL DEFAULT 0 CHECK (farewell_public_enabled IN (0, 1)),
+  lifecycle_log_channel_id TEXT CHECK (lifecycle_log_channel_id IS NULL OR (length(lifecycle_log_channel_id) BETWEEN 17 AND 20 AND lifecycle_log_channel_id NOT GLOB '*[^0-9]*')),
+  rules_channel_id TEXT CHECK (rules_channel_id IS NULL OR (length(rules_channel_id) BETWEEN 17 AND 20 AND rules_channel_id NOT GLOB '*[^0-9]*')),
+  verification_enabled INTEGER NOT NULL DEFAULT 0 CHECK (verification_enabled IN (0, 1)),
+  current_rules_version INTEGER CHECK (current_rules_version IS NULL OR current_rules_version BETWEEN 1 AND 2147483647),
+  verified_role_id TEXT CHECK (verified_role_id IS NULL OR (length(verified_role_id) BETWEEN 17 AND 20 AND verified_role_id NOT GLOB '*[^0-9]*')),
+  unverified_role_id TEXT CHECK (unverified_role_id IS NULL OR (length(unverified_role_id) BETWEEN 17 AND 20 AND unverified_role_id NOT GLOB '*[^0-9]*')),
+  human_autoroles_enabled INTEGER NOT NULL DEFAULT 0 CHECK (human_autoroles_enabled IN (0, 1)),
+  bot_autoroles_enabled INTEGER NOT NULL DEFAULT 0 CHECK (bot_autoroles_enabled IN (0, 1)),
+  account_age_alert_hours INTEGER CHECK (account_age_alert_hours IS NULL OR account_age_alert_hours BETWEEN 1 AND 87600),
+  welcome_channel_verified_at TEXT,
+  farewell_channel_verified_at TEXT,
+  lifecycle_log_channel_verified_at TEXT,
+  rules_channel_verified_at TEXT,
+  verification_roles_verified_at TEXT,
+  created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 17 AND 20 AND created_by NOT GLOB '*[^0-9]*'),
+  updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 17 AND 20 AND updated_by NOT GLOB '*[^0-9]*'),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (welcome_channel_verified_at IS NULL OR welcome_channel_id IS NOT NULL),
+  CHECK (farewell_channel_verified_at IS NULL OR farewell_channel_id IS NOT NULL),
+  CHECK (lifecycle_log_channel_verified_at IS NULL OR lifecycle_log_channel_id IS NOT NULL),
+  CHECK (rules_channel_verified_at IS NULL OR rules_channel_id IS NOT NULL),
+  CHECK (verification_roles_verified_at IS NULL OR verified_role_id IS NOT NULL),
+  CHECK (welcome_public_enabled = 0 OR (welcome_channel_id IS NOT NULL AND welcome_channel_verified_at IS NOT NULL)),
+  CHECK (farewell_public_enabled = 0 OR (farewell_channel_id IS NOT NULL AND farewell_channel_verified_at IS NOT NULL)),
+  CHECK (verification_enabled = 0 OR (current_rules_version IS NOT NULL AND verified_role_id IS NOT NULL AND verification_roles_verified_at IS NOT NULL)),
+  CHECK (verified_role_id IS NULL OR verified_role_id <> guild_id),
+  CHECK (unverified_role_id IS NULL OR unverified_role_id <> guild_id),
+  CHECK (verified_role_id IS NULL OR unverified_role_id IS NULL OR verified_role_id <> unverified_role_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, current_rules_version) REFERENCES onboarding_rules_versions(guild_id, rules_version)
+)
+`;
+
+export const ONBOARDING_MESSAGE_TEMPLATES_TABLE_SQL = `
+CREATE TABLE onboarding_message_templates (
+  guild_id TEXT NOT NULL,
+  template_kind TEXT NOT NULL CHECK (template_kind IN ('welcome', 'farewell')),
+  title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 256),
+  body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 4096),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, template_kind),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const ONBOARDING_AUTOROLES_TABLE_SQL = `
+CREATE TABLE onboarding_autoroles (
+  guild_id TEXT NOT NULL,
+  audience TEXT NOT NULL CHECK (audience IN ('human', 'bot')),
+  role_id TEXT NOT NULL CHECK (length(role_id) BETWEEN 17 AND 20 AND role_id NOT GLOB '*[^0-9]*'),
+  sort_order INTEGER NOT NULL CHECK (sort_order BETWEEN 0 AND 9),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  bindings_verified_at TEXT,
+  created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 17 AND 20 AND created_by NOT GLOB '*[^0-9]*'),
+  updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 17 AND 20 AND updated_by NOT GLOB '*[^0-9]*'),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, audience, role_id),
+  UNIQUE (guild_id, role_id),
+  UNIQUE (guild_id, audience, sort_order),
+  CHECK (role_id <> guild_id),
+  CHECK ((enabled = 1) = (bindings_verified_at IS NOT NULL)),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const MEMBER_ONBOARDING_STATES_TABLE_SQL = `
+CREATE TABLE member_onboarding_states (
+  guild_id TEXT NOT NULL,
+  member_id TEXT NOT NULL CHECK (length(member_id) BETWEEN 17 AND 20 AND member_id NOT GLOB '*[^0-9]*'),
+  member_kind TEXT NOT NULL CHECK (member_kind IN ('human', 'bot')),
+  screening_state TEXT NOT NULL CHECK (screening_state IN ('pending', 'complete', 'unknown')),
+  lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('pending-screening', 'pending', 'active', 'departed')),
+  joined_at TEXT NOT NULL,
+  account_created_at TEXT NOT NULL,
+  screening_completed_at TEXT,
+  departed_at TEXT,
+  last_processed_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, member_id),
+  CHECK ((screening_state = 'pending') = (lifecycle_state = 'pending-screening')),
+  CHECK ((lifecycle_state = 'departed') = (departed_at IS NOT NULL)),
+  CHECK (screening_completed_at IS NULL OR screening_state = 'complete'),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const MEMBER_RULE_ACCEPTANCES_TABLE_SQL = `
+CREATE TABLE member_rule_acceptances (
+  guild_id TEXT NOT NULL,
+  member_id TEXT NOT NULL CHECK (length(member_id) BETWEEN 17 AND 20 AND member_id NOT GLOB '*[^0-9]*'),
+  rules_version INTEGER NOT NULL CHECK (rules_version BETWEEN 1 AND 2147483647),
+  accepted_at TEXT NOT NULL,
+  panel_post_id TEXT CHECK (panel_post_id IS NULL OR (length(panel_post_id) BETWEEN 8 AND 24 AND panel_post_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+  PRIMARY KEY (guild_id, member_id, rules_version),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, rules_version) REFERENCES onboarding_rules_versions(guild_id, rules_version)
+)
+`;
+
+export const ONBOARDING_DELIVERY_RECORDS_TABLE_SQL = `
+CREATE TABLE onboarding_delivery_records (
+  guild_id TEXT NOT NULL,
+  delivery_id TEXT NOT NULL CHECK (length(delivery_id) BETWEEN 8 AND 24 AND delivery_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  member_id TEXT NOT NULL CHECK (length(member_id) BETWEEN 17 AND 20 AND member_id NOT GLOB '*[^0-9]*'),
+  join_instance TEXT NOT NULL CHECK (length(join_instance) BETWEEN 1 AND 100 AND join_instance NOT GLOB '*[^A-Za-z0-9_.:-]*'),
+  delivery_kind TEXT NOT NULL CHECK (delivery_kind IN ('welcome-public', 'welcome-dm', 'farewell-public', 'lifecycle-log')),
+  delivery_state TEXT NOT NULL CHECK (delivery_state IN ('reserved', 'delivered', 'failed', 'missing', 'skipped')),
+  channel_id TEXT CHECK (channel_id IS NULL OR (length(channel_id) BETWEEN 17 AND 20 AND channel_id NOT GLOB '*[^0-9]*')),
+  message_id TEXT CHECK (message_id IS NULL OR (length(message_id) BETWEEN 17 AND 20 AND message_id NOT GLOB '*[^0-9]*')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 1000),
+  failure_code TEXT CHECK (failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 100),
+  claim_id TEXT CHECK (claim_id IS NULL OR (length(claim_id) BETWEEN 8 AND 24 AND claim_id NOT GLOB '*[^A-Za-z0-9_-]*')),
+  claim_expires_at TEXT,
+  delivered_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, delivery_id),
+  UNIQUE (guild_id, member_id, join_instance, delivery_kind),
+  CHECK ((claim_id IS NULL) = (claim_expires_at IS NULL)),
+  CHECK ((delivery_state = 'reserved') = (claim_id IS NOT NULL)),
+  CHECK (delivery_state = 'skipped' OR attempt_count >= 1),
+  CHECK ((message_id IS NULL) = (delivered_at IS NULL)),
+  CHECK (message_id IS NULL OR channel_id IS NOT NULL),
+  CHECK ((delivery_state = 'delivered') = (message_id IS NOT NULL)),
+  CHECK (delivery_state NOT IN ('failed', 'missing') OR failure_code IS NOT NULL),
+  CHECK (delivery_state NOT IN ('reserved', 'delivered') OR failure_code IS NULL),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const ONBOARDING_ROLE_OPERATIONS_TABLE_SQL = `
+CREATE TABLE onboarding_role_operations (
+  guild_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL CHECK (length(operation_id) BETWEEN 8 AND 24 AND operation_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  member_id TEXT NOT NULL CHECK (length(member_id) BETWEEN 17 AND 20 AND member_id NOT GLOB '*[^0-9]*'),
+  role_id TEXT NOT NULL CHECK (length(role_id) BETWEEN 17 AND 20 AND role_id NOT GLOB '*[^0-9]*'),
+  operation_kind TEXT NOT NULL CHECK (operation_kind IN ('verified-add', 'unverified-add', 'unverified-remove', 'human-autorole-add', 'bot-autorole-add')),
+  idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 100 AND idempotency_key NOT GLOB '*[^A-Za-z0-9_.:-]*'),
+  operation_state TEXT NOT NULL CHECK (operation_state IN ('reserved', 'completed', 'partial', 'failed', 'no-change')),
+  failure_code TEXT CHECK (failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 100),
+  attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count BETWEEN 1 AND 1000),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  resolved_at TEXT,
+  resolved_by_operation_id TEXT,
+  PRIMARY KEY (guild_id, operation_id),
+  UNIQUE (guild_id, member_id, role_id, operation_kind, idempotency_key),
+  CHECK (role_id <> guild_id),
+  CHECK ((operation_state = 'reserved') = (completed_at IS NULL)),
+  CHECK ((operation_state IN ('failed', 'partial')) = (failure_code IS NOT NULL)),
+  CHECK ((resolved_at IS NULL) = (resolved_by_operation_id IS NULL)),
+  CHECK (resolved_at IS NULL OR operation_state IN ('reserved', 'partial', 'failed')),
+  CHECK (resolved_at IS NULL OR updated_at = resolved_at),
+  CHECK (resolved_by_operation_id IS NULL OR resolved_by_operation_id <> operation_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, resolved_by_operation_id)
+    REFERENCES onboarding_role_operations(guild_id, operation_id)
+)
+`;
+
+export const ONBOARDING_AUDIT_EVENTS_TABLE_SQL = `
+CREATE TABLE onboarding_audit_events (
+  guild_id TEXT NOT NULL,
+  event_id TEXT NOT NULL CHECK (length(event_id) BETWEEN 8 AND 24 AND event_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  event_number INTEGER NOT NULL CHECK (event_number BETWEEN 1 AND 2147483647),
+  event_type TEXT NOT NULL CHECK (length(event_type) BETWEEN 1 AND 100),
+  member_id TEXT CHECK (member_id IS NULL OR (length(member_id) BETWEEN 17 AND 20 AND member_id NOT GLOB '*[^0-9]*')),
+  actor_id TEXT CHECK (actor_id IS NULL OR (length(actor_id) BETWEEN 17 AND 20 AND actor_id NOT GLOB '*[^0-9]*')),
+  rules_version INTEGER CHECK (rules_version IS NULL OR rules_version BETWEEN 1 AND 2147483647),
+  outcome TEXT NOT NULL CHECK (length(outcome) BETWEEN 1 AND 100),
+  details_json TEXT NOT NULL DEFAULT '{}' CHECK (length(CAST(details_json AS BLOB)) BETWEEN 2 AND 4000 AND json_valid(details_json)),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, event_id),
+  UNIQUE (guild_id, event_number),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, rules_version) REFERENCES onboarding_rules_versions(guild_id, rules_version)
+)
+`;
+
+export const ROLE_MENUS_TABLE_SQL = `
+CREATE TABLE role_menus (
+  guild_id TEXT NOT NULL,
+  menu_id TEXT NOT NULL CHECK (length(menu_id) BETWEEN 8 AND 24 AND menu_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  slug TEXT NOT NULL CHECK (length(slug) BETWEEN 2 AND 32 AND slug NOT GLOB '*[^a-z0-9-]*' AND slug NOT GLOB '-*' AND slug NOT GLOB '*-'),
+  title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 256),
+  description TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 1000),
+  sort_order INTEGER NOT NULL CHECK (sort_order BETWEEN 0 AND 24),
+  menu_state TEXT NOT NULL DEFAULT 'disabled' CHECK (menu_state IN ('disabled', 'enabled', 'archived')),
+  selection_mode TEXT NOT NULL CHECK (selection_mode IN ('toggle', 'exclusive', 'limited')),
+  min_selections INTEGER NOT NULL DEFAULT 0 CHECK (min_selections BETWEEN 0 AND 25),
+  max_selections INTEGER NOT NULL CHECK (max_selections BETWEEN 1 AND 25),
+  required_role_id TEXT CHECK (required_role_id IS NULL OR (length(required_role_id) BETWEEN 17 AND 20 AND required_role_id NOT GLOB '*[^0-9]*')),
+  definition_version INTEGER NOT NULL DEFAULT 1 CHECK (definition_version BETWEEN 1 AND 2147483647),
+  bindings_verified_at TEXT,
+  created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 17 AND 20 AND created_by NOT GLOB '*[^0-9]*'),
+  updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 17 AND 20 AND updated_by NOT GLOB '*[^0-9]*'),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, menu_id),
+  UNIQUE (guild_id, slug),
+  UNIQUE (guild_id, sort_order),
+  CHECK (min_selections <= max_selections),
+  CHECK (selection_mode <> 'exclusive' OR max_selections = 1),
+  CHECK (required_role_id IS NULL OR required_role_id <> guild_id),
+  CHECK ((menu_state = 'enabled') = (bindings_verified_at IS NOT NULL)),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const ROLE_MENU_OPTIONS_TABLE_SQL = `
+CREATE TABLE role_menu_options (
+  guild_id TEXT NOT NULL,
+  menu_id TEXT NOT NULL,
+  option_id TEXT NOT NULL CHECK (length(option_id) BETWEEN 8 AND 24 AND option_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  role_id TEXT NOT NULL CHECK (length(role_id) BETWEEN 17 AND 20 AND role_id NOT GLOB '*[^0-9]*'),
+  label TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 100),
+  description TEXT CHECK (description IS NULL OR length(description) BETWEEN 1 AND 100),
+  emoji TEXT CHECK (emoji IS NULL OR length(emoji) BETWEEN 1 AND 16),
+  sort_order INTEGER NOT NULL CHECK (sort_order BETWEEN 0 AND 24),
+  created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 17 AND 20 AND created_by NOT GLOB '*[^0-9]*'),
+  updated_by TEXT NOT NULL CHECK (length(updated_by) BETWEEN 17 AND 20 AND updated_by NOT GLOB '*[^0-9]*'),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, menu_id, option_id),
+  UNIQUE (guild_id, menu_id, role_id),
+  UNIQUE (guild_id, menu_id, sort_order),
+  CHECK (role_id <> guild_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, menu_id) REFERENCES role_menus(guild_id, menu_id) ON DELETE CASCADE
+)
+`;
+
+export const ROLE_MENU_POSTS_TABLE_SQL = `
+CREATE TABLE role_menu_posts (
+  guild_id TEXT NOT NULL,
+  post_id TEXT NOT NULL CHECK (length(post_id) BETWEEN 8 AND 24 AND post_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  menu_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL CHECK (length(channel_id) BETWEEN 17 AND 20 AND channel_id NOT GLOB '*[^0-9]*'),
+  message_id TEXT NOT NULL CHECK (length(message_id) BETWEEN 17 AND 20 AND message_id NOT GLOB '*[^0-9]*'),
+  definition_version INTEGER NOT NULL CHECK (definition_version BETWEEN 1 AND 2147483647),
+  bindings_verified_at TEXT,
+  post_state TEXT NOT NULL CHECK (post_state IN ('active', 'missing', 'stale')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, post_id),
+  UNIQUE (guild_id, channel_id, message_id),
+  CHECK ((post_state = 'active') = (bindings_verified_at IS NOT NULL)),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, menu_id) REFERENCES role_menus(guild_id, menu_id) ON DELETE CASCADE
+)
+`;
+
+export const ROLE_MENU_OPERATIONS_TABLE_SQL = `
+CREATE TABLE role_menu_operations (
+  guild_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL CHECK (length(operation_id) BETWEEN 8 AND 24 AND operation_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  interaction_id TEXT NOT NULL CHECK (length(interaction_id) BETWEEN 17 AND 20 AND interaction_id NOT GLOB '*[^0-9]*'),
+  menu_id TEXT NOT NULL,
+  member_id TEXT NOT NULL CHECK (length(member_id) BETWEEN 17 AND 20 AND member_id NOT GLOB '*[^0-9]*'),
+  definition_version INTEGER NOT NULL CHECK (definition_version BETWEEN 1 AND 2147483647),
+  selection_key TEXT NOT NULL CHECK (length(selection_key) BETWEEN 1 AND ${MAX_ROLE_MENU_SELECTION_KEY_LENGTH}),
+  operation_state TEXT NOT NULL CHECK (operation_state IN ('reserved', 'completed', 'partial', 'failed', 'no-change')),
+  failure_code TEXT CHECK (failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 100),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  PRIMARY KEY (guild_id, operation_id),
+  UNIQUE (guild_id, interaction_id),
+  CHECK ((operation_state = 'reserved') = (completed_at IS NULL)),
+  CHECK (operation_state NOT IN ('failed', 'partial') OR failure_code IS NOT NULL),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, menu_id) REFERENCES role_menus(guild_id, menu_id) ON DELETE CASCADE
+)
+`;
+
+export const ROLE_MENU_OPERATION_ITEMS_TABLE_SQL = `
+CREATE TABLE role_menu_operation_items (
+  guild_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  role_id TEXT NOT NULL CHECK (length(role_id) BETWEEN 17 AND 20 AND role_id NOT GLOB '*[^0-9]*'),
+  role_action TEXT NOT NULL CHECK (role_action IN ('add', 'remove')),
+  item_state TEXT NOT NULL CHECK (item_state IN ('planned', 'completed', 'failed', 'skipped')),
+  failure_code TEXT CHECK (failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 100),
+  PRIMARY KEY (guild_id, operation_id, role_id),
+  CHECK (role_id <> guild_id),
+  CHECK (item_state <> 'failed' OR failure_code IS NOT NULL),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, operation_id) REFERENCES role_menu_operations(guild_id, operation_id) ON DELETE CASCADE
+)
+`;
+
+export const V10_TABLE_NAMES = [
+  ...V9_TABLE_NAMES,
+  "onboarding_rules_versions",
+  "onboarding_configurations",
+  "onboarding_message_templates",
+  "onboarding_autoroles",
+  "member_onboarding_states",
+  "member_rule_acceptances",
+  "onboarding_delivery_records",
+  "onboarding_role_operations",
+  "onboarding_audit_events",
+  "role_menus",
+  "role_menu_options",
+  "role_menu_posts",
+  "role_menu_operations",
+  "role_menu_operation_items",
+] as const;
+
+export const V10_EXPLICIT_INDEX_NAMES = [
+  ...V9_EXPLICIT_INDEX_NAMES,
+  "idx_onboarding_rules_guild_version",
+  "idx_onboarding_autoroles_guild_audience",
+  "idx_member_onboarding_guild_state",
+  "idx_member_acceptances_guild_member",
+  "idx_onboarding_deliveries_guild_state",
+  "idx_onboarding_role_operations_member",
+  "idx_onboarding_audit_guild_number",
+  "idx_onboarding_audit_member_number",
+  "idx_role_menus_guild_state",
+  "idx_role_menu_options_order",
+  "idx_role_menu_posts_menu_state",
+  "idx_role_menu_operations_member",
+  "idx_role_menu_operation_items_state",
+] as const;
+
+const V10_TABLE_SQL: Record<(typeof V10_TABLE_NAMES)[number], string> = {
+  ...V9_TABLE_SQL,
+  delegated_capability_grants: V10_DELEGATED_CAPABILITY_GRANTS_TABLE_SQL,
+  posted_panels: V10_POSTED_PANELS_TABLE_SQL,
+  onboarding_rules_versions: ONBOARDING_RULES_VERSIONS_TABLE_SQL,
+  onboarding_configurations: ONBOARDING_CONFIGURATIONS_TABLE_SQL,
+  onboarding_message_templates: ONBOARDING_MESSAGE_TEMPLATES_TABLE_SQL,
+  onboarding_autoroles: ONBOARDING_AUTOROLES_TABLE_SQL,
+  member_onboarding_states: MEMBER_ONBOARDING_STATES_TABLE_SQL,
+  member_rule_acceptances: MEMBER_RULE_ACCEPTANCES_TABLE_SQL,
+  onboarding_delivery_records: ONBOARDING_DELIVERY_RECORDS_TABLE_SQL,
+  onboarding_role_operations: ONBOARDING_ROLE_OPERATIONS_TABLE_SQL,
+  onboarding_audit_events: ONBOARDING_AUDIT_EVENTS_TABLE_SQL,
+  role_menus: ROLE_MENUS_TABLE_SQL,
+  role_menu_options: ROLE_MENU_OPTIONS_TABLE_SQL,
+  role_menu_posts: ROLE_MENU_POSTS_TABLE_SQL,
+  role_menu_operations: ROLE_MENU_OPERATIONS_TABLE_SQL,
+  role_menu_operation_items: ROLE_MENU_OPERATION_ITEMS_TABLE_SQL,
+};
+
+const V10_INDEX_SQL: Record<(typeof V10_EXPLICIT_INDEX_NAMES)[number], string> =
+  {
+    ...V9_INDEX_SQL,
+    idx_onboarding_rules_guild_version:
+      "CREATE INDEX idx_onboarding_rules_guild_version ON onboarding_rules_versions (guild_id, rules_version DESC)",
+    idx_onboarding_autoroles_guild_audience:
+      "CREATE INDEX idx_onboarding_autoroles_guild_audience ON onboarding_autoroles (guild_id, audience, enabled, sort_order)",
+    idx_member_onboarding_guild_state:
+      "CREATE INDEX idx_member_onboarding_guild_state ON member_onboarding_states (guild_id, lifecycle_state, updated_at DESC)",
+    idx_member_acceptances_guild_member:
+      "CREATE INDEX idx_member_acceptances_guild_member ON member_rule_acceptances (guild_id, member_id, rules_version DESC)",
+    idx_onboarding_deliveries_guild_state:
+      "CREATE INDEX idx_onboarding_deliveries_guild_state ON onboarding_delivery_records (guild_id, delivery_state, updated_at)",
+    idx_onboarding_role_operations_member:
+      "CREATE INDEX idx_onboarding_role_operations_member ON onboarding_role_operations (guild_id, member_id, resolved_at, operation_state, updated_at DESC)",
+    idx_onboarding_audit_guild_number:
+      "CREATE INDEX idx_onboarding_audit_guild_number ON onboarding_audit_events (guild_id, event_number DESC)",
+    idx_onboarding_audit_member_number:
+      "CREATE INDEX idx_onboarding_audit_member_number ON onboarding_audit_events (guild_id, member_id, event_number DESC)",
+    idx_role_menus_guild_state:
+      "CREATE INDEX idx_role_menus_guild_state ON role_menus (guild_id, menu_state, sort_order)",
+    idx_role_menu_options_order:
+      "CREATE INDEX idx_role_menu_options_order ON role_menu_options (guild_id, menu_id, sort_order)",
+    idx_role_menu_posts_menu_state:
+      "CREATE INDEX idx_role_menu_posts_menu_state ON role_menu_posts (guild_id, menu_id, post_state, updated_at DESC)",
+    idx_role_menu_operations_member:
+      "CREATE INDEX idx_role_menu_operations_member ON role_menu_operations (guild_id, menu_id, member_id, created_at DESC)",
+    idx_role_menu_operation_items_state:
+      "CREATE INDEX idx_role_menu_operation_items_state ON role_menu_operation_items (guild_id, operation_id, item_state)",
+  };
+
 export const V1_TABLE_NAMES = [
   "kv",
   "posts",
@@ -2368,6 +2829,38 @@ export function createV9Objects(db: Database.Database): void {
   for (const index of V9_EXPLICIT_INDEX_NAMES) db.exec(V9_INDEX_SQL[index]);
 }
 
+/** Adds schema-v10 objects after the two enum-bound v9 tables are rebuilt. */
+export function createV10OperationalObjects(db: Database.Database): void {
+  for (const table of V10_TABLE_NAMES) {
+    if (!(V9_TABLE_NAMES as readonly string[]).includes(table)) {
+      db.exec(V10_TABLE_SQL[table]);
+    }
+  }
+  for (const index of V10_EXPLICIT_INDEX_NAMES) {
+    if (!(V9_EXPLICIT_INDEX_NAMES as readonly string[]).includes(index)) {
+      db.exec(V10_INDEX_SQL[index]);
+    }
+  }
+}
+
+/** Recreates the v9 enum-bound capability and panel tables for schema v10. */
+export function createV10ReplacementObjects(db: Database.Database): void {
+  db.exec(V10_DELEGATED_CAPABILITY_GRANTS_TABLE_SQL);
+  db.exec(V10_POSTED_PANELS_TABLE_SQL);
+  for (const index of [
+    "idx_capability_grants_guild_capability",
+    "idx_capability_grants_guild_principal",
+    "idx_posted_panels_guild_preset",
+  ] as const) {
+    db.exec(V10_INDEX_SQL[index]);
+  }
+}
+
+export function createV10Objects(db: Database.Database): void {
+  for (const table of V10_TABLE_NAMES) db.exec(V10_TABLE_SQL[table]);
+  for (const index of V10_EXPLICIT_INDEX_NAMES) db.exec(V10_INDEX_SQL[index]);
+}
+
 /** Creates the v8 settings table after the frozen v7 table was renamed. */
 export function createV8GuildSettingsObject(db: Database.Database): void {
   db.exec(V8_GUILD_SETTINGS_TABLE_SQL);
@@ -2416,6 +2909,15 @@ export function recordCurrentSchemaVersion(
   db.prepare(
     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
   ).run(CURRENT_SCHEMA_VERSION, appliedAt);
+}
+
+export function recordV9SchemaVersion(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  db.prepare(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+  ).run(LEGACY_V9_SCHEMA_VERSION, appliedAt);
 }
 
 export function recordV8SchemaVersion(
@@ -2525,8 +3027,23 @@ export function initializeV9Schema(
 ): void {
   const initialize = db.transaction(() => {
     createV9Objects(db);
-    recordCurrentSchemaVersion(db, appliedAt);
+    recordV9SchemaVersion(db, appliedAt);
     const issues = validateV9Schema(db);
+    if (issues.length > 0) {
+      throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
+    }
+  });
+  initialize.immediate();
+}
+
+export function initializeV10Schema(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  const initialize = db.transaction(() => {
+    createV10Objects(db);
+    recordCurrentSchemaVersion(db, appliedAt);
+    const issues = validateV10Schema(db);
     if (issues.length > 0) {
       throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
     }
@@ -2554,8 +3071,11 @@ export function detectDatabaseSchema(
     .map((row) => row.name)
     .sort();
 
+  if (sameStrings(tables, [...V10_TABLE_NAMES].sort())) {
+    return validateV10Schema(db).length === 0 ? "current-v10" : "unknown";
+  }
   if (sameStrings(tables, [...V9_TABLE_NAMES].sort())) {
-    return validateV9Schema(db).length === 0 ? "current-v9" : "unknown";
+    return validateV9Schema(db).length === 0 ? "legacy-v9" : "unknown";
   }
 
   if (sameStrings(tables, [...V8_TABLE_NAMES].sort())) {
@@ -3030,12 +3550,12 @@ export function validateV9Schema(db: Database.Database): string[] {
   const numbers = versions.map((row) => row.version);
   const valid =
     numbers.length >= 1 &&
-    numbers.at(-1) === CURRENT_SCHEMA_VERSION &&
+    numbers.at(-1) === LEGACY_V9_SCHEMA_VERSION &&
     numbers.every(
       (version, index) =>
         Number.isInteger(version) &&
         version >= 3 &&
-        version <= CURRENT_SCHEMA_VERSION &&
+        version <= LEGACY_V9_SCHEMA_VERSION &&
         (index === 0 || version === numbers[index - 1]! + 1),
     ) &&
     versions.every((row) => isValidTimestamp(row.applied_at));
@@ -3050,6 +3570,49 @@ export function validateV9Schema(db: Database.Database): string[] {
   validateV6Data(db, issues);
   validateV7Data(db, issues);
   validateV9Data(db, issues);
+  validateDatabaseHealth(db, issues);
+  return issues;
+}
+
+export function validateV10Schema(db: Database.Database): string[] {
+  const issues = validateExactObjects(
+    db,
+    [...V10_TABLE_NAMES],
+    [...V10_EXPLICIT_INDEX_NAMES],
+  );
+  if (issues.length > 0) return issues;
+
+  validateSqlDefinitions(db, V10_TABLE_SQL, "table", issues);
+  validateSqlDefinitions(db, V10_INDEX_SQL, "index", issues);
+  const versions = db
+    .prepare(
+      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
+    )
+    .all() as Array<{ version: number; applied_at: string }>;
+  const numbers = versions.map((row) => row.version);
+  const valid =
+    numbers.length >= 1 &&
+    numbers.at(-1) === CURRENT_SCHEMA_VERSION &&
+    numbers.every(
+      (version, index) =>
+        Number.isInteger(version) &&
+        version >= 3 &&
+        version <= CURRENT_SCHEMA_VERSION &&
+        (index === 0 || version === numbers[index - 1]! + 1),
+    ) &&
+    versions.every((row) => isValidTimestamp(row.applied_at));
+  if (!valid) {
+    issues.push(
+      "schema_migrations must contain version 10, optionally following a complete supported sequence ending at version 9",
+    );
+  }
+
+  validateV8CoreData(db, issues);
+  validateV5Data(db, issues);
+  validateV6Data(db, issues);
+  validateV7Data(db, issues);
+  validateV9Data(db, issues);
+  validateV10Data(db, issues);
   validateDatabaseHealth(db, issues);
   return issues;
 }
@@ -4428,6 +4991,795 @@ function validateV9Data(db: Database.Database, issues: string[]): void {
   }
 }
 
+function validateV10Data(db: Database.Database, issues: string[]): void {
+  validatePhase4SemanticText(db, issues);
+  validateStoredPhase4PanelReferences(db, issues);
+  const textColumns: ReadonlyArray<
+    readonly [string, readonly string[], readonly string[]]
+  > = [
+    [
+      "onboarding_rules_versions",
+      ["guild_id", "title", "body", "created_by", "created_at"],
+      [],
+    ],
+    [
+      "onboarding_configurations",
+      ["guild_id", "created_by", "updated_by", "created_at", "updated_at"],
+      [
+        "welcome_channel_id",
+        "farewell_channel_id",
+        "lifecycle_log_channel_id",
+        "rules_channel_id",
+        "verified_role_id",
+        "unverified_role_id",
+        "welcome_channel_verified_at",
+        "farewell_channel_verified_at",
+        "lifecycle_log_channel_verified_at",
+        "rules_channel_verified_at",
+        "verification_roles_verified_at",
+      ],
+    ],
+    [
+      "onboarding_message_templates",
+      [
+        "guild_id",
+        "template_kind",
+        "title",
+        "body",
+        "created_at",
+        "updated_at",
+      ],
+      [],
+    ],
+    [
+      "onboarding_autoroles",
+      [
+        "guild_id",
+        "audience",
+        "role_id",
+        "created_by",
+        "updated_by",
+        "created_at",
+        "updated_at",
+      ],
+      ["bindings_verified_at"],
+    ],
+    [
+      "member_onboarding_states",
+      [
+        "guild_id",
+        "member_id",
+        "member_kind",
+        "screening_state",
+        "lifecycle_state",
+        "joined_at",
+        "account_created_at",
+        "last_processed_at",
+        "created_at",
+        "updated_at",
+      ],
+      ["screening_completed_at", "departed_at"],
+    ],
+    [
+      "member_rule_acceptances",
+      ["guild_id", "member_id", "accepted_at"],
+      ["panel_post_id"],
+    ],
+    [
+      "onboarding_delivery_records",
+      [
+        "guild_id",
+        "delivery_id",
+        "member_id",
+        "join_instance",
+        "delivery_kind",
+        "delivery_state",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "channel_id",
+        "message_id",
+        "failure_code",
+        "claim_id",
+        "claim_expires_at",
+        "delivered_at",
+      ],
+    ],
+    [
+      "onboarding_role_operations",
+      [
+        "guild_id",
+        "operation_id",
+        "member_id",
+        "role_id",
+        "operation_kind",
+        "idempotency_key",
+        "operation_state",
+        "created_at",
+        "updated_at",
+      ],
+      [
+        "failure_code",
+        "completed_at",
+        "resolved_at",
+        "resolved_by_operation_id",
+      ],
+    ],
+    [
+      "onboarding_audit_events",
+      [
+        "guild_id",
+        "event_id",
+        "event_type",
+        "outcome",
+        "details_json",
+        "created_at",
+      ],
+      ["member_id", "actor_id"],
+    ],
+    [
+      "role_menus",
+      [
+        "guild_id",
+        "menu_id",
+        "slug",
+        "title",
+        "description",
+        "menu_state",
+        "selection_mode",
+        "created_by",
+        "updated_by",
+        "created_at",
+        "updated_at",
+      ],
+      ["required_role_id", "bindings_verified_at"],
+    ],
+    [
+      "role_menu_options",
+      [
+        "guild_id",
+        "menu_id",
+        "option_id",
+        "role_id",
+        "label",
+        "created_by",
+        "updated_by",
+        "created_at",
+        "updated_at",
+      ],
+      ["description", "emoji"],
+    ],
+    [
+      "role_menu_posts",
+      [
+        "guild_id",
+        "post_id",
+        "menu_id",
+        "channel_id",
+        "message_id",
+        "post_state",
+        "created_at",
+        "updated_at",
+      ],
+      ["bindings_verified_at"],
+    ],
+    [
+      "role_menu_operations",
+      [
+        "guild_id",
+        "operation_id",
+        "interaction_id",
+        "menu_id",
+        "member_id",
+        "selection_key",
+        "operation_state",
+        "created_at",
+        "updated_at",
+      ],
+      ["failure_code", "completed_at"],
+    ],
+    [
+      "role_menu_operation_items",
+      ["guild_id", "operation_id", "role_id", "role_action", "item_state"],
+      ["failure_code"],
+    ],
+  ];
+  for (const [table, required, nullable] of textColumns) {
+    validateTextColumnTypes(db, table, required, nullable, issues);
+  }
+
+  const integerColumns: ReadonlyArray<
+    readonly [string, readonly string[], readonly string[]]
+  > = [
+    [
+      "onboarding_rules_versions",
+      ["rules_version", "reacceptance_requested"],
+      [],
+    ],
+    [
+      "onboarding_configurations",
+      [
+        "enabled",
+        "welcome_public_enabled",
+        "welcome_dm_enabled",
+        "farewell_public_enabled",
+        "verification_enabled",
+        "human_autoroles_enabled",
+        "bot_autoroles_enabled",
+      ],
+      ["current_rules_version", "account_age_alert_hours"],
+    ],
+    ["onboarding_autoroles", ["sort_order", "enabled"], []],
+    ["member_rule_acceptances", ["rules_version"], []],
+    ["onboarding_delivery_records", ["attempt_count"], []],
+    ["onboarding_role_operations", ["attempt_count"], []],
+    ["onboarding_audit_events", ["event_number"], ["rules_version"]],
+    [
+      "role_menus",
+      ["sort_order", "min_selections", "max_selections", "definition_version"],
+      [],
+    ],
+    ["role_menu_options", ["sort_order"], []],
+    ["role_menu_posts", ["definition_version"], []],
+    ["role_menu_operations", ["definition_version"], []],
+  ];
+  for (const [table, required, nullable] of integerColumns) {
+    validateIntegerColumnTypes(db, table, required, nullable, issues);
+  }
+
+  for (const [table, required, nullable] of [
+    ["onboarding_rules_versions", ["created_at"], []],
+    [
+      "onboarding_configurations",
+      ["created_at", "updated_at"],
+      [
+        "welcome_channel_verified_at",
+        "farewell_channel_verified_at",
+        "lifecycle_log_channel_verified_at",
+        "rules_channel_verified_at",
+        "verification_roles_verified_at",
+      ],
+    ],
+    ["onboarding_message_templates", ["created_at", "updated_at"], []],
+    [
+      "onboarding_autoroles",
+      ["created_at", "updated_at"],
+      ["bindings_verified_at"],
+    ],
+    [
+      "member_onboarding_states",
+      [
+        "joined_at",
+        "account_created_at",
+        "last_processed_at",
+        "created_at",
+        "updated_at",
+      ],
+      ["screening_completed_at", "departed_at"],
+    ],
+    ["member_rule_acceptances", ["accepted_at"], []],
+    [
+      "onboarding_delivery_records",
+      ["created_at", "updated_at"],
+      ["claim_expires_at", "delivered_at"],
+    ],
+    [
+      "onboarding_role_operations",
+      ["created_at", "updated_at"],
+      ["completed_at", "resolved_at"],
+    ],
+    ["onboarding_audit_events", ["created_at"], []],
+    ["role_menus", ["created_at", "updated_at"], ["bindings_verified_at"]],
+    ["role_menu_options", ["created_at", "updated_at"], []],
+    ["role_menu_posts", ["created_at", "updated_at"], ["bindings_verified_at"]],
+    ["role_menu_operations", ["created_at", "updated_at"], ["completed_at"]],
+  ] as const) {
+    validateTimestampColumns(db, table, required, nullable, issues);
+  }
+
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM onboarding_configurations AS configuration
+     WHERE (SELECT COUNT(*) FROM onboarding_message_templates AS template
+            WHERE template.guild_id = configuration.guild_id) <> 2
+     LIMIT 1`,
+    "every onboarding configuration must have exactly two message templates",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM onboarding_message_templates AS template
+     WHERE NOT EXISTS (
+       SELECT 1 FROM onboarding_configurations AS configuration
+       WHERE configuration.guild_id = template.guild_id
+     ) LIMIT 1`,
+    "onboarding message templates must reference a configuration",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM onboarding_configurations
+     WHERE verification_roles_verified_at IS NOT NULL
+       AND verified_role_id IS NULL
+     LIMIT 1`,
+    "onboarding_configurations contains a verification checkpoint without a role",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM onboarding_autoroles
+     WHERE enabled <> (bindings_verified_at IS NOT NULL)
+     LIMIT 1`,
+    "onboarding_autoroles contains an inconsistent verified binding",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1
+     FROM onboarding_autoroles AS autorole
+     JOIN onboarding_configurations AS configuration
+       ON configuration.guild_id = autorole.guild_id
+     WHERE autorole.role_id = configuration.verified_role_id OR
+           autorole.role_id = configuration.unverified_role_id
+     LIMIT 1`,
+    "onboarding verification roles overlap automatic roles",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM onboarding_delivery_records
+     WHERE
+       ((claim_id IS NULL) <> (claim_expires_at IS NULL)) OR
+       ((delivery_state = 'reserved') <> (claim_id IS NOT NULL)) OR
+       ((message_id IS NULL) <> (delivered_at IS NULL)) OR
+       (message_id IS NOT NULL AND channel_id IS NULL) OR
+       ((delivery_state = 'delivered') <> (message_id IS NOT NULL)) OR
+       (delivery_state IN ('failed', 'missing') AND failure_code IS NULL) OR
+       (delivery_state IN ('reserved', 'delivered') AND failure_code IS NOT NULL) OR
+       (delivery_state <> 'skipped' AND attempt_count < 1)
+     LIMIT 1`,
+    "onboarding_delivery_records contains inconsistent delivery outcomes",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM onboarding_role_operations
+     WHERE
+       ((operation_state = 'reserved') <> (completed_at IS NULL)) OR
+       ((operation_state IN ('failed', 'partial')) <> (failure_code IS NOT NULL))
+     LIMIT 1`,
+    "onboarding_role_operations contains inconsistent completion metadata",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1
+     FROM onboarding_role_operations AS original
+     LEFT JOIN onboarding_role_operations AS resolver
+       ON resolver.guild_id = original.guild_id
+      AND resolver.operation_id = original.resolved_by_operation_id
+     WHERE
+       ((original.resolved_at IS NULL) <>
+        (original.resolved_by_operation_id IS NULL)) OR
+       (original.resolved_at IS NOT NULL AND (
+         original.operation_state NOT IN ('reserved', 'partial', 'failed') OR
+         original.updated_at <> original.resolved_at OR
+         original.operation_id = original.resolved_by_operation_id OR
+         julianday(original.created_at) > julianday(original.resolved_at) OR
+         resolver.operation_id IS NULL OR
+         resolver.member_id <> original.member_id OR
+         resolver.role_id <> original.role_id OR
+         resolver.operation_kind <> original.operation_kind OR
+         resolver.operation_state NOT IN ('completed', 'no-change') OR
+         resolver.failure_code IS NOT NULL OR
+         resolver.completed_at IS NULL OR
+         resolver.resolved_at IS NOT NULL OR
+         resolver.idempotency_key NOT GLOB 'recover:*' OR
+         julianday(resolver.completed_at) > julianday(original.resolved_at)
+       ))
+     LIMIT 1`,
+    "onboarding_role_operations contains inconsistent recovery resolution metadata",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1
+     FROM role_menu_posts AS post
+     JOIN role_menus AS menu
+       ON menu.guild_id = post.guild_id AND menu.menu_id = post.menu_id
+     WHERE post.definition_version > menu.definition_version OR
+       (post.post_state = 'active' AND (
+         menu.menu_state <> 'enabled' OR
+         menu.bindings_verified_at IS NULL OR
+         post.definition_version <> menu.definition_version
+       ))
+     LIMIT 1`,
+    "role_menu_posts contains an inconsistent parent menu binding",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1
+     FROM role_menu_operations AS operation
+     JOIN role_menus AS menu
+       ON menu.guild_id = operation.guild_id
+      AND menu.menu_id = operation.menu_id
+     WHERE operation.definition_version > menu.definition_version
+     LIMIT 1`,
+    "role_menu_operations contains a future menu definition",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM role_menu_posts
+     GROUP BY guild_id, menu_id HAVING COUNT(*) > 100 LIMIT 1`,
+    "role_menu_posts exceeds the per-menu post limit",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM role_menu_operation_items
+     GROUP BY guild_id, operation_id, role_id HAVING COUNT(*) > 1 LIMIT 1`,
+    "role_menu_operation_items contains contradictory role actions",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM role_menus
+     GROUP BY guild_id
+     HAVING MIN(sort_order) <> 0 OR MAX(sort_order) <> COUNT(*) - 1
+     LIMIT 1`,
+    "role_menus contains non-contiguous guild ordering",
+    issues,
+  );
+
+  for (const [table, maximum] of [
+    ["onboarding_rules_versions", 25],
+    ["onboarding_configurations", 1],
+    ["onboarding_message_templates", 2],
+    ["onboarding_autoroles", 20],
+    ["member_onboarding_states", 100_000],
+    ["member_rule_acceptances", 100_000],
+    ["onboarding_delivery_records", 100_000],
+    ["onboarding_role_operations", 200_000],
+    ["onboarding_audit_events", 10_000],
+    ["role_menus", 25],
+    ["role_menu_options", 625],
+    ["role_menu_posts", 500],
+    ["role_menu_operations", 100_000],
+    ["role_menu_operation_items", 2_500_000],
+  ] as const) {
+    validateNoMatchingRows(
+      db,
+      `SELECT 1 FROM ${quoteIdentifier(table)} GROUP BY guild_id HAVING COUNT(*) > ${maximum} LIMIT 1`,
+      `${table} exceeds the per-guild record limit`,
+      issues,
+    );
+  }
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM onboarding_autoroles
+     GROUP BY guild_id, audience HAVING COUNT(*) > 10 LIMIT 1`,
+    "onboarding_autoroles exceeds the per-audience role limit",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM role_menu_options
+     GROUP BY guild_id, menu_id HAVING COUNT(*) > 25 LIMIT 1`,
+    "role_menu_options exceeds the per-menu option limit",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1
+     FROM role_menus AS menu
+     LEFT JOIN role_menu_options AS option
+       ON option.guild_id = menu.guild_id AND option.menu_id = menu.menu_id
+     WHERE menu.menu_state = 'enabled'
+     GROUP BY menu.guild_id, menu.menu_id
+     HAVING COUNT(option.option_id) < 1 OR
+       menu.min_selections > COUNT(option.option_id) OR
+       menu.max_selections > COUNT(option.option_id)
+     LIMIT 1`,
+    "enabled role_menus contains impossible option bounds",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM role_menu_operation_items
+     GROUP BY guild_id, operation_id HAVING COUNT(*) > 25 LIMIT 1`,
+    "role_menu_operation_items exceeds the per-operation item limit",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `WITH item_outcomes AS (
+       SELECT guild_id, operation_id,
+              COUNT(*) AS item_count,
+              SUM(item_state = 'planned') AS planned_count,
+              SUM(item_state = 'completed') AS completed_count,
+              SUM(item_state IN ('failed', 'skipped')) AS incomplete_count
+       FROM role_menu_operation_items
+       GROUP BY guild_id, operation_id
+     )
+     SELECT 1
+     FROM role_menu_operations AS operation
+     LEFT JOIN item_outcomes AS outcome
+       ON outcome.guild_id = operation.guild_id
+      AND outcome.operation_id = operation.operation_id
+     WHERE
+       (operation.operation_state = 'reserved' AND (
+          operation.failure_code IS NOT NULL OR
+          COALESCE(outcome.completed_count, 0) <> 0 OR
+          COALESCE(outcome.incomplete_count, 0) <> 0
+       )) OR
+       (operation.operation_state = 'completed' AND (
+          operation.failure_code IS NOT NULL OR
+          COALESCE(outcome.item_count, 0) = 0 OR
+          COALESCE(outcome.planned_count, 0) <> 0 OR
+          COALESCE(outcome.incomplete_count, 0) <> 0
+       )) OR
+       (operation.operation_state = 'no-change' AND (
+          operation.failure_code IS NOT NULL OR
+          COALESCE(outcome.item_count, 0) <> 0
+       )) OR
+       (operation.operation_state = 'failed' AND (
+          operation.failure_code IS NULL OR
+          COALESCE(outcome.planned_count, 0) <> 0 OR
+          COALESCE(outcome.completed_count, 0) <> 0 OR
+          COALESCE(outcome.incomplete_count, 0) = 0
+       )) OR
+       (operation.operation_state = 'partial' AND (
+          operation.failure_code IS NULL OR
+          COALESCE(outcome.planned_count, 0) <> 0 OR
+          COALESCE(outcome.completed_count, 0) = 0 OR
+          COALESCE(outcome.incomplete_count, 0) = 0
+       )) OR EXISTS (
+         SELECT 1
+         FROM role_menu_operation_items AS item
+         WHERE item.guild_id = operation.guild_id
+           AND item.operation_id = operation.operation_id
+           AND (
+             (item.item_state = 'failed' AND (
+               operation.failure_code IS NULL OR
+               item.failure_code IS NULL OR
+               item.failure_code <> operation.failure_code
+             )) OR
+             (item.item_state <> 'failed' AND item.failure_code IS NOT NULL)
+           )
+       )
+     LIMIT 1`,
+    "role_menu_operations contains inconsistent parent/item outcomes",
+    issues,
+  );
+}
+
+function validateStoredPhase4PanelReferences(
+  db: Database.Database,
+  issues: string[],
+): void {
+  const rows = db
+    .prepare(
+      `SELECT * FROM posted_panels
+       WHERE preset IN ('verification', 'roles')
+       ORDER BY guild_id, panel_id`,
+    )
+    .all() as PostedPanelDataRow[];
+  const panelsByGuild = new Map<string, PostedPanel[]>();
+  try {
+    for (const row of rows) {
+      const panels = panelsByGuild.get(row.guild_id) ?? [];
+      panels.push({
+        guildId: row.guild_id,
+        panelId: row.panel_id,
+        preset: row.preset as PostedPanel["preset"],
+        channelId: row.channel_id,
+        messageId: row.message_id,
+        configuration: JSON.parse(row.configuration_json) as unknown,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      });
+      panelsByGuild.set(row.guild_id, panels);
+    }
+    const referencesByGuild = new Map<string, Phase4PanelReferenceData>();
+    const configurationGuilds = new Set(
+      (
+        db
+          .prepare(
+            `SELECT guild_id FROM onboarding_configurations
+             WHERE guild_id IN (
+               SELECT guild_id FROM posted_panels
+               WHERE preset IN ('verification', 'roles')
+             )`,
+          )
+          .all() as Array<{ guild_id: string }>
+      ).map((row) => row.guild_id),
+    );
+    for (const guildId of panelsByGuild.keys()) {
+      referencesByGuild.set(guildId, {
+        onboardingConfiguration: configurationGuilds.has(guildId) ? {} : null,
+        onboardingRulesVersions: [],
+        roleMenus: [],
+        roleMenuPosts: [],
+      });
+    }
+    for (const row of db
+      .prepare(
+        `SELECT guild_id, rules_version FROM onboarding_rules_versions
+         WHERE guild_id IN (
+           SELECT guild_id FROM posted_panels
+           WHERE preset IN ('verification', 'roles')
+         )`,
+      )
+      .all() as Array<{ guild_id: string; rules_version: number }>) {
+      const data = referencesByGuild.get(row.guild_id);
+      if (data) {
+        (data.onboardingRulesVersions as Array<{ rulesVersion: number }>).push({
+          rulesVersion: row.rules_version,
+        });
+      }
+    }
+    for (const row of db
+      .prepare(
+        `SELECT guild_id, menu_id FROM role_menus
+         WHERE guild_id IN (
+           SELECT guild_id FROM posted_panels
+           WHERE preset IN ('verification', 'roles')
+         )`,
+      )
+      .all() as Array<{ guild_id: string; menu_id: string }>) {
+      const data = referencesByGuild.get(row.guild_id);
+      if (data) {
+        (data.roleMenus as Array<{ menuId: string }>).push({
+          menuId: row.menu_id,
+        });
+      }
+    }
+    for (const row of db
+      .prepare(
+        `SELECT guild_id, post_id, menu_id, channel_id, message_id,
+                definition_version
+         FROM role_menu_posts
+         WHERE guild_id IN (
+           SELECT guild_id FROM posted_panels
+           WHERE preset IN ('verification', 'roles')
+         )`,
+      )
+      .all() as Array<{
+      guild_id: string;
+      post_id: string;
+      menu_id: string;
+      channel_id: string;
+      message_id: string;
+      definition_version: number;
+    }>) {
+      const data = referencesByGuild.get(row.guild_id);
+      if (data) {
+        (
+          data.roleMenuPosts as Array<{
+            postId: string;
+            menuId: string;
+            channelId: string;
+            messageId: string;
+            definitionVersion: number;
+          }>
+        ).push({
+          postId: row.post_id,
+          menuId: row.menu_id,
+          channelId: row.channel_id,
+          messageId: row.message_id,
+          definitionVersion: row.definition_version,
+        });
+      }
+    }
+    for (const [guildId, panels] of panelsByGuild) {
+      validatePhase4PanelReferences(panels, referencesByGuild.get(guildId)!);
+    }
+  } catch {
+    issues.push("posted_panels contains inconsistent Phase 4 references");
+  }
+}
+
+function validatePhase4SemanticText(
+  db: Database.Database,
+  issues: string[],
+): void {
+  const rules = db
+    .prepare("SELECT title, body FROM onboarding_rules_versions")
+    .all() as Array<{ title: unknown; body: unknown }>;
+  for (const row of rules) {
+    try {
+      if (
+        normalizeRulesTitle(row.title) !== row.title ||
+        normalizeRulesBody(row.body) !== row.body
+      ) {
+        throw new TypeError("not normalized");
+      }
+    } catch {
+      issues.push("onboarding_rules_versions contains invalid normalized text");
+      break;
+    }
+  }
+
+  const templates = db
+    .prepare("SELECT title, body FROM onboarding_message_templates")
+    .all() as Array<{
+    title: unknown;
+    body: unknown;
+  }>;
+  for (const row of templates) {
+    try {
+      const normalized = normalizeOnboardingTemplatePair(row.title, row.body);
+      if (normalized.title !== row.title || normalized.body !== row.body) {
+        throw new TypeError("not normalized");
+      }
+    } catch {
+      issues.push(
+        "onboarding_message_templates contains invalid normalized text",
+      );
+      break;
+    }
+  }
+
+  const menus = db
+    .prepare("SELECT title, description FROM role_menus")
+    .all() as Array<{ title: unknown; description: unknown }>;
+  for (const row of menus) {
+    try {
+      if (
+        normalizeRoleMenuText(row.title, 1, 256, "role-menu title") !==
+          row.title ||
+        normalizeRoleMenuText(
+          row.description,
+          1,
+          1_000,
+          "role-menu description",
+        ) !== row.description
+      ) {
+        throw new TypeError("not normalized");
+      }
+    } catch {
+      issues.push("role_menus contains invalid normalized text");
+      break;
+    }
+  }
+
+  const options = db
+    .prepare("SELECT label, description, emoji FROM role_menu_options")
+    .all() as Array<{
+    label: unknown;
+    description: unknown;
+    emoji: unknown;
+  }>;
+  for (const row of options) {
+    try {
+      const description =
+        row.description === null
+          ? null
+          : normalizeRoleMenuText(
+              row.description,
+              1,
+              100,
+              "option description",
+            );
+      const emoji = normalizeOptionalUnicodeEmoji(row.emoji, "option emoji");
+      if (
+        normalizeRoleMenuText(row.label, 1, 100, "option label") !==
+          row.label ||
+        description !== row.description ||
+        emoji !== row.emoji
+      ) {
+        throw new TypeError("not normalized");
+      }
+    } catch {
+      issues.push("role_menu_options contains invalid normalized text");
+      break;
+    }
+  }
+}
+
 function validateTextColumnTypes(
   db: Database.Database,
   table: string,
@@ -4446,6 +5798,30 @@ function validateTextColumnTypes(
     db,
     `SELECT 1 FROM ${quoteIdentifier(table)} WHERE ${predicates.join(" OR ")} LIMIT 1`,
     `${table} contains non-text data in a text column`,
+    issues,
+  );
+}
+
+function validateIntegerColumnTypes(
+  db: Database.Database,
+  table: string,
+  required: readonly string[],
+  nullable: readonly string[],
+  issues: string[],
+): void {
+  const predicates = [
+    ...required.map(
+      (column) => `typeof(${quoteIdentifier(column)}) != 'integer'`,
+    ),
+    ...nullable.map(
+      (column) =>
+        `(${quoteIdentifier(column)} IS NOT NULL AND typeof(${quoteIdentifier(column)}) != 'integer')`,
+    ),
+  ];
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM ${quoteIdentifier(table)} WHERE ${predicates.join(" OR ")} LIMIT 1`,
+    `${table} contains non-integer data in an integer column`,
     issues,
   );
 }

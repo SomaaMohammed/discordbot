@@ -12,6 +12,24 @@ import {
 } from "../src/discord/bot.js";
 import type { BotRuntime, GuildRuntime } from "../src/runtime.js";
 
+const memberLifecycleHandlers = vi.hoisted(() => ({
+  added: vi.fn<(...args: unknown[]) => Promise<void>>(),
+  updated: vi.fn<(...args: unknown[]) => Promise<void>>(),
+  removed: vi.fn<(...args: unknown[]) => Promise<void>>(),
+}));
+
+vi.mock(
+  "../src/discord/member-lifecycle-discord.js",
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import("../src/discord/member-lifecycle-discord.js")
+    >()),
+    handleGuildMemberAdded: memberLifecycleHandlers.added,
+    handleGuildMemberUpdated: memberLifecycleHandlers.updated,
+    handleGuildMemberRemoved: memberLifecycleHandlers.removed,
+  }),
+);
+
 const GUILD_ID = "123456789012345678";
 
 function deferred<T>() {
@@ -113,6 +131,89 @@ describe("Discord work tracking", () => {
     });
     await expect(lifecycle?.drain(100)).resolves.toBe(true);
     expect(runtime.forGuild).not.toHaveBeenCalled();
+  });
+
+  it("tracks and drains every member lifecycle gateway event", async () => {
+    const runtime = {
+      forGuild: vi.fn(async () => null),
+    } as unknown as BotRuntime;
+    const member = {
+      id: "223456789012345678",
+      guild: { id: GUILD_ID },
+    };
+    const oldMember = { ...member, pending: true };
+    const newMember = { ...member, pending: false };
+    const cases = [
+      {
+        event: "guildMemberAdd",
+        handler: memberLifecycleHandlers.added,
+        emit: (emitter: EventEmitter) => emitter.emit("guildMemberAdd", member),
+      },
+      {
+        event: "guildMemberUpdate",
+        handler: memberLifecycleHandlers.updated,
+        emit: (emitter: EventEmitter) =>
+          emitter.emit("guildMemberUpdate", oldMember, newMember),
+      },
+      {
+        event: "guildMemberRemove",
+        handler: memberLifecycleHandlers.removed,
+        emit: (emitter: EventEmitter) =>
+          emitter.emit("guildMemberRemove", member),
+      },
+    ] as const;
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandledRejection);
+
+    try {
+      for (const current of cases) {
+        const handlerGate = deferred<void>();
+        current.handler.mockReset();
+        current.handler
+          .mockImplementationOnce(() => handlerGate.promise)
+          .mockRejectedValueOnce(
+            new Error(`${current.event} rejection must be handled`),
+          );
+        const client = createDiscordClient(runtime);
+        clients.push(client);
+        const emitter = client as unknown as EventEmitter;
+
+        current.emit(emitter);
+        await vi.waitFor(() =>
+          expect(current.handler).toHaveBeenCalledTimes(1),
+        );
+        current.emit(emitter);
+        await vi.waitFor(() =>
+          expect(current.handler).toHaveBeenCalledTimes(2),
+        );
+
+        const lifecycle = getDiscordClientWorkLifecycle(client);
+        expect(lifecycle).not.toBeNull();
+        lifecycle!.stop();
+        current.emit(emitter);
+        await Promise.resolve();
+        expect(current.handler).toHaveBeenCalledTimes(2);
+
+        let drainCompleted = false;
+        const drain = lifecycle!.drain(1_000).then((result) => {
+          drainCompleted = true;
+          return result;
+        });
+        await Promise.resolve();
+        expect(drainCompleted).toBe(false);
+
+        handlerGate.resolve();
+        await expect(drain).resolves.toBe(true);
+      }
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
   });
 
   it("requests one fatal controlled shutdown when Discord invalidates the session", async () => {

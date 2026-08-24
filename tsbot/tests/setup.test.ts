@@ -801,7 +801,7 @@ describe("immediate configuration behavior", () => {
     const runtime = {
       storage: {
         exportGuildData: vi.fn(() => ({
-          formatVersion: 6,
+          formatVersion: 8,
           guildId: GUILD_ID,
         })),
       },
@@ -818,7 +818,7 @@ describe("immediate configuration behavior", () => {
 
     const response = interaction.editReply.mock.calls[0]?.[0];
     expect(response).toMatchObject({
-      content: expect.stringContaining("Format-7"),
+      content: expect.stringContaining("Format-8"),
       files: [expect.anything()],
       allowedMentions: { parse: [] },
     });
@@ -832,7 +832,10 @@ describe("immediate configuration behavior", () => {
       "private reports/events",
       "private appeals/events",
       "anti-spam rules/exemptions/safe enforcement events",
+      "onboarding configuration/templates/rules/member state/acceptances/automatic roles/delivery and audit history",
+      "persistent role menus/options/posts/operation history",
       "delivery identifiers",
+      "resource bindings remain dormant until verified",
     ]) {
       expect(response.content).toContain(collection);
     }

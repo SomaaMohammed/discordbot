@@ -8,6 +8,7 @@ type JsonOption = {
   options?: JsonOption[];
   channel_types?: number[];
   required?: boolean;
+  min_length?: number;
   max_length?: number;
 };
 
@@ -66,6 +67,8 @@ describe("public command surface", () => {
       "report",
       "appeal",
       "automod",
+      "onboarding",
+      "rolemenu",
       "access",
       "pingrole",
       "restrictedping",
@@ -156,6 +159,53 @@ describe("public command surface", () => {
         expect(findOption(panel, "button_label").max_length).toBe(80);
       }
     }
+  });
+
+  it("exposes bounded onboarding and persistent role-menu options", () => {
+    const commands = buildCommandDefinitions().map((command) =>
+      command.toJSON(),
+    ) as JsonCommand[];
+    const onboarding = findCommand(commands, "onboarding");
+    const roleMenu = findCommand(commands, "rolemenu");
+
+    expect(onboarding.options?.map(({ name }) => name)).toEqual([
+      "status",
+      "configure",
+      "welcome",
+      "farewell",
+      "rules",
+      "verification",
+      "autorole",
+      "panel",
+      "member",
+      "recover",
+      "disable",
+    ]);
+    for (const name of ["welcome", "farewell", "rules"]) {
+      const subcommand = findSubcommand(onboarding, name);
+      expect(findOption(subcommand, "title").max_length).toBe(256);
+      expect(findOption(subcommand, "body").max_length).toBe(4_096);
+    }
+
+    expect(roleMenu.options?.map(({ name }) => name)).toEqual([
+      "list",
+      "create",
+      "edit",
+      "option",
+      "post",
+      "status",
+      "enable",
+      "disable",
+      "archive",
+      "recover",
+    ]);
+    const slug = findOption(findSubcommand(roleMenu, "create"), "slug");
+    expect(slug).toMatchObject({
+      type: 3,
+      required: true,
+      min_length: 2,
+      max_length: 32,
+    });
   });
 
   it("does not register removed compatibility subcommands", () => {

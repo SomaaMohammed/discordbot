@@ -54,6 +54,8 @@ export const PANEL_PRESETS = [
   "suggestions",
   "applications",
   "safety",
+  "verification",
+  "roles",
 ] as const;
 
 export type PanelPreset = (typeof PANEL_PRESETS)[number];
@@ -70,6 +72,8 @@ export const GUILD_CAPABILITIES = [
   "moderation.manage",
   "reports.review",
   "appeals.review",
+  "onboarding.configure",
+  "roles.configure",
 ] as const;
 
 export const DELEGATED_CAPABILITIES = GUILD_CAPABILITIES;
@@ -78,7 +82,7 @@ export type GuildCapability = (typeof GUILD_CAPABILITIES)[number];
 export type DelegatedCapability = GuildCapability;
 export type Capability = GuildCapability;
 
-/** Storage supports future user principals, but Phase 3 only grants roles. */
+/** Storage supports future user principals, but delegated capabilities grant roles only. */
 export type CapabilityPrincipalType = "role" | "user";
 
 export interface DelegatedCapabilityGrant {
@@ -1457,9 +1461,459 @@ export interface AntiSpamEvent {
   createdAt: string;
 }
 
+export const ONBOARDING_AUTOROLE_AUDIENCES = ["human", "bot"] as const;
+/** Leaves room for the fixed verification-panel acknowledgement text. */
+export const ONBOARDING_RULES_BODY_MAXIMUM = 3_967;
+export type OnboardingAutoroleAudience =
+  (typeof ONBOARDING_AUTOROLE_AUDIENCES)[number];
+
+export const ONBOARDING_SCREENING_STATES = [
+  "pending",
+  "complete",
+  "unknown",
+] as const;
+export type OnboardingScreeningState =
+  (typeof ONBOARDING_SCREENING_STATES)[number];
+
+export const MEMBER_ONBOARDING_LIFECYCLE_STATES = [
+  "pending-screening",
+  "pending",
+  "active",
+  "departed",
+] as const;
+export type MemberOnboardingLifecycleState =
+  (typeof MEMBER_ONBOARDING_LIFECYCLE_STATES)[number];
+
+export interface OnboardingConfiguration {
+  guildId: string;
+  enabled: boolean;
+  welcomeChannelId: string | null;
+  welcomePublicEnabled: boolean;
+  welcomeDmEnabled: boolean;
+  farewellChannelId: string | null;
+  farewellPublicEnabled: boolean;
+  lifecycleLogChannelId: string | null;
+  rulesChannelId: string | null;
+  verificationEnabled: boolean;
+  currentRulesVersion: number | null;
+  verifiedRoleId: string | null;
+  unverifiedRoleId: string | null;
+  humanAutorolesEnabled: boolean;
+  botAutorolesEnabled: boolean;
+  accountAgeAlertHours: number | null;
+  welcomeTitle: string;
+  welcomeBody: string;
+  farewellTitle: string;
+  farewellBody: string;
+  welcomeChannelVerifiedAt: string | null;
+  farewellChannelVerifiedAt: string | null;
+  lifecycleLogChannelVerifiedAt: string | null;
+  rulesChannelVerifiedAt: string | null;
+  verificationRolesVerifiedAt: string | null;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type OnboardingConfigurationInput = Omit<
+  OnboardingConfiguration,
+  "guildId" | "createdBy" | "updatedBy" | "createdAt" | "updatedAt"
+> & {
+  actorId: string;
+};
+
+export interface OnboardingRulesVersion {
+  guildId: string;
+  rulesVersion: number;
+  title: string;
+  body: string;
+  reacceptanceRequested: boolean;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface OnboardingRulesVersionInput {
+  title: string;
+  body: string;
+  reacceptanceRequested?: boolean;
+  actorId: string;
+}
+
+export interface OnboardingRulesActivationInput {
+  rules: OnboardingRulesVersionInput;
+  configuration: Omit<OnboardingConfigurationInput, "currentRulesVersion">;
+}
+
+export interface OnboardingRulesActivationResult {
+  rules: OnboardingRulesVersion;
+  configuration: OnboardingConfiguration;
+}
+
+export interface OnboardingAutorole {
+  guildId: string;
+  audience: OnboardingAutoroleAudience;
+  roleId: string;
+  sortOrder: number;
+  enabled: boolean;
+  bindingsVerifiedAt: string | null;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OnboardingAutoroleInput {
+  roleId: string;
+  enabled: boolean;
+  bindingsVerifiedAt?: string | null;
+}
+
+export interface MemberOnboardingState {
+  guildId: string;
+  memberId: string;
+  memberKind: OnboardingAutoroleAudience;
+  screeningState: OnboardingScreeningState;
+  lifecycleState: MemberOnboardingLifecycleState;
+  joinedAt: string;
+  accountCreatedAt: string;
+  screeningCompletedAt: string | null;
+  departedAt: string | null;
+  lastProcessedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type MemberOnboardingStateInput = Omit<
+  MemberOnboardingState,
+  "guildId" | "createdAt" | "updatedAt"
+>;
+
+export interface MemberRuleAcceptance {
+  guildId: string;
+  memberId: string;
+  rulesVersion: number;
+  acceptedAt: string;
+  panelPostId: string | null;
+}
+
+export interface MemberRuleAcceptanceInput {
+  memberId: string;
+  rulesVersion: number;
+  acceptedAt?: string;
+  panelPostId?: string | null;
+}
+
+export interface MemberRuleAcceptanceResult {
+  status: "recorded" | "duplicate";
+  acceptance: MemberRuleAcceptance;
+}
+
+export const ONBOARDING_DELIVERY_KINDS = [
+  "welcome-public",
+  "welcome-dm",
+  "farewell-public",
+  "lifecycle-log",
+] as const;
+export type OnboardingDeliveryKind = (typeof ONBOARDING_DELIVERY_KINDS)[number];
+
+export const ONBOARDING_DELIVERY_STATES = [
+  "reserved",
+  "delivered",
+  "failed",
+  "missing",
+  "skipped",
+] as const;
+export type OnboardingDeliveryState =
+  (typeof ONBOARDING_DELIVERY_STATES)[number];
+
+export interface OnboardingDeliveryRecord {
+  guildId: string;
+  deliveryId: string;
+  memberId: string;
+  joinInstance: string;
+  kind: OnboardingDeliveryKind;
+  state: OnboardingDeliveryState;
+  channelId: string | null;
+  messageId: string | null;
+  attemptCount: number;
+  failureCode: string | null;
+  claimId: string | null;
+  claimExpiresAt: string | null;
+  deliveredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OnboardingDeliveryReservationInput {
+  deliveryId?: string;
+  memberId: string;
+  joinInstance: string;
+  kind: OnboardingDeliveryKind;
+  claimId: string;
+  claimExpiresAt: string;
+}
+
+export interface OnboardingDeliveryReservationResult {
+  status: "reserved" | "duplicate" | "busy";
+  delivery: OnboardingDeliveryRecord;
+}
+
+export interface OnboardingDeliveryCompletionInput {
+  claimId: string;
+  state: Exclude<OnboardingDeliveryState, "reserved">;
+  channelId?: string | null;
+  messageId?: string | null;
+  failureCode?: string | null;
+}
+
+export const ONBOARDING_ROLE_OPERATION_KINDS = [
+  "verified-add",
+  "unverified-add",
+  "unverified-remove",
+  "human-autorole-add",
+  "bot-autorole-add",
+] as const;
+export type OnboardingRoleOperationKind =
+  (typeof ONBOARDING_ROLE_OPERATION_KINDS)[number];
+
+export const ROLE_OPERATION_STATES = [
+  "reserved",
+  "completed",
+  "partial",
+  "failed",
+  "no-change",
+] as const;
+export type RoleOperationState = (typeof ROLE_OPERATION_STATES)[number];
+
+export interface OnboardingRoleOperation {
+  guildId: string;
+  operationId: string;
+  memberId: string;
+  roleId: string;
+  kind: OnboardingRoleOperationKind;
+  idempotencyKey: string;
+  state: RoleOperationState;
+  failureCode: string | null;
+  attemptCount: number;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  /** When set, a later successful recovery operation reconciled this record. */
+  resolvedAt: string | null;
+  /** The matching completed/no-change `recover:` operation that reconciled it. */
+  resolvedByOperationId: string | null;
+}
+
+export interface OnboardingRoleOperationReservationInput {
+  operationId?: string;
+  memberId: string;
+  roleId: string;
+  kind: OnboardingRoleOperationKind;
+  idempotencyKey: string;
+}
+
+export interface OnboardingRoleOperationReservationResult {
+  status: "reserved" | "pending" | "completed";
+  operation: OnboardingRoleOperation;
+}
+
+export interface OnboardingRoleOperationCompletionInput {
+  state: Exclude<RoleOperationState, "reserved">;
+  failureCode?: string | null;
+}
+
+export interface OnboardingAuditEvent {
+  guildId: string;
+  eventId: string;
+  eventNumber: number;
+  eventType: string;
+  memberId: string | null;
+  actorId: string | null;
+  rulesVersion: number | null;
+  outcome: string;
+  details: unknown;
+  createdAt: string;
+}
+
+export interface OnboardingAuditEventInput {
+  eventType: string;
+  memberId?: string | null;
+  actorId?: string | null;
+  rulesVersion?: number | null;
+  outcome: string;
+  details?: unknown;
+}
+
+export const ROLE_MENU_STATES = ["disabled", "enabled", "archived"] as const;
+export type RoleMenuState = (typeof ROLE_MENU_STATES)[number];
+export const ROLE_MENU_MODES = ["toggle", "exclusive", "limited"] as const;
+export type RoleMenuMode = (typeof ROLE_MENU_MODES)[number];
+export const ROLE_MENU_POST_STATES = ["active", "missing", "stale"] as const;
+export type RoleMenuPostState = (typeof ROLE_MENU_POST_STATES)[number];
+/** 25 maximum-length opaque option IDs plus 24 separators. */
+export const MAX_ROLE_MENU_SELECTION_KEY_LENGTH = 624;
+
+export interface RoleMenu {
+  guildId: string;
+  menuId: string;
+  slug: string;
+  title: string;
+  description: string;
+  sortOrder: number;
+  state: RoleMenuState;
+  mode: RoleMenuMode;
+  minSelections: number;
+  maxSelections: number;
+  requiredRoleId: string | null;
+  definitionVersion: number;
+  bindingsVerifiedAt: string | null;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RoleMenuInput {
+  menuId?: string;
+  slug: string;
+  title: string;
+  description: string;
+  sortOrder?: number;
+  state?: RoleMenuState;
+  mode: RoleMenuMode;
+  minSelections: number;
+  maxSelections: number;
+  requiredRoleId?: string | null;
+  bindingsVerifiedAt?: string | null;
+  actorId: string;
+}
+
+export interface RoleMenuUpdateInput {
+  slug?: string;
+  title?: string;
+  description?: string;
+  sortOrder?: number;
+  state?: RoleMenuState;
+  mode?: RoleMenuMode;
+  minSelections?: number;
+  maxSelections?: number;
+  requiredRoleId?: string | null;
+  bindingsVerifiedAt?: string | null;
+  expectedDefinitionVersion?: number;
+  actorId: string;
+}
+
+export interface RoleMenuOption {
+  guildId: string;
+  menuId: string;
+  optionId: string;
+  roleId: string;
+  label: string;
+  description: string | null;
+  emoji: string | null;
+  sortOrder: number;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RoleMenuOptionInput {
+  optionId?: string;
+  roleId: string;
+  label: string;
+  description?: string | null;
+  emoji?: string | null;
+  sortOrder?: number;
+  actorId: string;
+}
+
+export interface RoleMenuOptionUpdateInput {
+  roleId?: string;
+  label?: string;
+  description?: string | null;
+  emoji?: string | null;
+  sortOrder?: number;
+  actorId: string;
+}
+
+export interface RoleMenuPost {
+  guildId: string;
+  postId: string;
+  menuId: string;
+  channelId: string;
+  messageId: string;
+  definitionVersion: number;
+  bindingsVerifiedAt: string | null;
+  state: RoleMenuPostState;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RoleMenuPostInput {
+  postId?: string;
+  menuId: string;
+  channelId: string;
+  messageId: string;
+  definitionVersion: number;
+  bindingsVerifiedAt?: string | null;
+  state?: RoleMenuPostState;
+}
+
+export interface RoleMenuOperationItem {
+  guildId: string;
+  operationId: string;
+  roleId: string;
+  action: "add" | "remove";
+  state: "planned" | "completed" | "failed" | "skipped";
+  failureCode: string | null;
+}
+
+export interface RoleMenuOperation {
+  guildId: string;
+  operationId: string;
+  interactionId: string;
+  menuId: string;
+  memberId: string;
+  definitionVersion: number;
+  selectionKey: string;
+  state: RoleOperationState;
+  failureCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  items: RoleMenuOperationItem[];
+}
+
+export interface RoleMenuOperationReservationInput {
+  operationId?: string;
+  interactionId: string;
+  menuId: string;
+  memberId: string;
+  definitionVersion: number;
+  selectionKey: string;
+  plannedAdds?: readonly string[];
+  plannedRemovals?: readonly string[];
+}
+
+export interface RoleMenuOperationReservationResult {
+  status: "reserved" | "duplicate";
+  operation: RoleMenuOperation;
+}
+
+export interface RoleMenuOperationCompletionInput {
+  state: Exclude<RoleOperationState, "reserved">;
+  addedRoleIds: readonly string[];
+  removedRoleIds: readonly string[];
+  failedRoleIds: readonly string[];
+  skippedRoleIds: readonly string[];
+  failureCode?: string | null;
+}
+
 /** Portable, tenant-scoped export of the active product data model. */
 export interface GuildDataExport {
-  formatVersion: 7;
+  formatVersion: 8;
   guildId: string;
   exportedAt: string;
   metadata: GuildRecord;
@@ -1498,6 +1952,18 @@ export interface GuildDataExport {
   antiSpamExemptChannels: AntiSpamExemption[];
   antiSpamEnforcements: AntiSpamEnforcement[];
   antiSpamEvents: AntiSpamEvent[];
+  onboardingConfiguration: OnboardingConfiguration | null;
+  onboardingRulesVersions: OnboardingRulesVersion[];
+  onboardingAutoroles: OnboardingAutorole[];
+  memberOnboardingStates: MemberOnboardingState[];
+  memberRuleAcceptances: MemberRuleAcceptance[];
+  onboardingDeliveryRecords: OnboardingDeliveryRecord[];
+  onboardingRoleOperations: OnboardingRoleOperation[];
+  onboardingAuditEvents: OnboardingAuditEvent[];
+  roleMenus: RoleMenu[];
+  roleMenuOptions: RoleMenuOption[];
+  roleMenuPosts: RoleMenuPost[];
+  roleMenuOperations: RoleMenuOperation[];
 }
 
 export interface GuildPurgeResult {
@@ -1539,6 +2005,19 @@ export interface GuildPurgeResult {
   antiSpamExemptChannels: number;
   antiSpamEnforcements: number;
   antiSpamEvents: number;
+  onboardingConfigurations: number;
+  onboardingRulesVersions: number;
+  onboardingAutoroles: number;
+  memberOnboardingStates: number;
+  memberRuleAcceptances: number;
+  onboardingDeliveryRecords: number;
+  onboardingRoleOperations: number;
+  onboardingAuditEvents: number;
+  roleMenus: number;
+  roleMenuOptions: number;
+  roleMenuPosts: number;
+  roleMenuOperations: number;
+  roleMenuOperationItems: number;
 }
 
 export const USER_ACTIVITY_METRICS = [

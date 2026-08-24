@@ -25,9 +25,11 @@ import {
   initializeV6Schema,
   initializeV7Schema,
   initializeV8Schema,
+  initializeV9Schema,
   V8_TABLE_NAMES,
-  V9_EXPLICIT_INDEX_NAMES,
   V9_TABLE_NAMES,
+  V10_EXPLICIT_INDEX_NAMES,
+  V10_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import {
   createV2FixtureDatabase,
@@ -39,6 +41,22 @@ const GUILD_A = "111111111111111111";
 const GUILD_B = "222222222222222222";
 const USER_A = "444444444444444444";
 const NOW = "2026-01-01T00:00:00.000Z";
+const PHASE4_TABLES = [
+  "onboarding_rules_versions",
+  "onboarding_configurations",
+  "onboarding_message_templates",
+  "onboarding_autoroles",
+  "member_onboarding_states",
+  "member_rule_acceptances",
+  "onboarding_delivery_records",
+  "onboarding_role_operations",
+  "onboarding_audit_events",
+  "role_menus",
+  "role_menu_options",
+  "role_menu_posts",
+  "role_menu_operations",
+  "role_menu_operation_items",
+] as const;
 const roots: string[] = [];
 
 afterEach(() => {
@@ -47,7 +65,7 @@ afterEach(() => {
   }
 });
 
-describe("explicit schema migration to v9", () => {
+describe("explicit schema migration to v10", () => {
   it("transactionally migrates exact v8 rows and enables only new constraints", () => {
     const dbFile = fixturePath("v8.db");
     createV8Fixture(dbFile);
@@ -70,12 +88,12 @@ describe("explicit schema migration to v9", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v8",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
-      schema: "current-v9",
-      schemaVersion: 9,
+    expect(validateDatabaseFile(dbFile, { expect: 10 })).toMatchObject({
+      schema: "current-v10",
+      schemaVersion: 10,
       foreignKeyViolations: 0,
     });
 
@@ -91,7 +109,7 @@ describe("explicit schema migration to v9", () => {
         migrated
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([{ version: 8 }, { version: 9 }]);
+      ).toEqual([{ version: 8 }, { version: 9 }, { version: 10 }]);
       for (const table of [
         "moderation_configurations",
         "moderation_cases",
@@ -99,6 +117,7 @@ describe("explicit schema migration to v9", () => {
         "case_appeals",
         "anti_spam_rules",
         "anti_spam_enforcements",
+        ...PHASE4_TABLES,
       ]) {
         expect(
           migrated.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get(),
@@ -131,6 +150,120 @@ describe("explicit schema migration to v9", () => {
     }
   });
 
+  it("copies every exact v9 row before adding dormant Phase 4 storage", () => {
+    const dbFile = fixturePath("v9.db");
+    createV9Fixture(dbFile);
+    const source = new Database(dbFile, { readonly: true });
+    const snapshot = new Map(
+      V9_TABLE_NAMES.filter((table) => table !== "schema_migrations").map(
+        (table) => [
+          table,
+          source.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+        ],
+      ),
+    );
+    source.close();
+
+    expect(
+      migrateDatabase({
+        dbFile,
+        now: () => "2026-02-01T00:00:00.000Z",
+      }),
+    ).toMatchObject({
+      status: "migrated",
+      fromSchema: "legacy-v9",
+      toSchema: "current-v10",
+      guilds: 1,
+      metricsPreserved: 1,
+      metricsDropped: 0,
+    });
+    expect(validateDatabaseFile(dbFile, { expect: 10 })).toMatchObject({
+      schema: "current-v10",
+      schemaVersion: 10,
+      foreignKeyViolations: 0,
+    });
+
+    const migrated = new Database(dbFile);
+    migrated.pragma("foreign_keys = ON");
+    try {
+      for (const [table, rows] of snapshot) {
+        expect(
+          migrated.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+          `${table} exact v9 rows`,
+        ).toEqual(rows);
+      }
+      for (const table of PHASE4_TABLES) {
+        expect(
+          migrated.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get(),
+          `${table} starts empty`,
+        ).toEqual({ count: 0 });
+      }
+      expect(
+        migrated
+          .prepare("SELECT version FROM schema_migrations ORDER BY version")
+          .all(),
+      ).toEqual([{ version: 9 }, { version: 10 }]);
+
+      const insertGrant = migrated.prepare(
+        `INSERT INTO delegated_capability_grants (
+           guild_id, principal_type, principal_id, capability, active,
+           granted_by, created_at, updated_at
+         ) VALUES (?, 'role', ?, ?, 1, ?, ?, ?)`,
+      );
+      expect(() =>
+        insertGrant.run(
+          GUILD_A,
+          "900000000000000011",
+          "onboarding.configure",
+          USER_A,
+          NOW,
+          NOW,
+        ),
+      ).not.toThrow();
+      expect(() =>
+        insertGrant.run(
+          GUILD_A,
+          "900000000000000012",
+          "roles.configure",
+          USER_A,
+          NOW,
+          NOW,
+        ),
+      ).not.toThrow();
+
+      const insertPanel = migrated.prepare(
+        `INSERT INTO posted_panels (
+           guild_id, panel_id, preset, channel_id, message_id,
+           configuration_json, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, '{}', ?, ?)`,
+      );
+      expect(() =>
+        insertPanel.run(
+          GUILD_A,
+          "verify_p1",
+          "verification",
+          "900000000000000013",
+          "900000000000000014",
+          NOW,
+          NOW,
+        ),
+      ).not.toThrow();
+      expect(() =>
+        insertPanel.run(
+          GUILD_A,
+          "roles_p01",
+          "roles",
+          "900000000000000015",
+          "900000000000000016",
+          NOW,
+          NOW,
+        ),
+      ).not.toThrow();
+    } finally {
+      migrated.close();
+    }
+  });
+
   it.each<MigrationFailurePoint>([
     "after-source-read",
     "after-rename",
@@ -140,27 +273,76 @@ describe("explicit schema migration to v9", () => {
     "after-drop",
     "after-version",
     "before-commit",
-  ])("rolls exact v8 back after an injected %s failure", (failurePoint) => {
-    const dbFile = fixturePath(`v8-${failurePoint}.db`);
-    createV8Fixture(dbFile);
+  ])(
+    "rolls exact v9 back after an injected %s failure",
+    (failurePoint) => {
+      const dbFile = fixturePath(`v9-${failurePoint}.db`);
+      createV9Fixture(dbFile);
+      const before = fs.readFileSync(dbFile);
+
+      expect(() => migrateDatabase({ dbFile, failurePoint })).toThrow(
+        `Injected migration failure at ${failurePoint}`,
+      );
+      expect(fs.readFileSync(dbFile)).toEqual(before);
+      expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
+        schema: "legacy-v9",
+        schemaVersion: 9,
+        foreignKeyViolations: 0,
+      });
+    },
+    15_000,
+  );
+
+  it("dry-runs the complete exact v9-to-v10 transaction", () => {
+    const dbFile = fixturePath("v9-dry-run.db");
+    createV9Fixture(dbFile);
     const before = fs.readFileSync(dbFile);
-    expect(() => migrateDatabase({ dbFile, failurePoint })).toThrow(
-      `Injected migration failure at ${failurePoint}`,
-    );
+
+    expect(migrateDatabase({ dbFile, dryRun: true })).toMatchObject({
+      status: "dry-run",
+      fromSchema: "legacy-v9",
+      toSchema: "current-v10",
+    });
     expect(fs.readFileSync(dbFile)).toEqual(before);
-    expect(validateDatabaseFile(dbFile, { expect: 8 }).schema).toBe(
-      "legacy-v8",
+    expect(validateDatabaseFile(dbFile, { expect: 9 }).schema).toBe(
+      "legacy-v9",
     );
   });
 
-  it("dry-runs exact v8 through the full v9 transaction", () => {
+  it.each<MigrationFailurePoint>([
+    "after-source-read",
+    "after-rename",
+    "after-create",
+    "after-copy",
+    "after-verify",
+    "after-drop",
+    "after-version",
+    "before-commit",
+  ])(
+    "rolls exact v8 back after an injected %s failure",
+    (failurePoint) => {
+      const dbFile = fixturePath(`v8-${failurePoint}.db`);
+      createV8Fixture(dbFile);
+      const before = fs.readFileSync(dbFile);
+      expect(() => migrateDatabase({ dbFile, failurePoint })).toThrow(
+        `Injected migration failure at ${failurePoint}`,
+      );
+      expect(fs.readFileSync(dbFile)).toEqual(before);
+      expect(validateDatabaseFile(dbFile, { expect: 8 }).schema).toBe(
+        "legacy-v8",
+      );
+    },
+    15_000,
+  );
+
+  it("dry-runs exact v8 through the full v10 transaction", () => {
     const dbFile = fixturePath("v8-dry-run.db");
     createV8Fixture(dbFile);
     const before = fs.readFileSync(dbFile);
     expect(migrateDatabase({ dbFile, dryRun: true })).toMatchObject({
       status: "dry-run",
       fromSchema: "legacy-v8",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
     });
     expect(fs.readFileSync(dbFile)).toEqual(before);
     expect(validateDatabaseFile(dbFile, { expect: 8 }).schema).toBe(
@@ -245,15 +427,15 @@ describe("explicit schema migration to v9", () => {
     expect(result).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v2",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
       guilds: 2,
       settingsRequiringReview: 0,
       metricsPreserved: 3,
       metricsDropped: 3,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
-      schema: "current-v9",
-      schemaVersion: 9,
+    expect(validateDatabaseFile(dbFile, { expect: 10 })).toMatchObject({
+      schema: "current-v10",
+      schemaVersion: 10,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -261,10 +443,10 @@ describe("explicit schema migration to v9", () => {
     const migrated = new Database(dbFile, { readonly: true });
     try {
       expect(schemaObjects(migrated, "table")).toEqual(
-        [...V9_TABLE_NAMES].sort(),
+        [...V10_TABLE_NAMES].sort(),
       );
       expect(schemaObjects(migrated, "index")).toEqual(
-        [...V9_EXPLICIT_INDEX_NAMES].sort(),
+        [...V10_EXPLICIT_INDEX_NAMES].sort(),
       );
       expect(
         migrated
@@ -466,14 +648,14 @@ describe("explicit schema migration to v9", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v3",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
       guilds: 1,
       metricsPreserved: 1,
       metricsDropped: 0,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
-      schema: "current-v9",
-      schemaVersion: 9,
+    expect(validateDatabaseFile(dbFile, { expect: 10 })).toMatchObject({
+      schema: "current-v10",
+      schemaVersion: 10,
     });
 
     const db = new Database(dbFile, { readonly: true });
@@ -512,6 +694,7 @@ describe("explicit schema migration to v9", () => {
         { version: 7 },
         { version: 8 },
         { version: 9 },
+        { version: 10 },
       ]);
       for (const table of [
         "ticket_departments",
@@ -575,11 +758,11 @@ describe("explicit schema migration to v9", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v4",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 9 }).schema).toBe(
-      "current-v9",
+    expect(validateDatabaseFile(dbFile, { expect: 10 }).schema).toBe(
+      "current-v10",
     );
 
     const db = new Database(dbFile);
@@ -665,6 +848,7 @@ describe("explicit schema migration to v9", () => {
         { version: 7 },
         { version: 8 },
         { version: 9 },
+        { version: 10 },
       ]);
       expect(() =>
         db
@@ -739,7 +923,7 @@ describe("explicit schema migration to v9", () => {
     },
   );
 
-  it("additively migrates an exact schema-v6 database to v9", () => {
+  it("additively migrates an exact schema-v6 database to v10", () => {
     const dbFile = fixturePath("v6.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -777,13 +961,13 @@ describe("explicit schema migration to v9", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v6",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
       guilds: 1,
       metricsPreserved: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
-      schema: "current-v9",
-      schemaVersion: 9,
+    expect(validateDatabaseFile(dbFile, { expect: 10 })).toMatchObject({
+      schema: "current-v10",
+      schemaVersion: 10,
     });
 
     const migrated = new Database(dbFile, { readonly: true });
@@ -797,6 +981,7 @@ describe("explicit schema migration to v9", () => {
         { version: 7 },
         { version: 8 },
         { version: 9 },
+        { version: 10 },
       ]);
       expect(
         migrated
@@ -824,7 +1009,7 @@ describe("explicit schema migration to v9", () => {
     expect(migrateDatabase({ dbFile, dryRun: true })).toMatchObject({
       status: "dry-run",
       fromSchema: "legacy-v7",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
     });
     expect(fs.readFileSync(dbFile)).toEqual(before);
     expect(validateDatabaseFile(dbFile, { expect: 7 }).schema).toBe(
@@ -834,10 +1019,10 @@ describe("explicit schema migration to v9", () => {
     expect(migrateDatabase({ dbFile })).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v7",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
     });
-    expect(validateDatabaseFile(dbFile, { expect: 9 }).schema).toBe(
-      "current-v9",
+    expect(validateDatabaseFile(dbFile, { expect: 10 }).schema).toBe(
+      "current-v10",
     );
     const migrated = new Database(dbFile, { readonly: true });
     try {
@@ -845,7 +1030,12 @@ describe("explicit schema migration to v9", () => {
         migrated
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([{ version: 7 }, { version: 8 }, { version: 9 }]);
+      ).toEqual([
+        { version: 7 },
+        { version: 8 },
+        { version: 9 },
+        { version: 10 },
+      ]);
     } finally {
       migrated.close();
     }
@@ -872,7 +1062,7 @@ describe("explicit schema migration to v9", () => {
     );
   });
 
-  it("dry-runs schema v6 to v9 without modifying the source", () => {
+  it("dry-runs schema v6 to v10 without modifying the source", () => {
     const dbFile = fixturePath("v6-dry-run.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -883,7 +1073,7 @@ describe("explicit schema migration to v9", () => {
     expect(migrateDatabase({ dbFile, dryRun: true })).toMatchObject({
       status: "dry-run",
       fromSchema: "legacy-v6",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
     });
     expect(fs.readFileSync(dbFile)).toEqual(before);
     expect(validateDatabaseFile(dbFile, { expect: 6 }).schema).toBe(
@@ -891,7 +1081,7 @@ describe("explicit schema migration to v9", () => {
     );
   });
 
-  it("additively migrates an exact schema-v5 database to v9", () => {
+  it("additively migrates an exact schema-v5 database to v10", () => {
     const dbFile = fixturePath("v5.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -906,12 +1096,12 @@ describe("explicit schema migration to v9", () => {
     ).toMatchObject({
       status: "migrated",
       fromSchema: "legacy-v5",
-      toSchema: "current-v9",
+      toSchema: "current-v10",
       guilds: 0,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 9 })).toMatchObject({
-      schema: "current-v9",
-      schemaVersion: 9,
+    expect(validateDatabaseFile(dbFile, { expect: 10 })).toMatchObject({
+      schema: "current-v10",
+      schemaVersion: 10,
     });
     const migrated = new Database(dbFile, { readonly: true });
     try {
@@ -925,9 +1115,10 @@ describe("explicit schema migration to v9", () => {
         { version: 7 },
         { version: 8 },
         { version: 9 },
+        { version: 10 },
       ]);
       expect(schemaObjects(migrated, "table")).toEqual(
-        [...V9_TABLE_NAMES].sort(),
+        [...V10_TABLE_NAMES].sort(),
       );
     } finally {
       migrated.close();
@@ -959,12 +1150,12 @@ describe("explicit schema migration to v9", () => {
     storage.close();
     expect(migrateDatabase({ dbFile })).toMatchObject({
       status: "already-current",
-      fromSchema: "current-v9",
-      toSchema: "current-v9",
+      fromSchema: "current-v10",
+      toSchema: "current-v10",
       guilds: 1,
     });
-    expect(validateDatabaseFile(dbFile, { expect: 9 }).schema).toBe(
-      "current-v9",
+    expect(validateDatabaseFile(dbFile, { expect: 10 }).schema).toBe(
+      "current-v10",
     );
   });
 
@@ -1063,6 +1254,39 @@ function createV1Fixture(dbFile: string): void {
       ON answers (question_message_id, created_at);
     CREATE INDEX idx_answers_message_id ON answers (answer_message_id);
   `);
+  db.close();
+}
+
+function createV9Fixture(dbFile: string): void {
+  const db = new Database(dbFile);
+  db.pragma("foreign_keys = ON");
+  initializeV9Schema(db, NOW);
+  db.prepare(
+    `INSERT INTO guilds (
+       guild_id, enabled, name, joined_at, left_at, created_at, updated_at
+     ) VALUES (?, 1, 'Preserved v9', ?, NULL, ?, ?)`,
+  ).run(GUILD_A, NOW, NOW, NOW);
+  db.prepare(
+    `INSERT INTO guild_settings (
+       guild_id, settings_version, settings_json, updated_at
+     ) VALUES (?, 3, ?, ?)`,
+  ).run(GUILD_A, serializeGuildSettings(createDefaultGuildSettings()), NOW);
+  db.prepare(
+    `INSERT INTO metrics (guild_id, metric_key, metric_value, updated_at)
+     VALUES (?, 'command_usage.utility.ping', 7, ?)`,
+  ).run(GUILD_A, NOW);
+  db.prepare(
+    `INSERT INTO delegated_capability_grants (
+       guild_id, principal_type, principal_id, capability, active,
+       granted_by, created_at, updated_at
+     ) VALUES (?, 'role', ?, 'moderation.manage', 1, ?, ?, ?)`,
+  ).run(GUILD_A, "900000000000000001", USER_A, NOW, NOW);
+  db.prepare(
+    `INSERT INTO posted_panels (
+       guild_id, panel_id, preset, channel_id, message_id,
+       configuration_json, created_at, updated_at
+     ) VALUES (?, 'safetypanel', 'safety', ?, ?, '{"source":"v9"}', ?, ?)`,
+  ).run(GUILD_A, "900000000000000002", "900000000000000003", NOW, NOW);
   db.close();
 }
 

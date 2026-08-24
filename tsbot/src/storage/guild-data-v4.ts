@@ -15,6 +15,8 @@ import {
   type ApplicationResponse,
   type DelegatedCapabilityGrant,
   type GuildDataExport,
+  type GuildCapability,
+  type PanelPreset,
   type PostedPanel,
   type SuggestionConfiguration,
   type SuggestionEvent,
@@ -347,10 +349,13 @@ export function readPhase2OperationalData(
 export function parsePhase2OperationalData(
   candidate: Record<string, unknown>,
   guildId: string,
+  allowedPanelPresets: readonly PanelPreset[] = PHASE2_PANEL_PRESETS,
+  allowedCapabilities: readonly GuildCapability[] = GUILD_CAPABILITIES,
 ): Phase2OperationalData {
   const delegatedCapabilityGrants = parseCapabilityGrants(
     candidate.delegatedCapabilityGrants,
     guildId,
+    allowedCapabilities,
   );
   const ticketDepartments = parseTicketDepartments(
     candidate.ticketDepartments,
@@ -361,7 +366,11 @@ export function parsePhase2OperationalData(
     guildId,
     ticketDepartments,
   );
-  const postedPanels = parsePostedPanels(candidate.postedPanels, guildId);
+  const postedPanels = parsePostedPanels(
+    candidate.postedPanels,
+    guildId,
+    allowedPanelPresets,
+  );
   const tickets = parseTickets(candidate.tickets, guildId, ticketDepartments);
   const ticketFormResponses = parseTicketResponses(
     candidate.ticketFormResponses,
@@ -847,6 +856,7 @@ function insertApplications(
 function parseCapabilityGrants(
   value: unknown,
   guildId: string,
+  capabilities: readonly GuildCapability[],
 ): DelegatedCapabilityGrant[] {
   const rows = requireBoundedArray(
     value,
@@ -868,7 +878,7 @@ function parseCapabilityGrants(
     );
     const capability = requireEnum(
       row.capability,
-      GUILD_CAPABILITIES,
+      capabilities,
       "delegated capability",
     );
     rejectDuplicate(
@@ -1064,7 +1074,20 @@ function parseTicketDepartmentFields(
   });
 }
 
-function parsePostedPanels(value: unknown, guildId: string): PostedPanel[] {
+const PHASE2_PANEL_PRESETS = [
+  "help",
+  "server-info",
+  "resources",
+  "tickets",
+  "suggestions",
+  "applications",
+] as const satisfies readonly PanelPreset[];
+
+function parsePostedPanels(
+  value: unknown,
+  guildId: string,
+  presets: readonly PanelPreset[],
+): PostedPanel[] {
   const rows = requireBoundedArray(
     value,
     PHASE2_COLLECTION_LIMITS.postedPanels,
@@ -1073,14 +1096,6 @@ function parsePostedPanels(value: unknown, guildId: string): PostedPanel[] {
   const ids = new Set<string>();
   const placements = new Set<string>();
   const messages = new Set<string>();
-  const presets = [
-    "help",
-    "server-info",
-    "resources",
-    "tickets",
-    "suggestions",
-    "applications",
-  ] as const;
   return rows.map((value): PostedPanel => {
     const row = requireRecord(value, "Imported posted panel");
     assertImportedGuild(row.guildId, guildId, "posted panel");

@@ -13,7 +13,7 @@ import {
 } from "../src/discord/commands.js";
 
 describe("command guide", () => {
-  it("covers the complete Phase 3 command surface", () => {
+  it("covers the complete Phase 4 command surface", () => {
     const guide = buildSuperiorCommandGuide();
 
     for (const command of [
@@ -25,11 +25,14 @@ describe("command guide", () => {
       "/report",
       "/appeal",
       "/automod",
+      "/onboarding",
+      "/rolemenu",
     ]) {
       expect(guide).toContain(`\`${command}\``);
     }
     expect(guide).toContain("delegated");
-    expect(guide).toContain("format-7");
+    expect(guide).toContain("format-8");
+    expect(guide).toContain("formats 2-8 import");
     expect(guide.length).toBeLessThanOrEqual(2_000);
   });
 
@@ -43,13 +46,15 @@ describe("command guide", () => {
     expect(buildSuperiorCommandGuide()).not.toMatch(/mudae/i);
   });
 
-  it("publishes immediate configuration without onboarding commands", () => {
+  it("publishes current configuration commands without removed setup aliases", () => {
     const definitions = buildCommandDefinitions().map((definition) =>
       definition.toJSON(),
     );
     const names = definitions.map(({ name }) => name);
     expect(names).toContain("config");
     expect(names).toContain("data");
+    expect(names).toContain("onboarding");
+    expect(names).toContain("rolemenu");
     expect(names).not.toContain("setup");
     const serialized = JSON.stringify(definitions);
     expect(serialized).not.toMatch(/"name":"(?:validate|enable-all)"/);

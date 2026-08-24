@@ -3,10 +3,13 @@ import {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
   escapeMarkdown,
   type Guild,
   type MessageMentionOptions,
 } from "discord.js";
+import { safeUnicodeEmoji } from "../unicode-emoji.js";
 import { PANEL_PRESETS, type PanelPreset } from "../types.js";
 
 export { PANEL_PRESETS };
@@ -46,6 +49,8 @@ export const PANEL_PRESET_DESCRIPTIONS: Readonly<Record<PanelPreset, string>> =
     suggestions: "The configured member-suggestion launcher",
     applications: "The configured private staff-application launcher",
     safety: "Private member reports and eligible case appeals",
+    verification: "Current server rules acknowledgement and verification",
+    roles: "A stored persistent self-service role menu",
   });
 
 export interface PanelFeatureState {
@@ -95,11 +100,37 @@ export type SuperiorPanelRequest =
       panelToken: string;
       reportsEnabled: boolean;
       appealsEnabled: boolean;
+    }
+  | {
+      preset: "verification";
+      customId: string;
+      rulesVersion: number;
+      rulesTitle: string;
+      rulesBody: string;
+      reacceptanceRequested: boolean;
+    }
+  | {
+      preset: "roles";
+      customId: string;
+      title: string;
+      description: string;
+      mode: "toggle" | "exclusive" | "limited";
+      minSelections: number;
+      maxSelections: number;
+      requiredRoleId: string | null;
+      options: readonly {
+        optionId: string;
+        label: string;
+        description: string | null;
+        emoji: string | null;
+      }[];
     };
 
 export interface SuperiorPanelPayload {
   embeds: readonly [EmbedBuilder];
-  components: readonly ActionRowBuilder<ButtonBuilder>[];
+  components: readonly (
+    ActionRowBuilder<ButtonBuilder> | ActionRowBuilder<StringSelectMenuBuilder>
+  )[];
   allowedMentions: Readonly<MessageMentionOptions>;
 }
 
@@ -211,7 +242,86 @@ export function renderSuperiorPanel(
         request.reportsEnabled,
         request.appealsEnabled,
       );
+    case "verification":
+      return renderVerificationPanel(request);
+    case "roles":
+      return renderRoleMenuPanel(request);
   }
+}
+
+function renderVerificationPanel(
+  request: Extract<SuperiorPanelRequest, { preset: "verification" }>,
+): SuperiorPanelPayload {
+  const acknowledgement = request.reacceptanceRequested
+    ? "The rules have changed. Use the button below to acknowledge the current version. This acknowledgement is not a legal agreement."
+    : "Use the button below to acknowledge the current server rules. This acknowledgement is not a legal agreement.";
+  const embed = createSuperiorEmbed()
+    .setTitle(escapeMarkdown(request.rulesTitle).slice(0, 256))
+    .setDescription(
+      `${escapeMarkdown(request.rulesBody).slice(0, 3_700)}\n\n${acknowledgement}`,
+    )
+    .addFields({
+      name: "Rules version",
+      value: `\`${request.rulesVersion}\``,
+      inline: true,
+    });
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(request.customId)
+      .setLabel("Accept Rules")
+      .setStyle(ButtonStyle.Primary),
+  );
+  return createPanelPayload(embed, [row]);
+}
+
+function renderRoleMenuPanel(
+  request: Extract<SuperiorPanelRequest, { preset: "roles" }>,
+): SuperiorPanelPayload {
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(request.customId)
+    .setPlaceholder(
+      request.mode === "exclusive"
+        ? "Choose one role"
+        : "Choose the roles you want to keep",
+    )
+    .setMinValues(request.minSelections)
+    .setMaxValues(
+      request.mode === "exclusive"
+        ? 1
+        : Math.min(request.maxSelections, request.options.length),
+    )
+    .addOptions(
+      request.options.map((option) => {
+        const builder = new StringSelectMenuOptionBuilder()
+          .setValue(option.optionId)
+          .setLabel(option.label);
+        if (option.description) builder.setDescription(option.description);
+        const emoji = safeUnicodeEmoji(option.emoji);
+        if (emoji) builder.setEmoji(emoji);
+        return builder;
+      }),
+    );
+  const embed = createSuperiorEmbed()
+    .setTitle(escapeMarkdown(request.title))
+    .setDescription(escapeMarkdown(request.description))
+    .addFields({
+      name: "Selection",
+      value:
+        request.mode === "exclusive"
+          ? request.minSelections === 0
+            ? "Choose at most one role, or clear your selection."
+            : "Choose exactly one role."
+          : `Choose between ${request.minSelections} and ${request.maxSelections} roles. Your selection becomes the desired set for this menu.`,
+    });
+  if (request.requiredRoleId) {
+    embed.addFields({
+      name: "Required role",
+      value: `<@&${request.requiredRoleId}>`,
+    });
+  }
+  return createPanelPayload(embed, [
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
+  ]);
 }
 
 export function renderHelpPanel(
@@ -510,7 +620,7 @@ export function renderSafetyLauncherPanel(
 
 function createPanelPayload(
   embed: EmbedBuilder,
-  components: readonly ActionRowBuilder<ButtonBuilder>[] = [],
+  components: SuperiorPanelPayload["components"] = [],
 ): SuperiorPanelPayload {
   return {
     embeds: [embed],

@@ -108,6 +108,12 @@ import {
 } from "./appeal-interactions.js";
 import { buildAutomodCommandDefinition } from "./automod-command.js";
 import { handleAutomodCommand } from "./automod-commands-handler.js";
+import { buildOnboardingCommandDefinition } from "./onboarding-command.js";
+import { handleOnboardingCommand } from "./onboarding-commands-handler.js";
+import { buildRoleMenuCommandDefinition } from "./role-menu-command.js";
+import { handleRoleMenuCommand } from "./role-menu-commands-handler.js";
+import { handleVerificationButton } from "./verification-interactions.js";
+import { handleRoleMenuSelect } from "./role-menu-interactions.js";
 
 const SUPERIOR_SUBCOMMANDS = [
   "say",
@@ -255,6 +261,8 @@ export function buildCommandDefinitions(): Array<
     buildReportCommandDefinition(),
     buildAppealCommandDefinition(),
     buildAutomodCommandDefinition(),
+    buildOnboardingCommandDefinition(),
+    buildRoleMenuCommandDefinition(),
     buildAccessCommandDefinition(),
     buildPingRoleCommandDefinition(),
     buildRestrictedPingCommandDefinition(),
@@ -656,6 +664,21 @@ export async function handleChatInputCommand(
     await handleAutomodCommand(interaction, guildRuntime);
     return;
   }
+  if (command === "onboarding" || command === "rolemenu") {
+    await deferPrivate(interaction);
+    const actor = await requireCapability(
+      interaction,
+      guildRuntime,
+      command === "onboarding" ? "onboarding.configure" : "roles.configure",
+    );
+    if (!actor) return;
+    if (command === "onboarding") {
+      await handleOnboardingCommand(interaction, guildRuntime, actor);
+    } else {
+      await handleRoleMenuCommand(interaction, guildRuntime, actor);
+    }
+    return;
+  }
   if (command === "utility") {
     await handleUtilityCommand(interaction, guildRuntime);
     return;
@@ -769,6 +792,7 @@ export async function handleButtonInteraction(
 ): Promise<void> {
   const guildRuntime = await getCurrentComponentRuntime(interaction, runtime);
   if (!guildRuntime) return;
+  if (await handleVerificationButton(interaction, guildRuntime)) return;
   if (await handleReportButton(interaction, guildRuntime)) return;
   if (await handleAppealButton(interaction, guildRuntime)) return;
   if (await handleApplicationButton(interaction, guildRuntime)) return;
@@ -805,6 +829,7 @@ export async function handleStringSelectMenuInteraction(
 ): Promise<void> {
   const guildRuntime = await getCurrentComponentRuntime(interaction, runtime);
   if (!guildRuntime) return;
+  if (await handleRoleMenuSelect(interaction, guildRuntime)) return;
   if (await handleApplicationSelect(interaction, guildRuntime)) return;
   if (await handleTicketSelect(interaction, guildRuntime)) return;
   await replyPrivate(
@@ -909,7 +934,7 @@ export function buildSuperiorCommandGuide(): string {
     "`/pingrole role:@Role` - safely notify a configured role in its allowed channel",
     "`/restrictedping` - owner/Administrator restricted-role mapping and cooldown configuration",
     "`/config` — optional Administrator settings and explicit emergency bot-state control",
-    "`/data` — owner-controlled format-7 export, import, and purge",
+    "`/data` — owner-controlled format-8 export, formats 2-8 import, and purge",
     "`/access` — owner/Administrator grants and status for delegated role capabilities",
     "`/panel` — fixed help, server, resource, workflow, and safety panels",
     "`/ticket` — delegated department, form, routing, launcher, health, and recovery tools",
@@ -919,6 +944,8 @@ export function buildSuperiorCommandGuide(): string {
     "`/report` — private member reports, status, withdrawal, and authorized recovery",
     "`/appeal` — in-guild case appeals, status, withdrawal, and authorized recovery",
     "`/automod` — narrow configurable anti-spam rules, exemptions, and safe synthetic tests",
+    "`/onboarding` — delegated welcome, farewell, rules, verification, autorole, status, and recovery tools",
+    "`/rolemenu` — delegated persistent safe self-service role-menu configuration and recovery",
     "`/superior` — announcements, safe panels, moderation, backfill, and this help",
     "`/utility` — private member/server/role/channel/ID/time information",
     "`/fun` — battles and aggregate activity statistics",
