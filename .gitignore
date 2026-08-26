@@ -5,6 +5,7 @@
 *.env.*
 !.env.example
 /mudae-watch.private.json
+/emoji-replies.json
 
 # Local editor and agent state
 .github/prompts/

@@ -1,6 +1,6 @@
 # Superior
 
-Superior 6.2.0 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
+Superior 6.4.0 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
 
 ## Windows quick start
 
@@ -28,6 +28,7 @@ The first launch places the immutable bundled runtime in the current Windows use
 - `/automod` configures a deliberately narrow, default-disabled burst, duplicate, and mention anti-spam system with role/channel exemptions, dry-run testing, durable cooldowns, and auditable enforcement.
 - `/superior` continues to provide announcements and panels, message cleanup, channel controls, bounded member timeouts, activity backfill, and command help.
 - `/utility`, `/fun`, `/greetings`, and deliberately addressed natural chat retain their existing member-facing behavior.
+- Optional `emoji-replies.json` configures Unicode reactions and attached emoji replies for selected members across multiple servers; changes reload without restarting the bot.
 
 ## Safety model
 

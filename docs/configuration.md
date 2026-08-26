@@ -30,6 +30,7 @@ Core replies and panels normally need View Channels, Send Messages, Embed Links,
 | Ticket departments          | Manage Channels and Manage Roles; each category must allow View Channel, Send Messages, Read Message History, Embed Links, Attach Files, Manage Channels, and Manage Roles; each closure-log channel also needs Attach Files                                                        |
 | Suggestions                 | The public channel needs View Channel, Send Messages, Read Message History, and Embed Links; discussion mode additionally needs Create Public Threads and Send Messages in Threads in a standard text channel; an optional review channel needs the core message permissions        |
 | Staff applications          | The private review channel must be a standard text channel where `@everyone` cannot View Channel; Superior needs View Channel, Send Messages, Read Message History, and Embed Links, while the configured reviewer role needs View Channel, Send Messages, and Read Message History |
+| Configured emoji reactions  | View Channel, Read Message History, Add Reactions, and Send Messages in every channel where the configured members may post; replies also need the channel's applicable Send Messages permission                                                                                    |
 
 `Mention Everyone` is needed when an administrator explicitly chooses that announcement option or when Superior sends an approved mention of a normally non-mentionable restricted-ping role. Onboarding templates and role menus never need it and suppress automatic mentions. Ordinary members do not need Mention Everyone. Keep Superior's highest role above roles it must manage or members it must moderate; restricted pings do not manage roles and therefore do not require a hierarchy relationship. A reviewer role must have effective access to its own private report or appeal destination. Superior verifies effective channel permissions, current resources, and role hierarchy whenever the operation needs it.
 
@@ -51,6 +52,44 @@ Copy `.env.example` to `.env` in the application root. For a Windows portable bu
 Use global registration for production. Discord can take time to propagate global command changes. Use guild registration only for controlled development because updates appear faster. Never put a production guild ID into source code.
 
 Discord cannot vary slash-command visibility by a guild's delegated grants. `/panel`, `/ticket`, `/suggestion`, `/application`, `/moderation`, `/automod`, `/onboarding`, and `/rolemenu` therefore expose relevant command choices and enforce the exact permission at runtime. A visible command is not evidence that the member may use it. `/access` and `/restrictedping` are Administrator-restricted in Discord and also perform a fresh owner-or-Administrator check at runtime. Member verification and role-menu components repeat guild, member, resource, version, and binding checks on every use.
+
+## Configured emoji reactions and replies
+
+The optional `emoji-replies.json` file lives in the application root, beside `.env` and `superior.db`. It is intended for small, operator-managed reactions to selected members across all channels in selected servers. The file is not required; a missing file disables this feature.
+
+Use Discord's numeric server and member IDs as JSON object keys. Each member must have at least one standard Unicode emoji. `reactionsEnabled` and `repliesEnabled` are independent global switches:
+
+```json
+{
+  "reactionsEnabled": true,
+  "repliesEnabled": true,
+  "servers": {
+    "SERVER_ID_1": {
+      "members": {
+        "MEMBER_ID_1": {
+          "emojis": ["👍🏿"]
+        },
+        "MEMBER_ID_2": {
+          "emojis": ["👍🏿", "💀"]
+        }
+      }
+    },
+    "SERVER_ID_2": {
+      "members": {
+        "MEMBER_ID_3": {
+          "emojis": ["🔥", "✅"]
+        }
+      }
+    }
+  }
+}
+```
+
+When reactions are enabled, Superior adds each configured emoji as its own reaction to every qualifying message. When replies are enabled, it sends all of that member's emojis together as one actual Discord reply attached to the message. The first qualifying message replies immediately; after a successful reply, Superior randomly skips 1–5 later qualifying messages before replying again. Skip counters are independent for each member in each server, and reactions continue on every qualifying message during those skips.
+
+The service ignores bot and webhook messages and applies only to the configured servers and members, regardless of channel. Removing a member from the file disables that member after the next configuration reload. The bot watches the file while running and also checks it when messages arrive, so edits do not require a restart. A malformed file, invalid Discord ID, unsupported custom emoji, or unreadable file is logged clearly and leaves the last valid configuration active; if no valid configuration has ever loaded, the feature remains disabled. Configuration reloads reset reply skip counters.
+
+If a channel lacks Add Reactions, Read Message History, or Send Messages, the affected Discord operation is logged and the rest of the bot continues running. Enable Message Content Intent in the Developer Portal, as described above, so the bot receives the member messages it must inspect.
 
 ## Immediate defaults and optional configuration
 

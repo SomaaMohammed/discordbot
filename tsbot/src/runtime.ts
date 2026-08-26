@@ -14,6 +14,10 @@ import { logDebug, logError, logInfo, logWarn } from "./logging.js";
 import { CURRENT_SCHEMA_VERSION } from "./storage/schema.js";
 import { loadPrivateMudaeWatchConfig } from "./mudae-watch-config.js";
 import {
+  createEmojiReplyService,
+  type EmojiReplyService,
+} from "./emoji-replies-service.js";
+import {
   PrivateMudaeWatcher,
   type PrivateMudaeWatchDeduplicationStore,
   type PrivateMudaeWatchLogger,
@@ -38,6 +42,7 @@ export interface BotRuntime {
   readonly processConfig: ProcessConfig;
   readonly storage: BotStorage;
   readonly privateMudaeWatcher: PrivateMudaeWatcher | null;
+  readonly emojiReplies: EmojiReplyService | null;
   readonly randomInt: (maxExclusive: number) => number;
   forGuild: (guildId: string) => Promise<GuildRuntime | null>;
   interactionFormsForGuild: (guildId: string) => InteractionFormSnapshot | null;
@@ -94,11 +99,15 @@ export function createRuntime(
   const interactionFormSnapshots = new Map<string, InteractionFormSnapshot>();
   const randomInt = (maxExclusive: number): number =>
     Math.floor(Math.random() * Math.max(maxExclusive, 1));
+  const emojiReplies = applicationRoot
+    ? createEmojiReplyService(applicationRoot, { randomInt })
+    : null;
 
   const runtime: BotRuntime = {
     processConfig,
     storage,
     privateMudaeWatcher,
+    emojiReplies,
     randomInt,
     async forGuild(guildId: string): Promise<GuildRuntime | null> {
       const normalizedGuildId = String(guildId).trim();

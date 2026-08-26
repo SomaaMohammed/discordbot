@@ -150,6 +150,14 @@ export async function handleMessageCreate(
     return;
   }
 
+  await processRuntime.emojiReplies?.processMessage(message).catch((error) => {
+    logError("emoji-replies", "Configured emoji processing failed", {
+      guildId: message.guildId ?? "dm",
+      messageId: message.id,
+      error,
+    });
+  });
+
   const guildId = message.guildId;
   const guild = message.guild;
   if (

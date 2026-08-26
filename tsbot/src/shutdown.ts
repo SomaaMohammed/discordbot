@@ -122,6 +122,14 @@ export function createShutdownCoordinator(
           error,
         });
       }
+      try {
+        runtime.emojiReplies?.close();
+      } catch (error) {
+        logError("shutdown", "Failed to close emoji reply configuration", {
+          reason,
+          error,
+        });
+      }
     } finally {
       try {
         runtime.storage.close();
