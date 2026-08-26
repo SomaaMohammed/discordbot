@@ -57,7 +57,7 @@ Discord cannot vary slash-command visibility by a guild's delegated grants. `/pa
 
 The optional `emoji-replies.json` file lives in the application root, beside `.env` and `superior.db`. It is intended for small, operator-managed reactions to selected members across all channels in selected servers. The file is not required; a missing file disables this feature.
 
-Use Discord's numeric server and member IDs as JSON object keys. Each member must have at least one standard Unicode emoji. `reactionsEnabled` and `repliesEnabled` are independent global switches:
+Use Discord's numeric server and member IDs as JSON object keys. Each member has separate `reactionEmojis` and `replyEmojis` arrays; at least one of the arrays must contain a standard Unicode emoji. `reactionsEnabled` and `repliesEnabled` are independent global switches:
 
 ```json
 {
@@ -67,17 +67,20 @@ Use Discord's numeric server and member IDs as JSON object keys. Each member mus
     "SERVER_ID_1": {
       "members": {
         "MEMBER_ID_1": {
-          "emojis": ["👍🏿"]
+          "reactionEmojis": ["👍🏿"],
+          "replyEmojis": ["💀"]
         },
         "MEMBER_ID_2": {
-          "emojis": ["👍🏿", "💀"]
+          "reactionEmojis": ["🔥", "✅"],
+          "replyEmojis": ["👀"]
         }
       }
     },
     "SERVER_ID_2": {
       "members": {
         "MEMBER_ID_3": {
-          "emojis": ["🔥", "✅"]
+          "reactionEmojis": [],
+          "replyEmojis": ["🎉"]
         }
       }
     }
@@ -85,7 +88,9 @@ Use Discord's numeric server and member IDs as JSON object keys. Each member mus
 }
 ```
 
-When reactions are enabled, Superior adds each configured emoji as its own reaction to every qualifying message. When replies are enabled, it sends all of that member's emojis together as one actual Discord reply attached to the message. The first qualifying message replies immediately; after a successful reply, Superior randomly skips 1–5 later qualifying messages before replying again. Skip counters are independent for each member in each server, and reactions continue on every qualifying message during those skips.
+Existing files that use the old single `emojis` array remain valid and use that same list for both reactions and replies. Replace it with the two arrays above when you want different emojis for each behavior.
+
+When reactions are enabled, Superior adds each `reactionEmojis` entry as its own reaction to every qualifying message. When replies are enabled, it sends all `replyEmojis` entries together as one actual Discord reply attached to the message. The first qualifying message replies immediately; after a successful reply, Superior randomly skips 1–5 later qualifying messages before replying again. Skip counters are independent for each member in each server, and reactions continue on every qualifying message during those skips.
 
 The service ignores bot and webhook messages and applies only to the configured servers and members, regardless of channel. Removing a member from the file disables that member after the next configuration reload. The bot watches the file while running and also checks it when messages arrive, so edits do not require a restart. A malformed file, invalid Discord ID, unsupported custom emoji, or unreadable file is logged clearly and leaves the last valid configuration active; if no valid configuration has ever loaded, the feature remains disabled. Configuration reloads reset reply skip counters.
 

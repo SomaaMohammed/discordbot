@@ -43,13 +43,22 @@ describe("emoji reply configuration", () => {
           servers: {
             [SERVER_A]: {
               members: {
-                [MEMBER_A]: { emojis: ["👍🏿", "💀"] },
-                [MEMBER_B]: { emojis: ["🔥"] },
+                [MEMBER_A]: {
+                  reactionEmojis: ["👍🏿"],
+                  replyEmojis: ["💀"],
+                },
+                [MEMBER_B]: {
+                  reactionEmojis: ["🔥"],
+                  replyEmojis: ["🎉"],
+                },
               },
             },
             [SERVER_B]: {
               members: {
-                [MEMBER_C]: { emojis: ["✅", "🎉"] },
+                [MEMBER_C]: {
+                  reactionEmojis: ["✅"],
+                  replyEmojis: ["🎉"],
+                },
               },
             },
           },
@@ -65,18 +74,19 @@ describe("emoji reply configuration", () => {
     await service.processMessage(memberC.message);
 
     expect(memberA.react).toHaveBeenCalledWith("👍🏿");
-    expect(memberA.react).toHaveBeenCalledWith("💀");
+    expect(memberA.react).not.toHaveBeenCalledWith("💀");
     expect(memberA.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: "👍🏿💀" }),
+      expect.objectContaining({ content: "💀" }),
     );
     expect(memberB.react).toHaveBeenCalledWith("🔥");
+    expect(memberB.react).not.toHaveBeenCalledWith("🎉");
     expect(memberB.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: "🔥" }),
+      expect.objectContaining({ content: "🎉" }),
     );
     expect(memberC.react).toHaveBeenCalledWith("✅");
-    expect(memberC.react).toHaveBeenCalledWith("🎉");
+    expect(memberC.react).not.toHaveBeenCalledWith("🎉");
     expect(memberC.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: "✅🎉" }),
+      expect.objectContaining({ content: "🎉" }),
     );
     expect(memberA.reply.mock.calls[0]?.[0]).toMatchObject({
       allowedMentions: { parse: [], repliedUser: false },
@@ -93,13 +103,22 @@ describe("emoji reply configuration", () => {
           servers: {
             [SERVER_A]: {
               members: {
-                [MEMBER_A]: { emojis: ["👍🏿"] },
-                [MEMBER_B]: { emojis: ["💀"] },
+                [MEMBER_A]: {
+                  reactionEmojis: ["👍🏿"],
+                  replyEmojis: ["💀"],
+                },
+                [MEMBER_B]: {
+                  reactionEmojis: ["💀"],
+                  replyEmojis: ["👍🏿"],
+                },
               },
             },
             [SERVER_B]: {
               members: {
-                [MEMBER_A]: { emojis: ["🔥"] },
+                [MEMBER_A]: {
+                  reactionEmojis: ["🔥"],
+                  replyEmojis: ["✅"],
+                },
               },
             },
           },
@@ -145,7 +164,14 @@ describe("emoji reply configuration", () => {
           reactionsEnabled: true,
           repliesEnabled: false,
           servers: {
-            [SERVER_A]: { members: { [MEMBER_A]: { emojis: ["✅", "🔥"] } } },
+            [SERVER_A]: {
+              members: {
+                [MEMBER_A]: {
+                  reactionEmojis: ["✅", "🔥"],
+                  replyEmojis: [],
+                },
+              },
+            },
           },
         }),
       ),
@@ -161,7 +187,14 @@ describe("emoji reply configuration", () => {
           reactionsEnabled: false,
           repliesEnabled: true,
           servers: {
-            [SERVER_A]: { members: { [MEMBER_A]: { emojis: ["✅", "🔥"] } } },
+            [SERVER_A]: {
+              members: {
+                [MEMBER_A]: {
+                  reactionEmojis: [],
+                  replyEmojis: ["✅", "🔥"],
+                },
+              },
+            },
           },
         }),
       ),
@@ -177,7 +210,14 @@ describe("emoji reply configuration", () => {
           reactionsEnabled: false,
           repliesEnabled: false,
           servers: {
-            [SERVER_A]: { members: { [MEMBER_A]: { emojis: ["✅"] } } },
+            [SERVER_A]: {
+              members: {
+                [MEMBER_A]: {
+                  reactionEmojis: [],
+                  replyEmojis: ["✅"],
+                },
+              },
+            },
           },
         }),
       ),
@@ -195,7 +235,14 @@ describe("emoji reply configuration", () => {
           reactionsEnabled: true,
           repliesEnabled: true,
           servers: {
-            [SERVER_A]: { members: { [MEMBER_A]: { emojis: ["✅"] } } },
+            [SERVER_A]: {
+              members: {
+                [MEMBER_A]: {
+                  reactionEmojis: ["✅"],
+                  replyEmojis: ["🎉"],
+                },
+              },
+            },
           },
         }),
       ),
@@ -274,7 +321,11 @@ describe("emoji reply configuration", () => {
           reactionsEnabled: true,
           repliesEnabled: true,
           servers: {
-            "not-a-server": { members: { [MEMBER_A]: { emojis: ["✅"] } } },
+            "not-a-server": {
+              members: {
+                [MEMBER_A]: { reactionEmojis: ["✅"], replyEmojis: [] },
+              },
+            },
           },
         }),
       ),
@@ -289,10 +340,36 @@ describe("emoji reply configuration", () => {
         reactionsEnabled: true,
         repliesEnabled: true,
         servers: {
-          [SERVER_A]: { members: { [MEMBER_A]: { emojis: [":custom:"] } } },
+          [SERVER_A]: {
+            members: {
+              [MEMBER_A]: {
+                reactionEmojis: [":custom:"],
+                replyEmojis: [],
+              },
+            },
+          },
         },
       }),
     ).toThrow(/standard Unicode emoji/);
+  });
+
+  it("keeps the old shared emoji list compatible", () => {
+    const configuration = parseEmojiRepliesConfig({
+      reactionsEnabled: true,
+      repliesEnabled: true,
+      servers: {
+        [SERVER_A]: {
+          members: {
+            [MEMBER_A]: { emojis: ["✅", "🔥"] },
+          },
+        },
+      },
+    });
+
+    expect(configuration.servers[SERVER_A]?.members[MEMBER_A]).toEqual({
+      reactionEmojis: ["✅", "🔥"],
+      replyEmojis: ["✅", "🔥"],
+    });
   });
 
   it("handles Discord reaction and reply failures without rejecting message processing", async () => {
@@ -302,7 +379,14 @@ describe("emoji reply configuration", () => {
           reactionsEnabled: true,
           repliesEnabled: true,
           servers: {
-            [SERVER_A]: { members: { [MEMBER_A]: { emojis: ["✅", "🔥"] } } },
+            [SERVER_A]: {
+              members: {
+                [MEMBER_A]: {
+                  reactionEmojis: ["✅"],
+                  replyEmojis: ["🔥"],
+                },
+              },
+            },
           },
         }),
       ),
@@ -327,7 +411,14 @@ describe("emoji reply configuration", () => {
           reactionsEnabled: true,
           repliesEnabled: true,
           servers: {
-            [SERVER_A]: { members: { [MEMBER_A]: { emojis: ["✅"] } } },
+            [SERVER_A]: {
+              members: {
+                [MEMBER_A]: {
+                  reactionEmojis: ["✅"],
+                  replyEmojis: ["🎉"],
+                },
+              },
+            },
           },
         }),
       ),
@@ -342,7 +433,7 @@ describe("emoji reply configuration", () => {
 
     expect(entry.react).toHaveBeenCalledWith("✅");
     expect(entry.reply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: "✅" }),
+      expect.objectContaining({ content: "🎉" }),
     );
     expect(runtime.forGuild).toHaveBeenCalledWith(SERVER_A);
   });

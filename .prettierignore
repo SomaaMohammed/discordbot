@@ -29,6 +29,7 @@ windows/.work/
 !.env.example
 AGENTS.md
 mudae-watch.private.json
+emoji-replies.json
 *.db
 *.db-*
 *.sqlite

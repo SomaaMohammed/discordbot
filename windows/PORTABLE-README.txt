@@ -50,7 +50,7 @@ DATA AND BACKUPS
   package-lock hash, and deterministic source identity used for this build.
 
 SCHEMA UPGRADE
-Version 6.4.0 will not start against schema v9, v8, v7, v6, v5, v4, v3, or v2.
+Version 6.5.0 will not start against schema v9, v8, v7, v6, v5, v4, v3, or v2.
 Close every old bot, bundled node.exe, and SQLite editor; keep the original
 database untouched; and copy it into this folder as superior.db. For the normal
 schema-v9 upgrade from Superior 6.1.0, run these commands in PowerShell:

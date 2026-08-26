@@ -21,6 +21,36 @@ const unicodeEmoji = z.string().superRefine((value, context) => {
   }
 });
 
+const emojiList = z.array(unicodeEmoji).max(MAX_EMOJI_REPLIES_PER_MEMBER);
+
+const rawMemberSchema = z
+  .union([
+    z
+      .object({
+        reactionEmojis: emojiList,
+        replyEmojis: emojiList,
+      })
+      .strict(),
+    z
+      .object({
+        emojis: emojiList,
+      })
+      .strict(),
+  ])
+  .superRefine((member, context) => {
+    const emojis =
+      "emojis" in member
+        ? member.emojis
+        : [...member.reactionEmojis, ...member.replyEmojis];
+    if (emojis.length === 0) {
+      context.addIssue({
+        code: "custom",
+        message: "must contain at least one emoji",
+        path: ["reactionEmojis"],
+      });
+    }
+  });
+
 const rawEmojiRepliesSchema = z
   .object({
     reactionsEnabled: z.boolean(),
@@ -29,17 +59,7 @@ const rawEmojiRepliesSchema = z
       z.string(),
       z
         .object({
-          members: z.record(
-            z.string(),
-            z
-              .object({
-                emojis: z
-                  .array(unicodeEmoji)
-                  .min(1, "must contain at least one emoji")
-                  .max(MAX_EMOJI_REPLIES_PER_MEMBER),
-              })
-              .strict(),
-          ),
+          members: z.record(z.string(), rawMemberSchema),
         })
         .strict(),
     ),
@@ -85,7 +105,8 @@ const rawEmojiRepliesSchema = z
   });
 
 export interface EmojiRepliesMemberConfig {
-  readonly emojis: readonly string[];
+  readonly reactionEmojis: readonly string[];
+  readonly replyEmojis: readonly string[];
 }
 
 export interface EmojiRepliesServerConfig {
@@ -126,8 +147,15 @@ export function parseEmojiRepliesConfig(input: unknown): EmojiRepliesConfig {
   for (const [serverId, server] of Object.entries(parsed.servers)) {
     const members: Record<string, EmojiRepliesMemberConfig> = {};
     for (const [memberId, member] of Object.entries(server.members)) {
+      const reactionEmojis =
+        "emojis" in member ? member.emojis : member.reactionEmojis;
+      const replyEmojis =
+        "emojis" in member ? member.emojis : member.replyEmojis;
       members[memberId] = {
-        emojis: member.emojis.map((emoji) => normalizeUnicodeEmoji(emoji)),
+        reactionEmojis: reactionEmojis.map((emoji) =>
+          normalizeUnicodeEmoji(emoji),
+        ),
+        replyEmojis: replyEmojis.map((emoji) => normalizeUnicodeEmoji(emoji)),
       };
     }
     servers[serverId] = { members };

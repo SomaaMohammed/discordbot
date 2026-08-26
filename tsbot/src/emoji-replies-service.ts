@@ -80,23 +80,28 @@ export class EmojiReplyService {
     const memberId = message.author.id;
     const memberConfiguration =
       configuration.servers[guildId]?.members[memberId];
-    if (!memberConfiguration || memberConfiguration.emojis.length === 0) {
+    if (
+      !memberConfiguration ||
+      (memberConfiguration.reactionEmojis.length === 0 &&
+        memberConfiguration.replyEmojis.length === 0)
+    ) {
       return;
     }
 
     const reactionWork = configuration.reactionsEnabled
-      ? memberConfiguration.emojis.map((emoji, index) =>
+      ? memberConfiguration.reactionEmojis.map((emoji, index) =>
           this.addReaction(message, guildId, memberId, emoji, index),
         )
       : [];
-    const replyWork = configuration.repliesEnabled
-      ? this.enqueueReply({
-          generation: this.configurationGeneration,
-          guildId,
-          memberId,
-          message,
-        })
-      : Promise.resolve();
+    const replyWork =
+      configuration.repliesEnabled && memberConfiguration.replyEmojis.length > 0
+        ? this.enqueueReply({
+            generation: this.configurationGeneration,
+            guildId,
+            memberId,
+            message,
+          })
+        : Promise.resolve();
 
     await Promise.all([Promise.all(reactionWork), replyWork]);
   }
@@ -179,7 +184,7 @@ export class EmojiReplyService {
     const configuration = this.configuration;
     return Boolean(
       configuration?.repliesEnabled &&
-      configuration.servers[guildId]?.members[memberId],
+      configuration.servers[guildId]?.members[memberId]?.replyEmojis.length,
     );
   }
 
@@ -213,7 +218,7 @@ export class EmojiReplyService {
     if (!memberConfiguration) return false;
     try {
       await message.reply({
-        content: memberConfiguration.emojis.join(""),
+        content: memberConfiguration.replyEmojis.join(""),
         allowedMentions: SAFE_ALLOWED_MENTIONS,
       });
       return true;
