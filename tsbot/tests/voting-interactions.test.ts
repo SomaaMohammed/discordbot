@@ -152,6 +152,38 @@ describe("voting-panel Discord interactions", () => {
       }),
     );
   });
+
+  it("reports the persisted terminal state when closing races with cancellation", async () => {
+    const harness = createButtonHarness({ administrator: true });
+    const cancelled = {
+      ...harness.panel,
+      status: "cancelled" as const,
+      cancelledAt: NOW,
+      cancelledBy: ADMIN_ID,
+      updatedAt: "2026-08-27T12:01:00.000Z",
+    };
+    harness.storage.transitionVotingPanel.mockReturnValue({
+      status: "conflict",
+      panel: cancelled,
+    });
+
+    await expect(
+      handleVotingPanelButton(
+        harness.closeInteraction as never,
+        harness.runtime,
+      ),
+    ).resolves.toBe(true);
+
+    expect(harness.closeInteraction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "This vote was already cancelled.",
+        allowedMentions: { parse: [] },
+      }),
+    );
+    expect(harness.storage.recordCommandMetric).not.toHaveBeenCalledWith(
+      "panel.vote.close",
+    );
+  });
 });
 
 function createCommandHarness(

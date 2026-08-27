@@ -1,4 +1,4 @@
-import { PermissionFlagsBits } from "discord.js";
+import { MessageFlags, PermissionFlagsBits } from "discord.js";
 import { describe, expect, it, vi } from "vitest";
 import type { GuildRuntime } from "../src/runtime.js";
 import {
@@ -232,6 +232,9 @@ describe("panel delivery safety", () => {
     await handlePanelCommand(interaction as never, runtime, { guild } as never);
 
     expect(send).toHaveBeenCalledTimes(1);
+    expect(interaction.deferReply).toHaveBeenCalledWith({
+      flags: MessageFlags.Ephemeral,
+    });
     expect(has).toHaveBeenCalledWith(PermissionFlagsBits.SendMessagesInThreads);
     expect(has).not.toHaveBeenCalledWith(PermissionFlagsBits.SendMessages);
   });

@@ -543,7 +543,9 @@ function completionOutcome(panel: VotingPanelView): string | null {
     return `Winner: **${safeEmbedText(winners[0]!.label, 900)}** with **${highest}** vote${highest === 1 ? "" : "s"}.`;
   }
   return `Tie: ${winners
-    .map((option) => `**${safeEmbedText(option.label, 180)}**`)
+    // Up to ten custom labels may tie. Keep each escaped label short enough
+    // that the Result field stays within Discord's 1,024-character limit.
+    .map((option) => `**${safeEmbedText(option.label, 80)}**`)
     .join(", ")} with **${highest}** votes each.`;
 }
 

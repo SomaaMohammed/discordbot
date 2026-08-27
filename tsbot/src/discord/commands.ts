@@ -739,7 +739,13 @@ export async function handleChatInputCommand(
   if (PANEL_SUBCOMMANDS.has(subcommand)) {
     const actor = await requireAdministrator(interaction, guildRuntime);
     if (!actor) return;
-    await deferPublic(interaction);
+    // `say` is a general announcement command, not a panel post. Keep its
+    // acknowledgement private while panel creation and management stay public.
+    if (subcommand === "say") {
+      await deferPrivate(interaction);
+    } else {
+      await deferPublic(interaction);
+    }
     await handlePanelCommand(interaction, guildRuntime, actor);
     return;
   }

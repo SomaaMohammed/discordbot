@@ -521,15 +521,18 @@ async function handleManagementButton(
   await deliverVotingPanelCompletion(interaction.message, transition.panel, {
     allowEveryoneMention: allowCompletionMention,
   }).catch(() => undefined);
-  recordVotingMetric(
-    runtime,
-    parsed.kind === "close" ? "panel.vote.close" : "panel.vote.cancel",
-  );
-  const action = parsed.kind === "close" ? "completed" : "cancelled";
-  const already = transition.status === "already-transitioned";
+  const action = transition.panel.status === "completed" ? "completed" : "cancelled";
+  if (transition.status === "transitioned") {
+    recordVotingMetric(
+      runtime,
+      action === "completed" ? "panel.vote.close" : "panel.vote.cancel",
+    );
+  }
   await replyPublic(
     interaction,
-    already ? `This vote was already ${action}.` : `Vote ${action}.`,
+    transition.status === "transitioned"
+      ? `Vote ${action}.`
+      : `This vote was already ${action}.`,
   );
 }
 

@@ -114,6 +114,26 @@ describe("validated SQLite backup", () => {
       details: { source: "backup-test" },
     });
     guild.reserveMudaeWatchDelivery("202020202020202020");
+    const votingPanel = guild.createVotingPanel({
+      voteId: "vote_backup",
+      channelId: "212121212121212121",
+      messageId: "222222222222222222",
+      creatorId: "232323232323232323",
+      question: "Preserve this voting panel.",
+      pollType: "yes-no",
+      multiSelect: false,
+      options: [
+        { optionId: "option_yes", label: "Yes" },
+        { optionId: "option_no", label: "No" },
+      ],
+      mentionEveryoneOnCreation: false,
+      mentionEveryoneOnCompletion: false,
+    });
+    guild.selectVotingPanelOption(
+      votingPanel.voteId,
+      "242424242424242424",
+      "option_yes",
+    );
 
     const phase4Now = "2026-01-01T00:00:00.000Z";
     const rules = guild.createOnboardingRulesVersion({
@@ -317,6 +337,9 @@ describe("validated SQLite backup", () => {
         "role_menu_posts",
         "role_menu_operations",
         "role_menu_operation_items",
+        "voting_panels",
+        "voting_panel_options",
+        "voting_panel_selections",
       ] as const) {
         const sourceRows = original
           .prepare(`SELECT * FROM ${table} ORDER BY rowid`)

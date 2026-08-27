@@ -118,6 +118,28 @@ describe("voting panel rendering and validation", () => {
     expect(allowed.allowedMentions.parse).toEqual(["everyone"]);
   });
 
+  it("bounds long tied labels to Discord's embed-field limit", () => {
+    const payload = buildVotingPanelPayload(
+      panelView({
+        pollType: "custom",
+        status: "completed",
+        completedAt: "2026-01-01T01:00:00.000Z",
+        completedBy: "555555555555555555",
+        options: Array.from({ length: 10 }, (_, index) => ({
+          optionId: `option_${index + 1}`,
+          label: `${"*".repeat(79)}${index}`,
+          voteCount: Number.MAX_SAFE_INTEGER,
+        })),
+      }),
+    );
+    const result = payload.embeds[0].data.fields?.find(
+      (field) => field.name === "Result",
+    );
+
+    expect(result?.value).toMatch(/^Tie:/);
+    expect(result?.value.length).toBeLessThanOrEqual(1_024);
+  });
+
   it("disables voting and management after completion while keeping voter inspection available", () => {
     const completed = buildVotingPanelPayload(
       panelView({

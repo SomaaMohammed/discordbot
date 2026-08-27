@@ -73,7 +73,7 @@ export async function handlePanelCommand(
   actor: GuildMember,
 ): Promise<boolean> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply();
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
   switch (interaction.options.getSubcommand()) {
     case "say":

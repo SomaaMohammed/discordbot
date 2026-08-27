@@ -29,10 +29,10 @@ describe("persistent voting-panel storage", () => {
     const created = guild.createVotingPanel(
       votingInput({
         voteId: "vote_restart",
-        deadlineAt: "2026-01-01T00:00:00+03:00",
+        deadlineAt: "2099-01-01T00:00:00+03:00",
       }),
     );
-    expect(created.deadlineAt).toBe("2025-12-31T21:00:00.000Z");
+    expect(created.deadlineAt).toBe("2098-12-31T21:00:00.000Z");
     expect(
       guild.selectVotingPanelOption("vote_restart", VOTER_A, "option_yes"),
     ).toMatchObject({
@@ -53,14 +53,14 @@ describe("persistent voting-panel storage", () => {
       ],
     });
     expect(
-      afterRestart.listDueVotingPanels("2025-12-31T21:00:00.000Z"),
+      afterRestart.listDueVotingPanels("2098-12-31T21:00:00.000Z"),
     ).toHaveLength(1);
     expect(
       afterRestart.transitionVotingPanel(
         "vote_restart",
         "completed",
         CREATOR,
-        "2026-01-01T00:00:00.000Z",
+        "2099-01-01T00:00:00.000Z",
       ),
     ).toMatchObject({ status: "transitioned", panel: { status: "completed" } });
     expect(afterRestart.countActiveVotingPanels(CHANNEL_A)).toBe(0);
@@ -106,6 +106,24 @@ describe("persistent voting-panel storage", () => {
     ]);
     guild.toggleVotingPanelOption("vote_multi", VOTER_A, "option_blue");
     expect(guild.getVotingPanelSelection("vote_multi", VOTER_A)).toEqual([]);
+    storage.close();
+  });
+
+  it("rejects selections after a timed vote's deadline before reconciliation", () => {
+    const storage = openStorage(makeDatabase(), GUILD_A);
+    const guild = storage.forGuild(GUILD_A);
+    guild.createVotingPanel(
+      votingInput({
+        voteId: "vote_expired",
+        deadlineAt: "2000-01-01T00:00:00.000Z",
+      }),
+    );
+
+    expect(
+      guild.selectVotingPanelOption("vote_expired", VOTER_A, "option_yes"),
+    ).toMatchObject({ status: "not-active", optionIds: [] });
+    expect(guild.getVotingPanelSelection("vote_expired", VOTER_A)).toEqual([]);
+    expect(guild.listDueVotingPanels(new Date().toISOString())).toHaveLength(1);
     storage.close();
   });
 

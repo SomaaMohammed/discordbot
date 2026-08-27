@@ -249,7 +249,7 @@ export class GuildVotingRepository {
         return;
       }
       const current = this.getVotingPanelSelectionWithin(id, voter);
-      if (panel.status !== "active") {
+      if (panel.status !== "active" || isVotingPanelExpired(panel)) {
         result = { status: "not-active", panel, optionIds: current };
         return;
       }
@@ -288,7 +288,7 @@ export class GuildVotingRepository {
         return;
       }
       const current = this.getVotingPanelSelectionWithin(id, voter);
-      if (panel.status !== "active") {
+      if (panel.status !== "active" || isVotingPanelExpired(panel)) {
         result = { status: "not-active", panel, optionIds: current };
         return;
       }
@@ -331,7 +331,7 @@ export class GuildVotingRepository {
         return;
       }
       const current = this.getVotingPanelSelectionWithin(id, voter);
-      if (panel.status !== "active") {
+      if (panel.status !== "active" || isVotingPanelExpired(panel)) {
         result = { status: "not-active", panel, optionIds: current };
         return;
       }
@@ -746,6 +746,18 @@ function normalizeVotingPanelStatus(value: unknown): VotingPanelStatus {
     throw new TypeError("Voting panel status is invalid");
   }
   return value as VotingPanelStatus;
+}
+
+/**
+ * The scheduler performs the terminal transition, but selection mutations must
+ * also reject an elapsed deadline. That keeps a button click in the scheduler
+ * interval (or immediately after a restart) from recording a late vote.
+ */
+function isVotingPanelExpired(panel: VotingPanel): boolean {
+  return (
+    panel.deadlineAt !== null &&
+    Date.parse(panel.deadlineAt) <= Date.now()
+  );
 }
 
 function normalizeTerminalStatus(
