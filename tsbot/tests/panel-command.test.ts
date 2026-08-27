@@ -122,14 +122,25 @@ describe("/panel command definition", () => {
 
     expect(vote.options?.map(({ name }) => name)).toEqual([
       "question",
-      "title",
-      "description",
       "poll_type",
-      "options",
       "multi_select",
       "duration_minutes",
       "mention_everyone_on_creation",
       "mention_everyone_on_completion",
+      "title",
+      "description",
+      "options",
+    ]);
+    expect(vote.options?.map(({ required }) => required ?? false)).toEqual([
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
     ]);
     expect(findOption(vote, "question")).toMatchObject({
       type: ApplicationCommandOptionType.String,

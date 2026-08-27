@@ -114,33 +114,10 @@ export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
         )
         .addStringOption((option) =>
           option
-            .setName("title")
-            .setDescription("Optional panel title")
-            .setRequired(false)
-            .setMinLength(1)
-            .setMaxLength(256),
-        )
-        .addStringOption((option) =>
-          option
-            .setName("description")
-            .setDescription("Optional context for voters")
-            .setRequired(false)
-            .setMinLength(1)
-            .setMaxLength(4_096),
-        )
-        .addStringOption((option) =>
-          option
             .setName("poll_type")
             .setDescription("Use Yes / No or custom options")
             .setRequired(true)
             .addChoices(...VOTE_POLL_TYPE_CHOICES),
-        )
-        .addStringOption((option) =>
-          option
-            .setName("options")
-            .setDescription("Custom poll options, one option per line")
-            .setRequired(false)
-            .setMaxLength(1_000),
         )
         .addBooleanOption((option) =>
           option
@@ -167,6 +144,31 @@ export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
             .setName("mention_everyone_on_completion")
             .setDescription("Mention @everyone when the vote completes")
             .setRequired(true),
+        )
+        // Discord rejects a subcommand as soon as an optional option appears
+        // before a required one, so every optional voting setting stays last.
+        .addStringOption((option) =>
+          option
+            .setName("title")
+            .setDescription("Optional panel title")
+            .setRequired(false)
+            .setMinLength(1)
+            .setMaxLength(256),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Optional context for voters")
+            .setRequired(false)
+            .setMinLength(1)
+            .setMaxLength(4_096),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("options")
+            .setDescription("Custom poll options, one option per line")
+            .setRequired(false)
+            .setMaxLength(1_000),
         ),
     )
     .addSubcommand((subcommand) =>
