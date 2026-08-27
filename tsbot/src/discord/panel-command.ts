@@ -1,5 +1,4 @@
 import {
-  ChannelType,
   SlashCommandBuilder,
   type SlashCommandSubcommandsOnlyBuilder,
 } from "discord.js";
@@ -14,6 +13,13 @@ const PRESET_CHOICES = PANEL_PRESETS.map((preset) => ({
   value: preset,
 }));
 
+const VOTE_POLL_TYPE_CHOICES = [
+  { name: "Yes / No", value: "yes-no" },
+  { name: "Custom options", value: "custom" },
+] as const;
+
+const VOTE_DURATION_MAXIMUM_MINUTES = 20_160;
+
 export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilder {
   const command = new SlashCommandBuilder()
     .setName("panel")
@@ -27,25 +33,13 @@ export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     .addSubcommand((subcommand) => {
       subcommand
         .setName("post")
-        .setDescription(
-          "Post a Superior preset in a text or announcement channel",
-        )
+        .setDescription("Post a Superior preset in this channel")
         .addStringOption((option) =>
           option
             .setName("preset")
             .setDescription("Panel preset to post")
             .setRequired(true)
             .addChoices(...PRESET_CHOICES),
-        )
-        .addChannelOption((option) =>
-          option
-            .setName("channel")
-            .setDescription("Text or announcement channel for the panel")
-            .setRequired(true)
-            .addChannelTypes(
-              ChannelType.GuildText,
-              ChannelType.GuildAnnouncement,
-            ),
         )
         .addStringOption((option) =>
           option
@@ -101,6 +95,80 @@ export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
           .setRequired(false),
       );
     })
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("help")
+        .setDescription("Post a guide to every Superior panel type here"),
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName("vote")
+        .setDescription("Post an Administrator-managed voting panel here")
+        .addStringOption((option) =>
+          option
+            .setName("question")
+            .setDescription("Question voters will answer")
+            .setRequired(true)
+            .setMinLength(1)
+            .setMaxLength(256),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("title")
+            .setDescription("Optional panel title")
+            .setRequired(false)
+            .setMinLength(1)
+            .setMaxLength(256),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("Optional context for voters")
+            .setRequired(false)
+            .setMinLength(1)
+            .setMaxLength(4_096),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("poll_type")
+            .setDescription("Use Yes / No or custom options")
+            .setRequired(true)
+            .addChoices(...VOTE_POLL_TYPE_CHOICES),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("options")
+            .setDescription("Custom poll options, one option per line")
+            .setRequired(false)
+            .setMaxLength(1_000),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("multi_select")
+            .setDescription("Allow voters to select more than one option")
+            .setRequired(true),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("duration_minutes")
+            .setDescription("0 closes manually; otherwise closes automatically")
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(VOTE_DURATION_MAXIMUM_MINUTES),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("mention_everyone_on_creation")
+            .setDescription("Mention @everyone when the vote is posted")
+            .setRequired(true),
+        )
+        .addBooleanOption((option) =>
+          option
+            .setName("mention_everyone_on_completion")
+            .setDescription("Mention @everyone when the vote completes")
+            .setRequired(true),
+        ),
+    )
     .addSubcommand((subcommand) =>
       subcommand
         .setName("status")

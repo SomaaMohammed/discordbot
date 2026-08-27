@@ -35,9 +35,14 @@ import {
 } from "./panels.js";
 import { buildPanelCommandDefinition } from "./panel-command.js";
 import {
+  handlePanelHelpCommand,
   handlePresetPanelCommand,
   panelCapabilityForOperation,
 } from "./preset-panels.js";
+import {
+  handleVotingPanelButton,
+  handleVotingPanelCommand,
+} from "./voting-interactions.js";
 import {
   buildConfigCommandDefinition,
   buildDataCommandDefinition,
@@ -301,12 +306,6 @@ function addSuperiorOptions(
       return;
     case "dmpanel":
       subcommand
-        .addChannelOption((option) =>
-          option
-            .setName("channel")
-            .setDescription("Target channel (defaults to current)")
-            .setRequired(false),
-        )
         .addUserOption((option) =>
           option
             .setName("target")
@@ -322,12 +321,6 @@ function addSuperiorOptions(
             .setName("role")
             .setDescription("Safe self-service role")
             .setRequired(true),
-        )
-        .addChannelOption((option) =>
-          option
-            .setName("channel")
-            .setDescription("Target channel (defaults to current)")
-            .setRequired(false),
         );
       addPanelTextOptions(subcommand, true);
       return;
@@ -340,12 +333,6 @@ function addSuperiorOptions(
             .setRequired(slot <= 2),
         );
       }
-      subcommand.addChannelOption((option) =>
-        option
-          .setName("channel")
-          .setDescription("Target channel (defaults to current)")
-          .setRequired(false),
-      );
       addPanelTextOptions(subcommand, false);
       return;
     case "purge":
@@ -665,13 +652,21 @@ export async function handleChatInputCommand(
     return;
   }
   if (command === "onboarding" || command === "rolemenu") {
-    await deferPrivate(interaction);
     const actor = await requireCapability(
       interaction,
       guildRuntime,
       command === "onboarding" ? "onboarding.configure" : "roles.configure",
     );
     if (!actor) return;
+    if (
+      (command === "onboarding" && subcommand === "panel") ||
+      (command === "rolemenu" &&
+        (subcommand === "post" || subcommand === "recover"))
+    ) {
+      await deferPublic(interaction);
+    } else {
+      await deferPrivate(interaction);
+    }
     if (command === "onboarding") {
       await handleOnboardingCommand(interaction, guildRuntime, actor);
     } else {
@@ -691,13 +686,20 @@ export async function handleChatInputCommand(
     await handleFunCommand(interaction, guildRuntime);
     return;
   }
+  if (command === "panel" && subcommand === "vote") {
+    await handleVotingPanelCommand(interaction, guildRuntime);
+    return;
+  }
+  if (command === "panel" && subcommand === "help") {
+    await handlePanelHelpCommand(interaction, guildRuntime);
+    return;
+  }
   if (command === "ticket" && subcommand === "recover") {
     await deferPrivate(interaction);
     await handleTicketRecoveryCommand(interaction, guildRuntime);
     return;
   }
   if (command === "panel" || command === "ticket") {
-    await deferPrivate(interaction);
     const capability: GuildCapability =
       command === "panel"
         ? panelCapabilityForOperation(
@@ -713,6 +715,11 @@ export async function handleChatInputCommand(
       capability,
     );
     if (!actor) return;
+    if (command === "panel" || subcommand === "panel") {
+      await deferPublic(interaction);
+    } else {
+      await deferPrivate(interaction);
+    }
     if (command === "panel") {
       await handlePresetPanelCommand(interaction, guildRuntime, actor);
     } else {
@@ -729,13 +736,16 @@ export async function handleChatInputCommand(
     guildRuntime.storage.recordCommandMetric("superior.help");
     return;
   }
-  await deferPrivate(interaction);
-  const actor = await requireAdministrator(interaction, guildRuntime);
-  if (!actor) return;
   if (PANEL_SUBCOMMANDS.has(subcommand)) {
+    const actor = await requireAdministrator(interaction, guildRuntime);
+    if (!actor) return;
+    await deferPublic(interaction);
     await handlePanelCommand(interaction, guildRuntime, actor);
     return;
   }
+  await deferPrivate(interaction);
+  const actor = await requireAdministrator(interaction, guildRuntime);
+  if (!actor) return;
   if (MODERATION_SUBCOMMANDS.has(subcommand)) {
     await handleModerationCommand(interaction, guildRuntime, actor);
     return;
@@ -798,6 +808,7 @@ export async function handleButtonInteraction(
   if (await handleApplicationButton(interaction, guildRuntime)) return;
   if (await handleSuggestionButton(interaction, guildRuntime)) return;
   if (await handleTicketButton(interaction, guildRuntime)) return;
+  if (await handleVotingPanelButton(interaction, guildRuntime)) return;
   if (await handlePanelButton(interaction, guildRuntime)) return;
   await replyPrivate(
     interaction,
@@ -986,5 +997,13 @@ async function deferPrivate(
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  }
+}
+
+async function deferPublic(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply();
   }
 }

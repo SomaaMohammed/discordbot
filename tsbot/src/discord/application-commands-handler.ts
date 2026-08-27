@@ -133,6 +133,17 @@ export async function handleApplicationCommand(
     return;
   }
 
+  if (!group && subcommand === "panel") {
+    if (
+      !(await requireCapability(interaction, runtime, "applications.configure"))
+    ) {
+      return;
+    }
+    await interaction.deferReply();
+    await postApplicationPanel(interaction, runtime, storage);
+    return;
+  }
+
   await deferPrivate(interaction);
   if (group === "form" || group === "field") {
     if (
@@ -172,18 +183,6 @@ export async function handleApplicationCommand(
       return;
     case "withdraw":
       await withdrawApplication(interaction, runtime, storage);
-      return;
-    case "panel":
-      if (
-        !(await requireCapability(
-          interaction,
-          runtime,
-          "applications.configure",
-        ))
-      ) {
-        return;
-      }
-      await postApplicationPanel(interaction, runtime, storage);
       return;
     case "recover":
       await recoverApplication(interaction, runtime, storage);

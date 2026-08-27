@@ -260,13 +260,7 @@ export function buildRoleMenuCommandDefinition(): SlashCommandSubcommandsOnlyBui
       subcommand
         .setName("post")
         .setDescription("Publish one enabled persistent role menu")
-        .addStringOption(menuSlugOption)
-        .addChannelOption((option) =>
-          option
-            .setName("channel")
-            .setDescription("Target channel (defaults to current)")
-            .setRequired(false),
-        ),
+        .addStringOption(menuSlugOption),
     )
     .addSubcommand((subcommand) =>
       subcommand
@@ -305,12 +299,6 @@ export function buildRoleMenuCommandDefinition(): SlashCommandSubcommandsOnlyBui
             .setDescription(
               "Optional member whose latest partial selection should be retried",
             )
-            .setRequired(false),
-        )
-        .addChannelOption((option) =>
-          option
-            .setName("channel")
-            .setDescription("Optional channel for a missing replacement")
             .setRequired(false),
         ),
     );

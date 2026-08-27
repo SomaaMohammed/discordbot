@@ -56,16 +56,6 @@ export function buildApplicationCommandDefinition(): SlashCommandSubcommandsOnly
       subcommand
         .setName("panel")
         .setDescription("Post or refresh the staff-application launcher")
-        .addChannelOption((option) =>
-          option
-            .setName("channel")
-            .setDescription("Channel for the private application launcher")
-            .setRequired(true)
-            .addChannelTypes(
-              ChannelType.GuildText,
-              ChannelType.GuildAnnouncement,
-            ),
-        )
         .addBooleanOption((option) =>
           option
             .setName("replace_existing")

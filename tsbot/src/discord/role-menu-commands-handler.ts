@@ -442,7 +442,7 @@ async function postMenu(
     actor,
     menu,
   );
-  const channel = await selectedTextChannel(interaction);
+  const channel = await currentTextChannel(interaction);
   const botMember = await interaction
     .guild!.members.fetchMe({ cache: true, force: true })
     .catch(() => null);
@@ -507,11 +507,6 @@ async function recoverMenu(
     menu,
   );
   const selectedMember = interaction.options.getUser("member", false);
-  const selectedChannel = interaction.options.getChannel("channel", false);
-  if (selectedMember && selectedChannel)
-    throw new TypeError(
-      "Recover one member selection or a missing post channel, not both.",
-    );
   if (selectedMember) {
     await runRoleMenuMemberSerial(
       runtime.guildId,
@@ -555,7 +550,7 @@ async function recoverMenu(
       else newlyMissing += 1;
     }
   }
-  if (selectedChannel || healthy === 0) {
+  if (healthy === 0) {
     await postMenu(interaction, runtime, actor, true);
     return;
   }
@@ -1004,11 +999,11 @@ async function validatePrerequisite(
   return role.id;
 }
 
-async function selectedTextChannel(
+async function currentTextChannel(
   interaction: ChatInputCommandInteraction,
 ): Promise<GuildTextBasedChannel | null> {
-  const selected = interaction.options.getChannel("channel", false);
-  const channelId = selected?.id ?? interaction.channelId;
+  const channelId = interaction.channelId;
+  if (!channelId) return null;
   return fetchTextChannel(interaction.guild!, channelId);
 }
 

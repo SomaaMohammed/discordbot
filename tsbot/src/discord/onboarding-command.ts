@@ -248,12 +248,6 @@ export function buildOnboardingCommandDefinition(): SlashCommandSubcommandsOnlyB
       subcommand
         .setName("panel")
         .setDescription("Post or refresh the current verification panel")
-        .addChannelOption((option) =>
-          option
-            .setName("channel")
-            .setDescription("Target text channel")
-            .setRequired(true),
-        )
         .addBooleanOption((option) =>
           option
             .setName("replace_existing")

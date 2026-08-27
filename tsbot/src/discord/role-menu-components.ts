@@ -6,7 +6,10 @@ import {
   type MessageMentionOptions,
 } from "discord.js";
 import { safeUnicodeEmoji } from "../unicode-emoji.js";
-import { createSuperiorEmbed } from "./panel-theme.js";
+import {
+  createSuperiorEmbed,
+  setPanelInstructionFooter,
+} from "./panel-theme.js";
 
 export const ROLE_MENU_CUSTOM_ID_PREFIX = "superior:rolemenu:";
 export const ROLE_MENU_LIMITS = Object.freeze({
@@ -175,6 +178,10 @@ export function buildRoleMenuPanelPayload(
       value: `<@&${menu.requiredRoleId}>`,
     });
   }
+  setPanelInstructionFooter(
+    embed,
+    "Choose your roles from the menu to save your selection.",
+  );
   return {
     embeds: [embed],
     components: [

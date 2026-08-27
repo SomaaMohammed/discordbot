@@ -107,6 +107,21 @@ export async function handleSuggestionCommand(
     return;
   }
 
+  if (subcommand === "panel") {
+    if (
+      !(await requireCapability(
+        interaction,
+        runtime,
+        "suggestions.configure",
+      ))
+    ) {
+      return;
+    }
+    await interaction.deferReply();
+    await postSuggestionPanel(interaction, runtime, storage);
+    return;
+  }
+
   await deferPrivate(interaction);
   switch (subcommand) {
     case "status":
@@ -125,17 +140,6 @@ export async function handleSuggestionCommand(
       )
         return;
       await configureSuggestions(interaction, runtime, storage);
-      return;
-    case "panel":
-      if (
-        !(await requireCapability(
-          interaction,
-          runtime,
-          "suggestions.configure",
-        ))
-      )
-        return;
-      await postSuggestionPanel(interaction, runtime, storage);
       return;
     case "list":
       if (!(await requireReviewer(interaction, runtime, storage))) return;

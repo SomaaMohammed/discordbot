@@ -16,9 +16,9 @@ import {
   initializeV9Schema,
   validateV2Schema,
   validateV9Schema,
-  validateV10Schema,
-  V10_EXPLICIT_INDEX_NAMES,
-  V10_TABLE_NAMES,
+  validateV11Schema as validateV10Schema,
+  V11_EXPLICIT_INDEX_NAMES,
+  V11_TABLE_NAMES,
 } from "../src/storage/schema.js";
 import { createV2FixtureDatabase } from "./helpers/v2-fixture.js";
 
@@ -30,13 +30,13 @@ afterEach(() => {
   }
 });
 
-describe("schema v10", () => {
+describe("schema v11", () => {
   it("creates only the exact active tables and required index", () => {
     const dbFile = freshDatabase();
-    const validation = validateDatabaseFile(dbFile, { expect: 10 });
+    const validation = validateDatabaseFile(dbFile, { expect: 11 });
     expect(validation).toEqual({
-      schema: "current-v10",
-      schemaVersion: 10,
+      schema: "current-v11",
+      schemaVersion: 11,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
@@ -51,10 +51,10 @@ describe("schema v10", () => {
         .all() as Array<{ type: string; name: string }>;
       expect(
         objects.filter((row) => row.type === "table").map(rowName),
-      ).toEqual([...V10_TABLE_NAMES].sort());
+      ).toEqual([...V11_TABLE_NAMES].sort());
       expect(
         objects.filter((row) => row.type === "index").map(rowName),
-      ).toEqual([...V10_EXPLICIT_INDEX_NAMES].sort());
+      ).toEqual([...V11_EXPLICIT_INDEX_NAMES].sort());
       expect(objects.some((row) => row.type === "view")).toBe(false);
       expect(objects.some((row) => row.type === "trigger")).toBe(false);
       expect(validateV10Schema(db)).toEqual([]);
@@ -1306,7 +1306,7 @@ describe("schema v10", () => {
     );
   });
 
-  it("refuses schema v7 until the explicit v10 migration runs", () => {
+  it("refuses schema v7 until the explicit v11 migration runs", () => {
     const root = makeRoot();
     const dbFile = path.join(root, "v7.db");
     const db = new Database(dbFile);
@@ -1317,7 +1317,7 @@ describe("schema v10", () => {
 
     const storage = new BotStorage({ dbFile });
     expect(() => storage.initStorage()).toThrow(
-      /schema v7 requires an explicit migration to v10/i,
+      /schema v7 requires an explicit migration to v11/i,
     );
     storage.close();
     expect(fs.readFileSync(dbFile)).toEqual(before);
@@ -1326,7 +1326,7 @@ describe("schema v10", () => {
     );
   });
 
-  it("refuses schema v8 until the explicit v10 migration runs", () => {
+  it("refuses schema v8 until the explicit v11 migration runs", () => {
     const root = makeRoot();
     const dbFile = path.join(root, "v8.db");
     const db = new Database(dbFile);
@@ -1337,7 +1337,7 @@ describe("schema v10", () => {
 
     const storage = new BotStorage({ dbFile });
     expect(() => storage.initStorage()).toThrow(
-      /schema v8 requires an explicit migration to v10/i,
+      /schema v8 requires an explicit migration to v11/i,
     );
     storage.close();
     expect(fs.readFileSync(dbFile)).toEqual(before);
@@ -1358,7 +1358,7 @@ describe("schema v10", () => {
 
     const storage = new BotStorage({ dbFile });
     expect(() => storage.initStorage()).toThrow(
-      /schema v9 requires an explicit migration to v10/i,
+      /schema v9 requires an explicit migration to v11/i,
     );
     storage.close();
     expect(fs.readFileSync(dbFile)).toEqual(before);

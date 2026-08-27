@@ -3,13 +3,13 @@ import { backupDatabase } from "./backup.js";
 interface BackupArguments {
   dbFile: string;
   outputFile: string;
-  expect: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+  expect: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
 }
 
 function parseArguments(argv: string[]): BackupArguments {
   let dbFile: string | null = null;
   let outputFile: string | null = null;
-  let expect: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | null = null;
+  let expect: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | null = null;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     const value = argv[index + 1];
@@ -33,9 +33,10 @@ function parseArguments(argv: string[]): BackupArguments {
         value === "7" ||
         value === "8" ||
         value === "9" ||
-        value === "10")
+        value === "10" ||
+        value === "11")
     ) {
-      expect = Number(value) as 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+      expect = Number(value) as 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
       index += 1;
       continue;
     }
@@ -43,7 +44,7 @@ function parseArguments(argv: string[]): BackupArguments {
   }
   if (!dbFile || !outputFile || expect === null) {
     throw new Error(
-      "Usage: backup --db <source> --out <new-file> --expect 2|3|4|5|6|7|8|9|10",
+      "Usage: backup --db <source> --out <new-file> --expect 2|3|4|5|6|7|8|9|10|11",
     );
   }
   return { dbFile, outputFile, expect };

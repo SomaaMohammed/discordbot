@@ -383,6 +383,98 @@ export interface PostedPanel {
   updatedAt: string;
 }
 
+export const VOTING_PANEL_TYPES = ["yes-no", "custom"] as const;
+
+export type VotingPanelType = (typeof VOTING_PANEL_TYPES)[number];
+
+export const VOTING_PANEL_STATUSES = [
+  "active",
+  "completed",
+  "cancelled",
+] as const;
+
+export type VotingPanelStatus = (typeof VOTING_PANEL_STATUSES)[number];
+
+export interface VotingPanelOptionInput {
+  /** Opaque, custom-ID-safe value supplied before the Discord panel is posted. */
+  optionId: string;
+  label: string;
+}
+
+export interface VotingPanelOption extends VotingPanelOptionInput {
+  guildId: string;
+  voteId: string;
+  sortOrder: number;
+  voteCount: number;
+}
+
+export interface VotingPanelInput {
+  /** Optional only for callers that do not need the vote ID before persistence. */
+  voteId?: string;
+  channelId: string;
+  messageId: string;
+  creatorId: string;
+  question: string;
+  title?: string | null;
+  description?: string | null;
+  pollType: VotingPanelType;
+  multiSelect: boolean;
+  options: readonly VotingPanelOptionInput[];
+  deadlineAt?: string | null;
+  mentionEveryoneOnCreation?: boolean;
+  mentionEveryoneOnCompletion?: boolean;
+}
+
+export interface VotingPanel {
+  guildId: string;
+  voteId: string;
+  channelId: string;
+  messageId: string;
+  creatorId: string;
+  question: string;
+  title: string | null;
+  description: string | null;
+  pollType: VotingPanelType;
+  multiSelect: boolean;
+  deadlineAt: string | null;
+  mentionEveryoneOnCreation: boolean;
+  mentionEveryoneOnCompletion: boolean;
+  status: VotingPanelStatus;
+  completedBy: string | null;
+  completedAt: string | null;
+  cancelledBy: string | null;
+  cancelledAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  options: readonly VotingPanelOption[];
+  totalVoters: number;
+}
+
+export interface VotingPanelVoter {
+  guildId: string;
+  voteId: string;
+  voterId: string;
+  optionIds: readonly string[];
+  updatedAt: string;
+}
+
+export type VotingPanelSelectionResult =
+  | {
+      status: "changed" | "unchanged";
+      panel: VotingPanel;
+      optionIds: readonly string[];
+    }
+  | {
+      status: "not-found" | "not-active" | "mode-mismatch";
+      panel: VotingPanel | null;
+      optionIds: readonly string[];
+    };
+
+export type VotingPanelTransitionResult =
+  | { status: "transitioned" | "already-transitioned"; panel: VotingPanel }
+  | { status: "conflict"; panel: VotingPanel }
+  | { status: "not-found"; panel: null };
+
 export const TICKET_STATES = [
   "creating",
   "open",

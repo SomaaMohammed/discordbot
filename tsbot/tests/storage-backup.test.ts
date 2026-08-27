@@ -25,7 +25,7 @@ afterEach(() => {
 });
 
 describe("validated SQLite backup", () => {
-  it("copies and validates schema v10 including Phase 4 operational data", async () => {
+  it("copies and validates schema v11 including Phase 4 operational data", async () => {
     const root = makeRoot();
     const source = path.join(root, "source.db");
     const output = path.join(root, "backup.db");
@@ -248,20 +248,20 @@ describe("validated SQLite backup", () => {
     const result = await backupDatabase({
       dbFile: source,
       outputFile: output,
-      expect: 10,
+      expect: 11,
     });
     expect(result).toMatchObject({
-      schema: "current-v10",
-      schemaVersion: 10,
+      schema: "current-v11",
+      schemaVersion: 11,
       integrity: "ok",
       foreignKeyViolations: 0,
     });
     expect(result.bytes).toBeGreaterThan(0);
-    expect(validateDatabaseFile(source, { expect: 10 }).schema).toBe(
-      "current-v10",
+    expect(validateDatabaseFile(source, { expect: 11 }).schema).toBe(
+      "current-v11",
     );
-    expect(validateDatabaseFile(output, { expect: 10 }).schema).toBe(
-      "current-v10",
+    expect(validateDatabaseFile(output, { expect: 11 }).schema).toBe(
+      "current-v11",
     );
 
     const original = new Database(source, { readonly: true });
@@ -429,7 +429,7 @@ describe("validated SQLite backup", () => {
     fs.writeFileSync(output, "operator-owned");
 
     await expect(
-      backupDatabase({ dbFile: source, outputFile: output, expect: 10 }),
+      backupDatabase({ dbFile: source, outputFile: output, expect: 11 }),
     ).rejects.toThrow(/already exists/);
     expect(fs.readFileSync(output, "utf8")).toBe("operator-owned");
 

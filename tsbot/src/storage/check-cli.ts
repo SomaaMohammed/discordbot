@@ -2,12 +2,12 @@ import { validateDatabaseFile } from "./migration.js";
 
 interface CheckArguments {
   dbFile: string;
-  expect: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+  expect: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
 }
 
 function parseArguments(argv: string[]): CheckArguments {
   let dbFile: string | null = null;
-  let expect: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | undefined;
+  let expect: 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     const value = argv[index + 1];
@@ -26,16 +26,17 @@ function parseArguments(argv: string[]): CheckArguments {
         value === "7" ||
         value === "8" ||
         value === "9" ||
-        value === "10")
+        value === "10" ||
+        value === "11")
     ) {
-      expect = Number(value) as 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+      expect = Number(value) as 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
       index += 1;
       continue;
     }
     throw new Error(`Unknown or incomplete db:check option: ${argument}`);
   }
   if (!dbFile || expect === undefined) {
-    throw new Error("Usage: db:check --db <path> --expect 2|3|4|5|6|7|8|9|10");
+    throw new Error("Usage: db:check --db <path> --expect 2|3|4|5|6|7|8|9|10|11");
   }
   return { dbFile, expect };
 }

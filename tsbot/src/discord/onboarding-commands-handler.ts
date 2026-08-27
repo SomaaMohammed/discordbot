@@ -685,18 +685,21 @@ async function postVerificationPanel(
   actor: GuildMember,
 ): Promise<void> {
   const guild = interaction.guild!;
-  const selected = interaction.options.getChannel("channel", true);
+  const channelId = interaction.channelId;
   if (
     actor.guild.id !== runtime.guildId ||
     guild.id !== runtime.guildId ||
-    interaction.guildId !== runtime.guildId
+    interaction.guildId !== runtime.guildId ||
+    !channelId
   )
-    throw new Error("That verification panel target is outside this server.");
-  const key = `${runtime.guildId}:verification:${selected.id}`;
+    throw new Error(
+      "Use this command in a current text channel in this server.",
+    );
+  const key = `${runtime.guildId}:verification:${channelId}`;
   const expectedBinding = snapshotPostedPanelBinding(
     runtime.storage.findPostedPanelByPresetAndChannel(
       "verification",
-      selected.id,
+      channelId,
     ),
   );
   const alreadyPending = (pendingVerificationPanelPosts.get(key) ?? 0) > 0;
@@ -708,7 +711,7 @@ async function postVerificationPanel(
     await runPanelPostSerial(
       runtime.guildId,
       "verification",
-      selected.id,
+      channelId,
       async () => {
         if (alreadyPending)
           throw new Error(
@@ -718,7 +721,7 @@ async function postVerificationPanel(
           interaction,
           runtime,
           actor.id,
-          selected.id,
+          channelId,
           interaction.options.getBoolean("replace_existing", false) === true,
           expectedBinding,
         );

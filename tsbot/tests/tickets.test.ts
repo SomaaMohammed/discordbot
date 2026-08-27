@@ -2454,9 +2454,10 @@ describe("ticket command authorization", () => {
 
     await handleChatInputCommand(interaction as never, processRuntime);
 
-    expect(interaction.editReply).toHaveBeenCalledWith(
+    expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("tickets.configure"),
+        flags: MessageFlags.Ephemeral,
       }),
     );
   });

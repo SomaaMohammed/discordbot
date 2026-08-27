@@ -579,6 +579,7 @@ function createHarness(options: HarnessOptions) {
     id: "interaction_1",
     guild,
     guildId: GUILD_ID,
+    channelId: options.selectedChannels?.channel ?? PANEL_CHANNEL_ID,
     client: { user: { id: BOT_ID } },
     user: { id: actorId },
     deferred: false,

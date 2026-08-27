@@ -16,6 +16,7 @@ import {
   normalizeResourcePanelInput,
   parseTicketOpenCustomId,
   renderHelpPanel,
+  renderPanelHowToGuide,
   renderResourcesPanel,
   renderServerInfoPanel,
   renderSuperiorPanel,
@@ -120,10 +121,9 @@ describe("Superior panel theme and presets", () => {
     expect(Object.keys(requests)).toEqual(PANEL_PRESETS);
     for (const preset of PANEL_PRESETS) {
       const payload = renderSuperiorPanel(requests[preset]);
-      expect(embedJson(payload)).toMatchObject({
-        color: SUPERIOR_PANEL_COLOR,
-        footer: { text: SUPERIOR_PANEL_FOOTER_TEXT },
-      });
+      const embed = embedJson(payload);
+      expect(embed).toMatchObject({ color: SUPERIOR_PANEL_COLOR });
+      expect(embed.footer?.text).toMatch(/^How to use:/);
       expectSafePayload(payload);
       expect(isPanelPreset(preset)).toBe(true);
     }
@@ -173,6 +173,28 @@ describe("Superior panel theme and presets", () => {
         }),
       ]),
     );
+  });
+
+  it("renders a public panel guide covering every available panel category", () => {
+    const guide = embedJson(renderPanelHowToGuide());
+    const fields = JSON.stringify(guide.fields);
+    for (const category of [
+      "Voting panels",
+      "Role panels",
+      "Role-menu panels",
+      "Private-message panels",
+      "Ticket panels",
+      "Suggestion panels",
+      "Application panels",
+      "Safety panels",
+      "Verification panels",
+      "Resource panels",
+      "Server-info panels",
+      "Help panels",
+    ]) {
+      expect(fields).toContain(category);
+    }
+    expect(guide.footer?.text).toMatch(/^How to use:/);
   });
 
   it("renders safety controls independently without exposing private records", () => {

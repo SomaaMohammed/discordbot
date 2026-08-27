@@ -114,16 +114,6 @@ export function buildSuggestionCommandDefinition(): SlashCommandSubcommandsOnlyB
       subcommand
         .setName("panel")
         .setDescription("Post or refresh the Superior suggestion launcher")
-        .addChannelOption((option) =>
-          option
-            .setName("channel")
-            .setDescription("Channel for the suggestion launcher")
-            .setRequired(true)
-            .addChannelTypes(
-              ChannelType.GuildText,
-              ChannelType.GuildAnnouncement,
-            ),
-        )
         .addBooleanOption((option) =>
           option
             .setName("replace_existing")

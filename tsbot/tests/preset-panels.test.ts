@@ -146,6 +146,7 @@ function createHarness(existing = false) {
     id: "panel_interaction_1",
     guild,
     guildId: GUILD_ID,
+    channel,
     channelId: CHANNEL_ID,
     client: { user: { id: BOT_ID } },
     user: { id: ACTOR_ID },

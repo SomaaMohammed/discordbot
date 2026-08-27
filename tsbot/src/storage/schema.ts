@@ -27,7 +27,8 @@ import {
   type Phase4PanelReferenceData,
 } from "./guild-data.js";
 
-export const CURRENT_SCHEMA_VERSION = 10 as const;
+export const CURRENT_SCHEMA_VERSION = 11 as const;
+export const LEGACY_V10_SCHEMA_VERSION = 10 as const;
 export const LEGACY_V9_SCHEMA_VERSION = 9 as const;
 export const LEGACY_V8_SCHEMA_VERSION = 8 as const;
 export const LEGACY_V7_SCHEMA_VERSION = 7 as const;
@@ -75,7 +76,8 @@ export type DatabaseSchemaKind =
   | "legacy-v7"
   | "legacy-v8"
   | "legacy-v9"
-  | "current-v10"
+  | "legacy-v10"
+  | "current-v11"
   | "unknown";
 
 export const SCHEMA_MIGRATIONS_TABLE_SQL = `
@@ -2478,6 +2480,105 @@ const V10_INDEX_SQL: Record<(typeof V10_EXPLICIT_INDEX_NAMES)[number], string> =
       "CREATE INDEX idx_role_menu_operation_items_state ON role_menu_operation_items (guild_id, operation_id, item_state)",
   };
 
+export const VOTING_PANELS_TABLE_SQL = `
+CREATE TABLE voting_panels (
+  guild_id TEXT NOT NULL CHECK (length(guild_id) BETWEEN 17 AND 20 AND guild_id NOT GLOB '*[^0-9]*'),
+  vote_id TEXT NOT NULL CHECK (length(vote_id) BETWEEN 8 AND 24 AND vote_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  channel_id TEXT NOT NULL CHECK (length(channel_id) BETWEEN 17 AND 20 AND channel_id NOT GLOB '*[^0-9]*'),
+  message_id TEXT NOT NULL CHECK (length(message_id) BETWEEN 17 AND 20 AND message_id NOT GLOB '*[^0-9]*'),
+  creator_id TEXT NOT NULL CHECK (length(creator_id) BETWEEN 17 AND 20 AND creator_id NOT GLOB '*[^0-9]*'),
+  question TEXT NOT NULL CHECK (length(question) BETWEEN 1 AND 256),
+  title TEXT CHECK (title IS NULL OR length(title) BETWEEN 1 AND 256),
+  description TEXT CHECK (description IS NULL OR length(description) BETWEEN 1 AND 4096),
+  poll_type TEXT NOT NULL CHECK (poll_type IN ('yes-no', 'custom')),
+  multi_select INTEGER NOT NULL DEFAULT 0 CHECK (multi_select IN (0, 1)),
+  deadline_at TEXT,
+  mention_everyone_on_creation INTEGER NOT NULL DEFAULT 0 CHECK (mention_everyone_on_creation IN (0, 1)),
+  mention_everyone_on_completion INTEGER NOT NULL DEFAULT 0 CHECK (mention_everyone_on_completion IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'cancelled')),
+  completed_by TEXT CHECK (completed_by IS NULL OR (length(completed_by) BETWEEN 17 AND 20 AND completed_by NOT GLOB '*[^0-9]*')),
+  completed_at TEXT,
+  cancelled_by TEXT CHECK (cancelled_by IS NULL OR (length(cancelled_by) BETWEEN 17 AND 20 AND cancelled_by NOT GLOB '*[^0-9]*')),
+  cancelled_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, vote_id),
+  UNIQUE (guild_id, channel_id, message_id),
+  CHECK (
+    (status = 'active' AND completed_by IS NULL AND completed_at IS NULL AND cancelled_by IS NULL AND cancelled_at IS NULL) OR
+    (status = 'completed' AND completed_by IS NOT NULL AND completed_at IS NOT NULL AND cancelled_by IS NULL AND cancelled_at IS NULL) OR
+    (status = 'cancelled' AND completed_by IS NULL AND completed_at IS NULL AND cancelled_by IS NOT NULL AND cancelled_at IS NOT NULL)
+  ),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+)
+`;
+
+export const VOTING_PANEL_OPTIONS_TABLE_SQL = `
+CREATE TABLE voting_panel_options (
+  guild_id TEXT NOT NULL CHECK (length(guild_id) BETWEEN 17 AND 20 AND guild_id NOT GLOB '*[^0-9]*'),
+  vote_id TEXT NOT NULL CHECK (length(vote_id) BETWEEN 8 AND 24 AND vote_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  option_id TEXT NOT NULL CHECK (length(option_id) BETWEEN 8 AND 24 AND option_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  label TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 80),
+  sort_order INTEGER NOT NULL CHECK (sort_order BETWEEN 0 AND 9),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, vote_id, option_id),
+  UNIQUE (guild_id, vote_id, sort_order),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, vote_id) REFERENCES voting_panels(guild_id, vote_id) ON DELETE CASCADE
+)
+`;
+
+export const VOTING_PANEL_SELECTIONS_TABLE_SQL = `
+CREATE TABLE voting_panel_selections (
+  guild_id TEXT NOT NULL CHECK (length(guild_id) BETWEEN 17 AND 20 AND guild_id NOT GLOB '*[^0-9]*'),
+  vote_id TEXT NOT NULL CHECK (length(vote_id) BETWEEN 8 AND 24 AND vote_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  voter_id TEXT NOT NULL CHECK (length(voter_id) BETWEEN 17 AND 20 AND voter_id NOT GLOB '*[^0-9]*'),
+  option_id TEXT NOT NULL CHECK (length(option_id) BETWEEN 8 AND 24 AND option_id NOT GLOB '*[^A-Za-z0-9_-]*'),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, vote_id, voter_id, option_id),
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, vote_id) REFERENCES voting_panels(guild_id, vote_id) ON DELETE CASCADE,
+  FOREIGN KEY (guild_id, vote_id, option_id)
+    REFERENCES voting_panel_options(guild_id, vote_id, option_id) ON DELETE CASCADE
+)
+`;
+
+export const V11_TABLE_NAMES = [
+  ...V10_TABLE_NAMES,
+  "voting_panels",
+  "voting_panel_options",
+  "voting_panel_selections",
+] as const;
+
+export const V11_EXPLICIT_INDEX_NAMES = [
+  ...V10_EXPLICIT_INDEX_NAMES,
+  "idx_voting_panels_guild_channel_status",
+  "idx_voting_panels_guild_status_deadline",
+  "idx_voting_panel_options_order",
+  "idx_voting_panel_selections_voter",
+] as const;
+
+const V11_TABLE_SQL: Record<(typeof V11_TABLE_NAMES)[number], string> = {
+  ...V10_TABLE_SQL,
+  voting_panels: VOTING_PANELS_TABLE_SQL,
+  voting_panel_options: VOTING_PANEL_OPTIONS_TABLE_SQL,
+  voting_panel_selections: VOTING_PANEL_SELECTIONS_TABLE_SQL,
+};
+
+const V11_INDEX_SQL: Record<(typeof V11_EXPLICIT_INDEX_NAMES)[number], string> =
+  {
+    ...V10_INDEX_SQL,
+    idx_voting_panels_guild_channel_status:
+      "CREATE INDEX idx_voting_panels_guild_channel_status ON voting_panels (guild_id, channel_id, status)",
+    idx_voting_panels_guild_status_deadline:
+      "CREATE INDEX idx_voting_panels_guild_status_deadline ON voting_panels (guild_id, status, deadline_at)",
+    idx_voting_panel_options_order:
+      "CREATE INDEX idx_voting_panel_options_order ON voting_panel_options (guild_id, vote_id, sort_order)",
+    idx_voting_panel_selections_voter:
+      "CREATE INDEX idx_voting_panel_selections_voter ON voting_panel_selections (guild_id, vote_id, voter_id, option_id)",
+  };
+
 export const V1_TABLE_NAMES = [
   "kv",
   "posts",
@@ -2861,6 +2962,25 @@ export function createV10Objects(db: Database.Database): void {
   for (const index of V10_EXPLICIT_INDEX_NAMES) db.exec(V10_INDEX_SQL[index]);
 }
 
+/** Adds only schema-v11 voting objects without changing frozen v10 objects. */
+export function createV11OperationalObjects(db: Database.Database): void {
+  for (const table of V11_TABLE_NAMES) {
+    if (!(V10_TABLE_NAMES as readonly string[]).includes(table)) {
+      db.exec(V11_TABLE_SQL[table]);
+    }
+  }
+  for (const index of V11_EXPLICIT_INDEX_NAMES) {
+    if (!(V10_EXPLICIT_INDEX_NAMES as readonly string[]).includes(index)) {
+      db.exec(V11_INDEX_SQL[index]);
+    }
+  }
+}
+
+export function createV11Objects(db: Database.Database): void {
+  for (const table of V11_TABLE_NAMES) db.exec(V11_TABLE_SQL[table]);
+  for (const index of V11_EXPLICIT_INDEX_NAMES) db.exec(V11_INDEX_SQL[index]);
+}
+
 /** Creates the v8 settings table after the frozen v7 table was renamed. */
 export function createV8GuildSettingsObject(db: Database.Database): void {
   db.exec(V8_GUILD_SETTINGS_TABLE_SQL);
@@ -2909,6 +3029,15 @@ export function recordCurrentSchemaVersion(
   db.prepare(
     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
   ).run(CURRENT_SCHEMA_VERSION, appliedAt);
+}
+
+export function recordV10SchemaVersion(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  db.prepare(
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+  ).run(LEGACY_V10_SCHEMA_VERSION, appliedAt);
 }
 
 export function recordV9SchemaVersion(
@@ -3042,8 +3171,23 @@ export function initializeV10Schema(
 ): void {
   const initialize = db.transaction(() => {
     createV10Objects(db);
-    recordCurrentSchemaVersion(db, appliedAt);
+    recordV10SchemaVersion(db, appliedAt);
     const issues = validateV10Schema(db);
+    if (issues.length > 0) {
+      throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
+    }
+  });
+  initialize.immediate();
+}
+
+export function initializeV11Schema(
+  db: Database.Database,
+  appliedAt: string,
+): void {
+  const initialize = db.transaction(() => {
+    createV11Objects(db);
+    recordCurrentSchemaVersion(db, appliedAt);
+    const issues = validateV11Schema(db);
     if (issues.length > 0) {
       throw new Error(`Failed to initialize schema: ${issues.join("; ")}`);
     }
@@ -3071,8 +3215,11 @@ export function detectDatabaseSchema(
     .map((row) => row.name)
     .sort();
 
+  if (sameStrings(tables, [...V11_TABLE_NAMES].sort())) {
+    return validateV11Schema(db).length === 0 ? "current-v11" : "unknown";
+  }
   if (sameStrings(tables, [...V10_TABLE_NAMES].sort())) {
-    return validateV10Schema(db).length === 0 ? "current-v10" : "unknown";
+    return validateV10Schema(db).length === 0 ? "legacy-v10" : "unknown";
   }
   if (sameStrings(tables, [...V9_TABLE_NAMES].sort())) {
     return validateV9Schema(db).length === 0 ? "legacy-v9" : "unknown";
@@ -3592,12 +3739,12 @@ export function validateV10Schema(db: Database.Database): string[] {
   const numbers = versions.map((row) => row.version);
   const valid =
     numbers.length >= 1 &&
-    numbers.at(-1) === CURRENT_SCHEMA_VERSION &&
+    numbers.at(-1) === LEGACY_V10_SCHEMA_VERSION &&
     numbers.every(
       (version, index) =>
         Number.isInteger(version) &&
         version >= 3 &&
-        version <= CURRENT_SCHEMA_VERSION &&
+        version <= LEGACY_V10_SCHEMA_VERSION &&
         (index === 0 || version === numbers[index - 1]! + 1),
     ) &&
     versions.every((row) => isValidTimestamp(row.applied_at));
@@ -3613,6 +3760,101 @@ export function validateV10Schema(db: Database.Database): string[] {
   validateV7Data(db, issues);
   validateV9Data(db, issues);
   validateV10Data(db, issues);
+  validateDatabaseHealth(db, issues);
+  return issues;
+}
+
+export function validateV11Schema(db: Database.Database): string[] {
+  const issues = validateExactObjects(
+    db,
+    [...V11_TABLE_NAMES],
+    [...V11_EXPLICIT_INDEX_NAMES],
+  );
+  if (issues.length > 0) return issues;
+
+  validateSqlDefinitions(db, V11_TABLE_SQL, "table", issues);
+  validateSqlDefinitions(db, V11_INDEX_SQL, "index", issues);
+  validateColumnsAndKeys(
+    db,
+    {
+      voting_panels: [
+        "guild_id",
+        "vote_id",
+        "channel_id",
+        "message_id",
+        "creator_id",
+        "question",
+        "title",
+        "description",
+        "poll_type",
+        "multi_select",
+        "deadline_at",
+        "mention_everyone_on_creation",
+        "mention_everyone_on_completion",
+        "status",
+        "completed_by",
+        "completed_at",
+        "cancelled_by",
+        "cancelled_at",
+        "created_at",
+        "updated_at",
+      ],
+      voting_panel_options: [
+        "guild_id",
+        "vote_id",
+        "option_id",
+        "label",
+        "sort_order",
+        "created_at",
+      ],
+      voting_panel_selections: [
+        "guild_id",
+        "vote_id",
+        "voter_id",
+        "option_id",
+        "created_at",
+        "updated_at",
+      ],
+    },
+    {
+      voting_panels: ["guild_id", "vote_id"],
+      voting_panel_options: ["guild_id", "vote_id", "option_id"],
+      voting_panel_selections: ["guild_id", "vote_id", "voter_id", "option_id"],
+    },
+    issues,
+  );
+  validateVotingPanelForeignKeys(db, issues);
+
+  const versions = db
+    .prepare(
+      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
+    )
+    .all() as Array<{ version: number; applied_at: string }>;
+  const numbers = versions.map((row) => row.version);
+  const valid =
+    numbers.length >= 1 &&
+    numbers.at(-1) === CURRENT_SCHEMA_VERSION &&
+    numbers.every(
+      (version, index) =>
+        Number.isInteger(version) &&
+        version >= 3 &&
+        version <= CURRENT_SCHEMA_VERSION &&
+        (index === 0 || version === numbers[index - 1]! + 1),
+    ) &&
+    versions.every((row) => isValidTimestamp(row.applied_at));
+  if (!valid) {
+    issues.push(
+      "schema_migrations must contain version 11, optionally following a complete supported sequence ending at version 10",
+    );
+  }
+
+  validateV8CoreData(db, issues);
+  validateV5Data(db, issues);
+  validateV6Data(db, issues);
+  validateV7Data(db, issues);
+  validateV9Data(db, issues);
+  validateV10Data(db, issues);
+  validateV11Data(db, issues);
   validateDatabaseHealth(db, issues);
   return issues;
 }
@@ -5682,6 +5924,171 @@ function validateStoredPhase4PanelReferences(
   }
 }
 
+function validateV11Data(db: Database.Database, issues: string[]): void {
+  validateTextColumnTypes(
+    db,
+    "voting_panels",
+    [
+      "guild_id",
+      "vote_id",
+      "channel_id",
+      "message_id",
+      "creator_id",
+      "question",
+      "poll_type",
+      "status",
+      "created_at",
+      "updated_at",
+    ],
+    [
+      "title",
+      "description",
+      "deadline_at",
+      "completed_by",
+      "completed_at",
+      "cancelled_by",
+      "cancelled_at",
+    ],
+    issues,
+  );
+  validateTextColumnTypes(
+    db,
+    "voting_panel_options",
+    ["guild_id", "vote_id", "option_id", "label", "created_at"],
+    [],
+    issues,
+  );
+  validateTextColumnTypes(
+    db,
+    "voting_panel_selections",
+    [
+      "guild_id",
+      "vote_id",
+      "voter_id",
+      "option_id",
+      "created_at",
+      "updated_at",
+    ],
+    [],
+    issues,
+  );
+  validateIntegerColumnTypes(
+    db,
+    "voting_panels",
+    [
+      "multi_select",
+      "mention_everyone_on_creation",
+      "mention_everyone_on_completion",
+    ],
+    [],
+    issues,
+  );
+  validateIntegerColumnTypes(
+    db,
+    "voting_panel_options",
+    ["sort_order"],
+    [],
+    issues,
+  );
+  validateTimestampColumns(
+    db,
+    "voting_panels",
+    ["created_at", "updated_at"],
+    ["deadline_at", "completed_at", "cancelled_at"],
+    issues,
+  );
+  validateTimestampColumns(
+    db,
+    "voting_panel_options",
+    ["created_at"],
+    [],
+    issues,
+  );
+  validateTimestampColumns(
+    db,
+    "voting_panel_selections",
+    ["created_at", "updated_at"],
+    [],
+    issues,
+  );
+
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM voting_panels
+     WHERE
+       ((status = 'active') <> (completed_by IS NULL AND completed_at IS NULL AND cancelled_by IS NULL AND cancelled_at IS NULL)) OR
+       ((status = 'completed') <> (completed_by IS NOT NULL AND completed_at IS NOT NULL AND cancelled_by IS NULL AND cancelled_at IS NULL)) OR
+       ((status = 'cancelled') <> (completed_by IS NULL AND completed_at IS NULL AND cancelled_by IS NOT NULL AND cancelled_at IS NOT NULL))
+     LIMIT 1`,
+    "voting_panels contains inconsistent terminal metadata",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM voting_panels AS panel
+     LEFT JOIN voting_panel_options AS option
+       ON option.guild_id = panel.guild_id AND option.vote_id = panel.vote_id
+     GROUP BY panel.guild_id, panel.vote_id
+     HAVING COUNT(option.option_id) < 2 OR COUNT(option.option_id) > 10 OR
+       MIN(option.sort_order) <> 0 OR MAX(option.sort_order) <> COUNT(option.option_id) - 1
+     LIMIT 1`,
+    "voting_panels contains invalid immutable option bounds",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM voting_panels AS panel
+     LEFT JOIN voting_panel_options AS option
+       ON option.guild_id = panel.guild_id AND option.vote_id = panel.vote_id
+     WHERE panel.poll_type = 'yes-no'
+     GROUP BY panel.guild_id, panel.vote_id
+     HAVING COUNT(option.option_id) <> 2 OR
+       MIN(CASE WHEN option.sort_order = 0 THEN option.label END) <> 'Yes' OR
+       MIN(CASE WHEN option.sort_order = 1 THEN option.label END) <> 'No'
+     LIMIT 1`,
+    "yes-no voting_panels must contain exactly Yes and No options",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM voting_panel_options
+     GROUP BY guild_id, vote_id, lower(label) HAVING COUNT(*) > 1 LIMIT 1`,
+    "voting_panel_options contains duplicate labels",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM voting_panel_selections AS selection
+     JOIN voting_panels AS panel
+       ON panel.guild_id = selection.guild_id AND panel.vote_id = selection.vote_id
+     WHERE panel.multi_select = 0
+     GROUP BY selection.guild_id, selection.vote_id, selection.voter_id
+     HAVING COUNT(*) > 1 LIMIT 1`,
+    "single-select voting_panels contains multiple current selections for a voter",
+    issues,
+  );
+  validateNoMatchingRows(
+    db,
+    `SELECT 1 FROM voting_panels
+     WHERE status = 'active'
+     GROUP BY guild_id, channel_id HAVING COUNT(*) > 5 LIMIT 1`,
+    "voting_panels exceeds the active per-channel limit",
+    issues,
+  );
+  for (const [table, maximum] of [
+    ["voting_panels", 100_000],
+    ["voting_panel_options", 1_000_000],
+    ["voting_panel_selections", 10_000_000],
+  ] as const) {
+    validateNoMatchingRows(
+      db,
+      `SELECT 1 FROM ${quoteIdentifier(table)} GROUP BY guild_id HAVING COUNT(*) > ${maximum} LIMIT 1`,
+      `${table} exceeds the per-guild record limit`,
+      issues,
+    );
+  }
+}
+
 function validatePhase4SemanticText(
   db: Database.Database,
   issues: string[],
@@ -5964,6 +6371,63 @@ function validateGuildForeignKey(
   ) {
     issues.push(`${table} must cascade from guilds(guild_id)`);
   }
+}
+
+function validateVotingPanelForeignKeys(
+  db: Database.Database,
+  issues: string[],
+): void {
+  validateGuildForeignKey(db, "voting_panels", issues);
+  const options = db
+    .prepare("PRAGMA foreign_key_list(voting_panel_options)")
+    .all() as ForeignKeyRow[];
+  if (
+    options.length !== 3 ||
+    !hasCascadeForeignKey(options, "guilds", ["guild_id:guild_id"]) ||
+    !hasCascadeForeignKey(options, "voting_panels", [
+      "guild_id:guild_id",
+      "vote_id:vote_id",
+    ])
+  ) {
+    issues.push(
+      "voting_panel_options must cascade from its guild and composite voting-panel identity",
+    );
+  }
+  const selections = db
+    .prepare("PRAGMA foreign_key_list(voting_panel_selections)")
+    .all() as ForeignKeyRow[];
+  if (
+    selections.length !== 6 ||
+    !hasCascadeForeignKey(selections, "guilds", ["guild_id:guild_id"]) ||
+    !hasCascadeForeignKey(selections, "voting_panels", [
+      "guild_id:guild_id",
+      "vote_id:vote_id",
+    ]) ||
+    !hasCascadeForeignKey(selections, "voting_panel_options", [
+      "guild_id:guild_id",
+      "vote_id:vote_id",
+      "option_id:option_id",
+    ])
+  ) {
+    issues.push(
+      "voting_panel_selections must cascade from its guild, voting panel, and immutable option identity",
+    );
+  }
+}
+
+function hasCascadeForeignKey(
+  rows: readonly ForeignKeyRow[],
+  table: string,
+  expectedPairs: readonly string[],
+): boolean {
+  const pairs = rows
+    .filter(
+      (row) =>
+        row.table === table && row.on_delete.toUpperCase() === "CASCADE",
+    )
+    .map((row) => `${row.from}:${row.to}`)
+    .sort();
+  return sameStrings(pairs, [...expectedPairs].sort());
 }
 
 function validateTicketEventForeignKeys(

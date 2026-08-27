@@ -1,6 +1,5 @@
 import {
   ChannelType,
-  MessageFlags,
   escapeMarkdown,
   type ChatInputCommandInteraction,
   type Guild,
@@ -36,6 +35,7 @@ import {
   RESOURCE_PANEL_LIMITS,
   isPanelPreset,
   normalizeResourcePanelInput,
+  renderPanelHowToGuide,
   renderSuperiorPanel,
 } from "./panel-theme.js";
 import {
@@ -133,6 +133,9 @@ export async function handlePresetPanelCommand(
   actor: GuildMember,
 ): Promise<void> {
   switch (interaction.options.getSubcommand()) {
+    case "help":
+      await handlePanelHelpCommand(interaction, runtime);
+      return;
     case "list":
       await replyPrivate(
         interaction,
@@ -156,6 +159,41 @@ export async function handlePresetPanelCommand(
   }
 }
 
+/** Posts the general panel guide as a public response in the current channel. */
+export async function handlePanelHelpCommand(
+  interaction: ChatInputCommandInteraction,
+  runtime: GuildRuntime,
+): Promise<void> {
+  const channel = getCurrentPanelChannel(interaction, runtime);
+  if (!channel) {
+    await replyPrivate(
+      interaction,
+      "Use this command in a text or announcement channel in this server.",
+    );
+    return;
+  }
+  const guild = interaction.guild;
+  const botMember = guild
+    ? guild.members.me ?? (await guild.members.fetchMe().catch(() => null))
+    : null;
+  if (!botMember || !canPostThemedPanel(channel, botMember)) {
+    await replyPrivate(
+      interaction,
+      "Superior needs View Channel, Send Messages, Read Message History, and Embed Links here.",
+    );
+    return;
+  }
+  if (!runtime.isCurrent()) {
+    await replyPrivate(
+      interaction,
+      "This server was disabled or reconfigured. Please try again.",
+    );
+    return;
+  }
+  await replyPanelPayloadPublic(interaction, renderPanelHowToGuide());
+  runtime.storage.recordCommandMetric("panel.help");
+}
+
 export async function postTicketLauncher(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
@@ -170,11 +208,11 @@ export async function postFeatureLauncher(
   actor: GuildMember,
   preset: "tickets" | "suggestions" | "applications" | "safety",
 ): Promise<void> {
-  const channel = getSelectedPanelChannel(interaction, runtime, "channel");
+  const channel = getCurrentPanelChannel(interaction, runtime);
   if (!channel) {
     await replyPrivate(
       interaction,
-      "Choose a text or announcement channel in this server.",
+      "Use this command in a text or announcement channel in this server.",
     );
     return;
   }
@@ -196,11 +234,11 @@ async function handlePostPanel(
     await replyPrivate(interaction, "Choose a supported Superior preset.");
     return;
   }
-  const channel = getSelectedPanelChannel(interaction, runtime, "channel");
+  const channel = getCurrentPanelChannel(interaction, runtime);
   if (!channel) {
     await replyPrivate(
       interaction,
-      "Choose a text or announcement channel in this server.",
+      "Use this command in a text or announcement channel in this server.",
     );
     return;
   }
@@ -1671,20 +1709,18 @@ function hasResourceOptions(interaction: ChatInputCommandInteraction): boolean {
   return false;
 }
 
-function getSelectedPanelChannel(
+function getCurrentPanelChannel(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
-  optionName: string,
 ): GuildTextBasedChannel | null {
-  const selected: unknown = interaction.options.getChannel(optionName, true);
-  const channel = selected as GuildTextBasedChannel | null;
+  const channel = interaction.channel as GuildTextBasedChannel | null;
   if (
     !channel ||
     typeof channel.isDMBased !== "function" ||
+    channel.isDMBased() ||
     channel.guild.id !== runtime.guildId ||
     (channel.type !== ChannelType.GuildText &&
-      channel.type !== ChannelType.GuildAnnouncement) ||
-    channel.isDMBased()
+      channel.type !== ChannelType.GuildAnnouncement)
   ) {
     return null;
   }
@@ -1714,16 +1750,30 @@ async function replyPrivate(
   if (interaction.replied) {
     await interaction.followUp({
       content,
-      flags: MessageFlags.Ephemeral,
       allowedMentions: { parse: [] },
     });
     return;
   }
   await interaction.reply({
     content,
-    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] },
   });
+}
+
+async function replyPanelPayloadPublic(
+  interaction: ChatInputCommandInteraction,
+  payload: SuperiorPanelPayload,
+): Promise<void> {
+  const response = toDiscordPayload(payload);
+  if (interaction.deferred && !interaction.replied) {
+    await interaction.editReply(response);
+    return;
+  }
+  if (interaction.replied) {
+    await interaction.followUp(response);
+    return;
+  }
+  await interaction.reply(response);
 }
 
 function errorMessage(error: unknown): string {

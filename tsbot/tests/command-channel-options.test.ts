@@ -89,15 +89,13 @@ describe("public command surface", () => {
     );
   });
 
-  it("restricts persisted bindings while leaving transient targets flexible", () => {
+  it("keeps non-panel target channels while panels always use the current channel", () => {
     const commands = buildCommandDefinitions().map((command) =>
       command.toJSON(),
     ) as JsonCommand[];
 
     const persistentTextTargets: Array<[string, string, string]> = [
       ["config", "log", "channel"],
-      ["panel", "post", "channel"],
-      ["ticket", "panel", "channel"],
     ];
     for (const [
       commandName,
@@ -116,10 +114,7 @@ describe("public command surface", () => {
     }
 
     const transientTargets: Array<[string, string, string]> = [
-      ["superior", "dmpanel", "channel"],
       ["superior", "say", "channel"],
-      ["superior", "rolepanel", "channel"],
-      ["superior", "rolepanelmulti", "channel"],
     ];
 
     for (const [commandName, subcommandName, optionName] of transientTargets) {
@@ -129,6 +124,39 @@ describe("public command surface", () => {
 
       expect(option.type).toBe(7);
       expect(option.channel_types).toBeUndefined();
+    }
+
+    const panel = findCommand(commands, "panel");
+    expect(
+      findSubcommand(panel, "post").options?.some(
+        ({ name }) => name === "channel",
+      ),
+    ).toBe(false);
+    const superior = findCommand(commands, "superior");
+    for (const subcommandName of [
+      "dmpanel",
+      "rolepanel",
+      "rolepanelmulti",
+    ]) {
+      expect(
+        findSubcommand(superior, subcommandName).options?.some(
+          ({ name }) => name === "channel",
+        ),
+      ).toBe(false);
+    }
+    for (const [commandName, subcommandName] of [
+      ["ticket", "panel"],
+      ["suggestion", "panel"],
+      ["application", "panel"],
+      ["onboarding", "panel"],
+      ["rolemenu", "post"],
+      ["rolemenu", "recover"],
+    ] as const) {
+      expect(
+        findSubcommand(findCommand(commands, commandName), subcommandName).options?.some(
+          ({ name }) => name === "channel",
+        ),
+      ).toBe(false);
     }
   });
 

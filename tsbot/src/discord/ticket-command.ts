@@ -20,16 +20,6 @@ export function buildTicketCommandDefinition(): SlashCommandSubcommandsOnlyBuild
       subcommand
         .setName("panel")
         .setDescription("Post or refresh the Superior ticket launcher")
-        .addChannelOption((option) =>
-          option
-            .setName("channel")
-            .setDescription("Channel that should contain the ticket launcher")
-            .setRequired(true)
-            .addChannelTypes(
-              ChannelType.GuildText,
-              ChannelType.GuildAnnouncement,
-            ),
-        )
         .addBooleanOption((option) =>
           option
             .setName("replace_existing")

@@ -89,6 +89,11 @@ import type {
   UserActivityMetric,
   UserLeaderboardEntry,
   UserMetrics,
+  VotingPanel,
+  VotingPanelInput,
+  VotingPanelSelectionResult,
+  VotingPanelTransitionResult,
+  VotingPanelVoter,
 } from "../types.js";
 import { USER_ACTIVITY_METRICS } from "../types.js";
 import {
@@ -99,8 +104,8 @@ import {
 } from "./metric-keys.js";
 import {
   detectDatabaseSchema,
-  initializeV10Schema,
-  validateV10Schema,
+  initializeV11Schema,
+  validateV11Schema,
 } from "./schema.js";
 import { GuildOperationalRepository } from "./operational-repository.js";
 import { GuildAccessRepository } from "./access-repository.js";
@@ -109,6 +114,7 @@ import { SuggestionRepository } from "./suggestion-repository.js";
 import { RestrictedPingRepository } from "./restricted-ping-repository.js";
 import { ModerationCaseRepository } from "./moderation-case-repository.js";
 import { AntiSpamRepository } from "./anti-spam-repository.js";
+import { GuildVotingRepository } from "./voting-repository.js";
 import {
   CaseAppealRepository,
   MemberReportRepository,
@@ -327,7 +333,7 @@ export class BotStorage {
       const memory = new Database(":memory:", { timeout: 5_000 });
       try {
         memory.pragma("foreign_keys = ON");
-        initializeV10Schema(memory, utcNow());
+        initializeV11Schema(memory, utcNow());
         this.db = memory;
       } catch (error) {
         memory.close();
@@ -353,7 +359,7 @@ export class BotStorage {
 
     if (schema === "legacy-v1") {
       throw new Error(
-        "Database schema v1 is not supported by v10 startup. Upgrade through the final v4 release to schema v2, create an offline backup, stop every older executable, then run the current migration command.",
+        "Database schema v1 is not supported by v11 startup. Upgrade through the final v4 release to schema v2, create an offline backup, stop every older executable, then run the current migration command.",
       );
     }
     if (schema === "legacy-v2") {
@@ -383,17 +389,22 @@ export class BotStorage {
     }
     if (schema === "legacy-v7") {
       throw new Error(
-        `Database schema v7 requires an explicit migration to v10. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+        `Database schema v7 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
       );
     }
     if (schema === "legacy-v8") {
       throw new Error(
-        `Database schema v8 requires an explicit migration to v10. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+        `Database schema v8 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
       );
     }
     if (schema === "legacy-v9") {
       throw new Error(
-        `Database schema v9 requires an explicit migration to v10. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+        `Database schema v9 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+      );
+    }
+    if (schema === "legacy-v10") {
+      throw new Error(
+        `Database schema v10 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
       );
     }
     if (schema === "unknown") {
@@ -406,9 +417,9 @@ export class BotStorage {
     try {
       writable.pragma("foreign_keys = ON");
       if (schema === "empty") {
-        initializeV10Schema(writable, utcNow());
+        initializeV11Schema(writable, utcNow());
       } else {
-        const issues = validateV10Schema(writable);
+        const issues = validateV11Schema(writable);
         if (issues.length > 0) {
           throw new Error(
             `Database changed after read-only classification: ${issues.join("; ")}`,
@@ -1324,6 +1335,7 @@ export class GuildStorage {
   private readonly memberReports: MemberReportRepository;
   private readonly caseAppeals: CaseAppealRepository;
   private readonly antiSpam: AntiSpamRepository;
+  private readonly voting: GuildVotingRepository;
   private readonly onboarding: OnboardingStorageRepository;
   private readonly roleMenus: RoleMenuRepository;
 
@@ -1343,6 +1355,7 @@ export class GuildStorage {
     this.memberReports = new MemberReportRepository(db, guildId);
     this.caseAppeals = new CaseAppealRepository(db, guildId);
     this.antiSpam = new AntiSpamRepository(db, guildId);
+    this.voting = new GuildVotingRepository(db, guildId);
     this.onboarding = new OnboardingStorageRepository(db, guildId);
     this.roleMenus = new RoleMenuRepository(db, guildId);
   }
@@ -1737,6 +1750,74 @@ export class GuildStorage {
     messageId: string,
   ): number {
     return this.roleMenus.markRoleMenuMessageMissing(channelId, messageId);
+  }
+
+  public createVotingPanel(input: VotingPanelInput): VotingPanel {
+    return this.voting.createVotingPanel(input);
+  }
+
+  public getVotingPanel(voteId: string): VotingPanel | null {
+    return this.voting.getVotingPanel(voteId);
+  }
+
+  public getVotingPanelByMessage(
+    channelId: string,
+    messageId: string,
+  ): VotingPanel | null {
+    return this.voting.getVotingPanelByMessage(channelId, messageId);
+  }
+
+  public listActiveVotingPanels(): VotingPanel[] {
+    return this.voting.listActiveVotingPanels();
+  }
+
+  public listDueVotingPanels(now: string): VotingPanel[] {
+    return this.voting.listDueVotingPanels(now);
+  }
+
+  public countActiveVotingPanels(channelId?: string): number {
+    return this.voting.countActiveVotingPanels(channelId);
+  }
+
+  public getVotingPanelSelection(voteId: string, voterId: string): string[] {
+    return this.voting.getVotingPanelSelection(voteId, voterId);
+  }
+
+  public replaceVotingSelection(
+    voteId: string,
+    voterId: string,
+    optionIds: readonly string[],
+  ): VotingPanelSelectionResult {
+    return this.voting.replaceVotingSelection(voteId, voterId, optionIds);
+  }
+
+  public selectVotingPanelOption(
+    voteId: string,
+    voterId: string,
+    optionId: string,
+  ): VotingPanelSelectionResult {
+    return this.voting.selectVotingPanelOption(voteId, voterId, optionId);
+  }
+
+  public toggleVotingPanelOption(
+    voteId: string,
+    voterId: string,
+    optionId: string,
+  ): VotingPanelSelectionResult {
+    return this.voting.toggleVotingPanelOption(voteId, voterId, optionId);
+  }
+
+  public listVotingPanelVoters(voteId: string): VotingPanelVoter[] {
+    return this.voting.listVotingPanelVoters(voteId);
+  }
+
+  public transitionVotingPanel(
+    voteId: string,
+    status: "completed" | "cancelled",
+    actorId: string,
+    timestamp: string,
+  ): VotingPanelTransitionResult {
+    return this.voting.transitionVotingPanel(voteId, status, actorId, timestamp);
   }
 
   public getModerationConfiguration(): ModerationConfiguration | null {

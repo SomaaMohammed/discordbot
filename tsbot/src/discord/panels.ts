@@ -73,7 +73,7 @@ export async function handlePanelCommand(
   actor: GuildMember,
 ): Promise<boolean> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await interaction.deferReply();
   }
   switch (interaction.options.getSubcommand()) {
     case "say":
@@ -318,12 +318,7 @@ async function handleDmPanel(
   runtime: GuildRuntime,
   actor: GuildMember,
 ): Promise<void> {
-  const channel = await getTargetChannel(
-    interaction,
-    runtime,
-    "channel",
-    false,
-  );
+  const channel = await getCurrentPanelChannel(interaction, runtime);
   if (!channel) return;
   const target = interaction.options.getUser("target", false) ?? actor.user;
   if (target.bot) {
@@ -358,7 +353,10 @@ async function handleDmPanel(
   );
   const embed = new EmbedBuilder()
     .setTitle(escapeMarkdown(title).slice(0, 256))
-    .setDescription(escapeMarkdown(description).slice(0, 4_096));
+    .setDescription(escapeMarkdown(description).slice(0, 4_096))
+    .setFooter({
+      text: "How to use: Click the button and complete the private-message form.",
+    });
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(`${DM_BUTTON_PREFIX}${target.id}`)
@@ -397,12 +395,7 @@ async function handleRolePanel(
   actor: GuildMember,
   multiple: boolean,
 ): Promise<void> {
-  const channel = await getTargetChannel(
-    interaction,
-    runtime,
-    "channel",
-    false,
-  );
+  const channel = await getCurrentPanelChannel(interaction, runtime);
   if (!channel) return;
   const roles = multiple
     ? [1, 2, 3, 4, 5]
@@ -463,7 +456,10 @@ async function handleRolePanel(
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(components);
   const embed = new EmbedBuilder()
     .setTitle(escapeMarkdown(title).slice(0, 256))
-    .setDescription(escapeMarkdown(description).slice(0, 4_096));
+    .setDescription(escapeMarkdown(description).slice(0, 4_096))
+    .setFooter({
+      text: "How to use: Click a role button to add or remove that role.",
+    });
   if (!runtime.isCurrent()) {
     await replyPrivate(
       interaction,
@@ -689,6 +685,31 @@ async function getTargetChannel(
     await replyPrivate(
       interaction,
       "Choose a text-based channel in this server.",
+    );
+    return null;
+  }
+  return channel;
+}
+
+/** Resolves a persistent panel's destination strictly from this interaction. */
+async function getCurrentPanelChannel(
+  interaction: ChatInputCommandInteraction,
+  runtime: GuildRuntime,
+): Promise<GuildTextBasedChannel | null> {
+  const channel = interaction.channel as GuildTextBasedChannel | null;
+  if (
+    !channel ||
+    typeof channel.isDMBased !== "function" ||
+    typeof channel.isTextBased !== "function" ||
+    channel.isDMBased() ||
+    !channel.isTextBased() ||
+    !("send" in channel) ||
+    channel.guild.id !== runtime.guildId ||
+    interaction.guild?.id !== runtime.guildId
+  ) {
+    await replyPrivate(
+      interaction,
+      "Use this command in a text-based channel in this server.",
     );
     return null;
   }

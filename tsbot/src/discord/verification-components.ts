@@ -9,6 +9,7 @@ import {
   DISCORD_CUSTOM_ID_LIMIT,
   SAFE_PANEL_ALLOWED_MENTIONS,
   createSuperiorEmbed,
+  setPanelInstructionFooter,
 } from "./panel-theme.js";
 import { ONBOARDING_RULES_BODY_MAXIMUM } from "../types.js";
 
@@ -93,6 +94,10 @@ export function buildVerificationPanelPayload(
       value: `\`${request.rulesVersion}\``,
       inline: true,
     });
+  setPanelInstructionFooter(
+    embed,
+    "Read the rules, then click Accept Rules to acknowledge them.",
+  );
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(customId)

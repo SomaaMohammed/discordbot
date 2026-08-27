@@ -40,6 +40,7 @@ import {
   handleGuildMemberRemoved,
   handleGuildMemberUpdated,
 } from "./member-lifecycle-discord.js";
+import { createVotingPanelScheduler } from "./voting-scheduler.js";
 
 export interface DiscordClientWorkLifecycle {
   stop: () => void;
@@ -75,10 +76,12 @@ export function createDiscordClient(
   });
   const workTracker = new AsyncWorkTracker();
   const eventLoopDiagnostics = new EventLoopDiagnostics();
+  const votingPanelScheduler = createVotingPanelScheduler(client, runtime);
   const workLifecycle: DiscordClientWorkLifecycle = {
     stop(): void {
       workTracker.stopAccepting();
       eventLoopDiagnostics.stop();
+      votingPanelScheduler.stop();
     },
     drain(timeoutMs: number): Promise<boolean> {
       return workTracker.drain(timeoutMs);
@@ -231,6 +234,7 @@ export function createDiscordClient(
             error,
           });
         });
+        votingPanelScheduler.start();
       })
       .catch((error) => {
         logError("discord", "Tracked client-ready handler failed", { error });

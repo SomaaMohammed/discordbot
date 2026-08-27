@@ -126,11 +126,11 @@ function createEnabledMenu(
 }
 
 describe("Phase 4 storage repositories", () => {
-  it("creates a valid schema v10 and persists the Phase 4 aggregate", () => {
+  it("creates a valid schema v11 and persists the Phase 4 aggregate", () => {
     const { storage, dbFile } = createStorage(true);
-    expect(validateDatabaseFile(dbFile!, { expect: 10 })).toEqual({
-      schema: "current-v10",
-      schemaVersion: 10,
+    expect(validateDatabaseFile(dbFile!, { expect: 11 })).toEqual({
+      schema: "current-v11",
+      schemaVersion: 11,
       integrity: "ok",
       foreignKeyViolations: 0,
     });

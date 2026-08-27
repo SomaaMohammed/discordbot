@@ -144,6 +144,17 @@ export function createSuperiorEmbed(): EmbedBuilder {
     .setFooter({ text: SUPERIOR_PANEL_FOOTER_TEXT });
 }
 
+/**
+ * Applies the concise, action-oriented footer required on public panel
+ * messages without changing the default footer used by non-panel embeds.
+ */
+export function setPanelInstructionFooter(
+  embed: EmbedBuilder,
+  instruction: string,
+): EmbedBuilder {
+  return embed.setFooter({ text: `How to use: ${instruction}`.slice(0, 2_048) });
+}
+
 export function isPanelPreset(value: string): value is PanelPreset {
   return (PANEL_PRESETS as readonly string[]).includes(value);
 }
@@ -265,6 +276,10 @@ function renderVerificationPanel(
       value: `\`${request.rulesVersion}\``,
       inline: true,
     });
+  setPanelInstructionFooter(
+    embed,
+    "Read the rules, then click Accept Rules to acknowledge them.",
+  );
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(request.customId)
@@ -319,6 +334,10 @@ function renderRoleMenuPanel(
       value: `<@&${request.requiredRoleId}>`,
     });
   }
+  setPanelInstructionFooter(
+    embed,
+    "Choose your roles from the menu to save your selection.",
+  );
   return createPanelPayload(embed, [
     new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select),
   ]);
@@ -422,6 +441,79 @@ export function renderHelpPanel(
       },
     );
 
+  setPanelInstructionFooter(
+    embed,
+    "Read the available services, then use the listed commands or panel controls.",
+  );
+
+  return createPanelPayload(embed);
+}
+
+/** A public guide for the /panel help command. */
+export function renderPanelHowToGuide(): SuperiorPanelPayload {
+  const embed = createSuperiorEmbed()
+    .setTitle("How to Use Panels")
+    .setDescription(
+      "Panels are public messages that provide a focused action, form, menu, link, or reference for this server.",
+    )
+    .addFields(
+      {
+        name: "Voting panels",
+        value:
+          "Choose an option button to vote. Use View voters to inspect the current voters; Administrators can close or cancel a vote.",
+      },
+      {
+        name: "Role panels",
+        value: "Click a role button to add or remove that self-service role.",
+      },
+      {
+        name: "Role-menu panels",
+        value:
+          "Choose roles from the select menu and submit the selection shown there.",
+      },
+      {
+        name: "Private-message panels",
+        value:
+          "Click the message button, then complete the private-message form for its configured recipient.",
+      },
+      {
+        name: "Ticket panels",
+        value: "Click Open Ticket to start a private support request.",
+      },
+      {
+        name: "Suggestion panels",
+        value: "Click Share Suggestion to submit a focused proposal for review.",
+      },
+      {
+        name: "Application panels",
+        value: "Click Apply, choose a form, and submit your answers privately.",
+      },
+      {
+        name: "Safety panels",
+        value:
+          "Use Submit Report or Submit Appeal for the relevant private safety request.",
+      },
+      {
+        name: "Verification panels",
+        value: "Read the current rules and click Accept Rules to acknowledge them.",
+      },
+      {
+        name: "Resource panels",
+        value: "Read the curated information and use the link buttons when available.",
+      },
+      {
+        name: "Server-info panels",
+        value: "Read the displayed server details and timestamps.",
+      },
+      {
+        name: "Help panels",
+        value: "Read the available services and follow the listed commands or controls.",
+      },
+    );
+  setPanelInstructionFooter(
+    embed,
+    "Read the panel type that fits your task, then use its available controls.",
+  );
   return createPanelPayload(embed);
 }
 
@@ -468,6 +560,7 @@ export function renderServerInfoPanel(guild: Guild): SuperiorPanelPayload {
         value: `<t:${Math.floor(createdTimestamp / 1_000)}:F>`,
       },
     );
+  setPanelInstructionFooter(embed, "Read this server information.");
   const iconUrl = guild.iconURL({ extension: "png", size: 512 });
   if (iconUrl) embed.setThumbnail(iconUrl);
 
@@ -481,6 +574,10 @@ export function renderResourcesPanel(
   const embed = createSuperiorEmbed()
     .setTitle(resource.title)
     .setDescription(resource.body);
+  setPanelInstructionFooter(
+    embed,
+    "Read the resources and use the link buttons when available.",
+  );
   if (resource.links.length === 0) return createPanelPayload(embed);
 
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -508,6 +605,10 @@ export function renderTicketLauncherPanel(
       value:
         "You may have one active ticket per department and up to three across this server. Keep requests focused and avoid sensitive information.",
     });
+  setPanelInstructionFooter(
+    embed,
+    "Click Open Ticket to start a private support request.",
+  );
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(customId)
@@ -535,6 +636,10 @@ export function renderSuggestionLauncherPanel(
       value:
         "Keep the title focused and explain the expected benefit. Submission cooldowns apply.",
     });
+  setPanelInstructionFooter(
+    embed,
+    "Click Share Suggestion to submit a proposal.",
+  );
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(customId)
@@ -562,6 +667,10 @@ export function renderApplicationLauncherPanel(
       value:
         "Application answers are never posted publicly. You can review your own status with `/application status`.",
     });
+  setPanelInstructionFooter(
+    embed,
+    "Click Apply, choose a form, and submit your answers privately.",
+  );
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(customId)
@@ -603,6 +712,10 @@ export function renderSafetyLauncherPanel(
           "Banned members cannot use server commands or this panel; server staff must provide another contact path when one is required.",
       },
     );
+  setPanelInstructionFooter(
+    embed,
+    "Choose Submit Report or Submit Appeal for a private safety request.",
+  );
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(reportCustomId)
