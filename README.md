@@ -1,6 +1,6 @@
 # Superior
 
-Superior 6.5.1 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
+Superior 7.0.0 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
 
 ## Windows quick start
 
@@ -17,17 +17,16 @@ The first launch places the immutable bundled runtime in the current Windows use
 - `/config` reports or changes the explicit bot-state switch, log channel, timezone, invocation terms, moderation limits, and reusable greetings. `/data` provides export, owner-only import, and owner-confirmed purge.
 - `/access` lets the guild owner or a freshly verified Administrator grant one of thirteen narrow management capabilities to a safe guild role, including separate onboarding and self-service-role configuration authority.
 - `/onboarding` configures bounded welcome/farewell delivery, a private member-lifecycle log, versioned rules acknowledgement, safe human/bot automatic roles, member status, and explicit recovery. Discord Membership Screening is respected and never bypassed.
-- `/rolemenu` creates, publishes, disables, archives, inspects, and recovers persistent `toggle`, `exclusive`, and `limited` self-service role menus. Legacy `/superior rolepanel` and `rolepanelmulti` messages retain their existing component behavior.
-- `/panel` posts and tracks fixed Superior `help`, `server-info`, `resources`, `tickets`, `suggestions`, `applications`, `safety`, `verification`, and `roles` panels.
+- `/rolemenu` creates, publishes, disables, archives, inspects, and recovers persistent `toggle`, `exclusive`, and `limited` self-service role menus. Role-panel controls posted by older releases retain their existing component behavior.
+- `/panel` creates and tracks fixed Superior `help`, `server-info`, `resources`, `tickets`, `suggestions`, `applications`, `safety`, `verification`, and `roles` panels, and also creates private-message, role-button, and voting panels.
 - `/ticket` manages up to 10 routed departments, each with its own category, closure log, support role, and 1–5-field intake form. It also posts launchers and reconciles interrupted tickets.
 - `/suggestion` provides persisted submissions, voting, optional discussion threads, bounded cooldowns, staff review, withdrawals, and missing-message recovery.
 - `/application` provides private configurable application forms, private review delivery, claiming, decisions, applicant status/withdrawal, and recovery.
 - `/restrictedping` lets the guild owner or an Administrator map safe, normally non-mentionable roles to approved channels, while `/pingrole` lets a current role member request the bot-owned mention only in that authorized context.
-- `/moderation` provides persistent warning, note, timeout, kick, ban, unban, case-history, amendment, voiding, configuration, and recovery workflows. Legacy `/superior` timeout, untimeout, and bounded bulk-timeout operations enter the same case history and fail closed until moderation cases are enabled, while purge, lock, unlock, and slowmode remain independent.
+- `/moderation` provides persistent warning, note, timeout, kick, ban, unban, case-history, amendment, voiding, configuration, and recovery workflows. `/timeout` preserves bounded Administrator timeout utilities and `/channel` provides announcements, cleanup, locks, and slowmode.
 - `/report` provides confidential member reports with private staff review, and `/appeal` provides one in-guild appeal for an eligible case while the sanctioned member can still access the guild.
 - `/automod` configures a deliberately narrow, default-disabled burst, duplicate, and mention anti-spam system with role/channel exemptions, dry-run testing, durable cooldowns, and auditable enforcement.
-- `/superior` continues to provide announcements and panels, message cleanup, channel controls, bounded member timeouts, activity backfill, and command help.
-- `/utility`, `/fun`, `/greetings`, and deliberately addressed natural chat retain their existing member-facing behavior.
+- `/activity` provides member totals, leaderboards, and Administrator backfill tools; `/help` shows the command map. `/utility`, `/fun`, `/greetings`, and deliberately addressed natural chat retain their existing member-facing behavior.
 - Optional `emoji-replies.json` configures Unicode reactions and attached emoji replies for selected members across multiple servers; changes reload without restarting the bot.
 
 ## Safety model

@@ -1,5 +1,6 @@
 import {
   SlashCommandBuilder,
+  type SlashCommandSubcommandBuilder,
   type SlashCommandSubcommandsOnlyBuilder,
 } from "discord.js";
 import {
@@ -23,17 +24,17 @@ const VOTE_DURATION_MAXIMUM_MINUTES = 20_160;
 export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilder {
   const command = new SlashCommandBuilder()
     .setName("panel")
-    .setDescription("Post and inspect fixed Superior server panels")
+    .setDescription("Create, post, and inspect Superior server panels")
     .setDMPermission(false)
     .addSubcommand((subcommand) =>
       subcommand
         .setName("list")
-        .setDescription("List Superior panel presets and their purpose"),
+        .setDescription("List tracked panel presets and their purpose"),
     )
     .addSubcommand((subcommand) => {
       subcommand
         .setName("post")
-        .setDescription("Post a Superior preset in this channel")
+        .setDescription("Post a tracked preset in the current channel")
         .addStringOption((option) =>
           option
             .setName("preset")
@@ -90,7 +91,7 @@ export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
         option
           .setName("replace_existing")
           .setDescription(
-            "Safely replace Superior's stored panel in this channel",
+            "Refresh the tracked panel in this channel (default: true)",
           )
           .setRequired(false),
       );
@@ -98,8 +99,53 @@ export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     .addSubcommand((subcommand) =>
       subcommand
         .setName("help")
-        .setDescription("Post a guide to every Superior panel type here"),
+        .setDescription("Post a practical panel-creation guide here"),
     )
+    .addSubcommand((subcommand) => {
+      addPanelTextOptions(
+        subcommand
+          .setName("dmpanel")
+          .setDescription("Post an Administrator-managed private-message panel")
+          .addUserOption((option) =>
+            option
+              .setName("target")
+              .setDescription("Message recipient (default: you)")
+              .setRequired(false),
+          ),
+        true,
+      );
+      return subcommand;
+    })
+    .addSubcommand((subcommand) => {
+      addPanelTextOptions(
+        subcommand
+          .setName("role-button")
+          .setDescription("Post one Administrator-managed role button")
+          .addRoleOption((option) =>
+            option
+              .setName("role")
+              .setDescription("Safe self-service role")
+              .setRequired(true),
+          ),
+        true,
+      );
+      return subcommand;
+    })
+    .addSubcommand((subcommand) => {
+      subcommand
+        .setName("role-buttons")
+        .setDescription("Post two to five Administrator-managed role buttons");
+      for (let slot = 1; slot <= 5; slot += 1) {
+        subcommand.addRoleOption((option) =>
+          option
+            .setName(`role_${slot}`)
+            .setDescription(`Safe self-service role ${slot}`)
+            .setRequired(slot <= 2),
+        );
+      }
+      addPanelTextOptions(subcommand, false);
+      return subcommand;
+    })
     .addSubcommand((subcommand) =>
       subcommand
         .setName("vote")
@@ -174,10 +220,38 @@ export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
     .addSubcommand((subcommand) =>
       subcommand
         .setName("status")
-        .setDescription(
-          "Inspect stored panels and active ticket-panel configuration",
-        ),
+        .setDescription("Inspect tracked preset panels and workflow readiness"),
     );
 
   return command;
+}
+
+function addPanelTextOptions(
+  subcommand: SlashCommandSubcommandBuilder,
+  includeButtonLabel: boolean,
+): void {
+  subcommand
+    .addStringOption((option) =>
+      option
+        .setName("title")
+        .setDescription("Panel title (uses a default when omitted)")
+        .setRequired(false)
+        .setMaxLength(256),
+    )
+    .addStringOption((option) =>
+      option
+        .setName("description")
+        .setDescription("Panel description (uses a default when omitted)")
+        .setRequired(false)
+        .setMaxLength(4_096),
+    );
+  if (includeButtonLabel) {
+    subcommand.addStringOption((option) =>
+      option
+        .setName("button_label")
+        .setDescription("Button label (uses a default when omitted)")
+        .setRequired(false)
+        .setMaxLength(80),
+    );
+  }
 }

@@ -85,7 +85,7 @@ After starting the schema-v10 release:
 11. Test one conservative anti-spam rule in a disposable channel before enabling it more broadly; verify exemptions, cooldowns, case creation, and that message edits are not enforced.
 12. Confirm `/onboarding status` shows welcome/farewell, verification, human/bot automatic roles, and private lifecycle delivery disabled with no invented member history.
 13. Configure current lifecycle channels, rules, and safe verification roles. Test a disposable human join, a bot join, and a member pending Discord Membership Screening; no human or verification role may be assigned until native screening completes.
-14. Create one disabled disposable `/rolemenu`, add only safe current roles, inspect and enable it, post it, then verify its mode/selection bounds and prerequisite. Confirm legacy `/superior rolepanel` messages retain their prior behavior.
+14. Create one disabled disposable `/rolemenu`, add only safe current roles, inspect and enable it, post it, then verify its mode/selection bounds and prerequisite. Confirm role-panel messages posted by older releases retain their prior behavior.
 
 ## Updating without a schema change
 

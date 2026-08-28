@@ -55,7 +55,7 @@ const helpReplies: readonly ReplyFactory[] = [
   (context) =>
     `I understand short requests such as \`${inline(context.invocation)} hru\`, \`${inline(context.invocation)} wyd\`, \`${inline(context.invocation)} time now\`, and \`${inline(context.invocation)} ver\`.`,
   (context) =>
-    `For chat help, try \`${inline(context.invocation)} commands\`. Slash commands are grouped under \`/config\`, \`/data\`, \`/superior\`, \`/utility\`, \`/fun\`, and \`/greetings\`.`,
+    `For chat help, try \`${inline(context.invocation)} commands\`. Slash commands are grouped under \`/config\`, \`/data\`, \`/panel\`, \`/utility\`, \`/activity\`, and \`/greetings\`.`,
   (context) =>
     `Useful examples: \`${inline(context.invocation)} uptime\`, \`${inline(context.invocation)} flip a coin\`, and \`${inline(context.invocation)} what time is it\`.`,
   (context) =>
@@ -65,7 +65,7 @@ const helpReplies: readonly ReplyFactory[] = [
   (context) =>
     `Try \`hey ${inline(context.invocation)}, wyd?\`, \`${inline(context.invocation)} roll d20\`, or \`thanks ${inline(context.invocation)}\`.`,
   (context) =>
-    `Need the command groups? Use \`/utility\` for information tools and \`/superior\` for server management, or say \`${inline(context.invocation)} cmds\`.`,
+    `Need the command groups? Use \`/utility\` for information tools, \`/channel\` for channel tools, and \`/moderation\` for case management—or say \`${inline(context.invocation)} cmds\`.`,
 ];
 
 const thanksReplies: readonly ReplyFactory[] = [

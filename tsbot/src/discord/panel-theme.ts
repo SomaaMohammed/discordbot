@@ -152,7 +152,9 @@ export function setPanelInstructionFooter(
   embed: EmbedBuilder,
   instruction: string,
 ): EmbedBuilder {
-  return embed.setFooter({ text: `How to use: ${instruction}`.slice(0, 2_048) });
+  return embed.setFooter({
+    text: `How to use: ${instruction}`.slice(0, 2_048),
+  });
 }
 
 export function isPanelPreset(value: string): value is PanelPreset {
@@ -409,7 +411,7 @@ export function renderHelpPanel(
     "`/access` - grant or revoke delegated role capabilities.",
   ];
   const workflowCommands = [
-    "`/superior` - use commands permitted by your current Discord permissions.",
+    "`/channel`, `/timeout`, and `/activity` - use Administrator tools when you have the required permission.",
     "`/panel` - post or inspect panels when you hold panel-management access.",
     "`/ticket` - configure departments or recover tickets when authorized.",
     "`/suggestion` - submit or withdraw suggestions; authorized reviewers can manage them.",
@@ -449,70 +451,68 @@ export function renderHelpPanel(
   return createPanelPayload(embed);
 }
 
-/** A public guide for the /panel help command. */
+/** A practical, user-focused guide for creating panels. */
 export function renderPanelHowToGuide(): SuperiorPanelPayload {
   const embed = createSuperiorEmbed()
-    .setTitle("How to Use Panels")
+    .setTitle("Create a Server Panel")
     .setDescription(
-      "Panels are public messages that provide a focused action, form, menu, link, or reference for this server.",
+      "Create panels in the channel where you run the command. Start with `/panel list`, choose a path below, fill in its settings, then check the result.",
     )
     .addFields(
       {
-        name: "Voting panels",
+        name: "Choose a path",
         value:
-          "Choose an option button to vote. Use View voters to inspect the current voters; Administrators can close or cancel a vote.",
+          "`/panel post` creates a tracked fixed preset: `help`, `server-info`, `resources`, `tickets`, `suggestions`, `applications`, `safety`, `verification`, or `roles`. `/panel dmpanel` creates a private-message button. `/panel vote` creates a saved yes/no or custom vote. `/panel status` covers fixed presets only; it does not list DM or voting panels.",
       },
       {
-        name: "Role panels",
-        value: "Click a role button to add or remove that self-service role.",
+        name: "Fixed-preset workflow",
+        value:
+          "1. Configure the feature first when needed. 2. Open the destination text or announcement channel. 3. Run `/panel post preset:<type>`. 4. Add only options for that preset. 5. Omit `replace_existing` to refresh the tracked panel (default: true), or set it to `false` to refuse replacement. 6. Use `/panel status` to inspect tracked presets.",
       },
       {
-        name: "Role-menu panels",
+        name: "`/panel post` settings",
         value:
-          "Choose roles from the select menu and submit the selection shown there.",
+          "Required: `preset`. Optional: `replace_existing` (default **true**). `resources` additionally requires `resource_title` (1–256) and `resource_body` (1–4,096), plus up to five complete `link_N_label`/`link_N_url` pairs; labels are 1–80, URLs are HTTPS, unique, and up to 512 characters. `roles` requires an enabled, verified `role_menu` slug (1–32) with 1–25 current options. Other preset-specific options are rejected.",
+      },
+      {
+        name: "Preset readiness",
+        value:
+          "`help` and `server-info` need no feature setup. `tickets` needs an enabled healthy department; `suggestions` needs an enabled healthy configuration; `applications` needs an enabled healthy form; `safety` needs verified report or appeal bindings; `verification` needs current rules and verified roles; `roles` needs a safe verified menu. Check `/ticket department health`, `/suggestion status`, `/application form list`, `/moderation status`, `/onboarding status`, or `/rolemenu status` when a preset is refused.",
       },
       {
         name: "Private-message panels",
         value:
-          "Click the message button, then complete the private-message form for its configured recipient.",
+          "`/panel dmpanel` is Administrator-only and uses the current text-based channel, including threads. All settings are optional: `target` defaults to you, `title` defaults to **Private message** (max 256), `description` gets the built-in instruction (max 4,096), and `button_label` defaults to **Send private message** (max 80). Messages identify the sender and server, accept up to 1,800 characters, and are limited to one attempt per sender every 60 seconds. The recipient must remain a human member with open DMs. This panel is not tracked and has no replacement flag.",
       },
       {
-        name: "Ticket panels",
-        value: "Click Open Ticket to start a private support request.",
-      },
-      {
-        name: "Suggestion panels",
-        value: "Click Share Suggestion to submit a focused proposal for review.",
-      },
-      {
-        name: "Application panels",
-        value: "Click Apply, choose a form, and submit your answers privately.",
-      },
-      {
-        name: "Safety panels",
+        name: "Role-button panels",
         value:
-          "Use Submit Report or Submit Appeal for the relevant private safety request.",
+          "`/panel role-button` requires one safe `role`; `title`, `description`, and `button_label` are optional and use **Choose your roles**, the built-in add/remove instruction, and the role name as defaults (limits 256, 4,096, and 80). `/panel role-buttons` requires two unique safe roles and accepts up to five (`role_1` through `role_5`), plus optional title and description. Both are Administrator-only, use the current text channel, require Superior to have Manage Roles and sit above each role, and are not tracked or replaceable.",
       },
       {
-        name: "Verification panels",
-        value: "Read the current rules and click Accept Rules to acknowledge them.",
+        name: "Voting panels: required settings",
+        value:
+          "`/panel vote` requires `question` (1–256), `poll_type` (`yes-no` or `custom`), `multi_select`, `duration_minutes`, `mention_everyone_on_creation`, and `mention_everyone_on_completion`. Multi-select lets one voter choose several answers. Duration `0` means close manually; another value closes automatically. Mention choices request @everyone notifications, subject to the bot's Mention Everyone permission.",
       },
       {
-        name: "Resource panels",
-        value: "Read the curated information and use the link buttons when available.",
+        name: "Voting panels: optional settings and limits",
+        value:
+          "Optional: `title` (1–256), `description` (1–4,096), and `options` (input max 1,000). Yes/no automatically supplies Yes and No and rejects custom options. Custom votes need 2–10 unique options, one per line, each no longer than 80 characters. Duration is 0–20,160 minutes (14 days), and a channel can have at most five active votes. Voting also requires Administrator access and View Channel, Send Messages, Read Message History, and Embed Links.",
       },
       {
-        name: "Server-info panels",
-        value: "Read the displayed server details and timestamps.",
+        name: "Common setups",
+        value:
+          'Server snapshot: `/panel post preset:server-info`\nResource hub: `/panel post preset:resources resource_title:"Server resources" resource_body:"Start here." link_1_label:"Rules" link_1_url:"https://example.com/rules"`\nExisting role menu: `/panel post preset:roles role_menu:notifications`\nStaff contact: `/panel dmpanel target:@Staff title:"Contact staff" button_label:"Write privately"`\nOne-day yes/no vote: `/panel vote question:"Hold the event Friday?" poll_type:yes-no multi_select:false duration_minutes:1440 mention_everyone_on_creation:false mention_everyone_on_completion:false`',
       },
       {
-        name: "Help panels",
-        value: "Read the available services and follow the listed commands or controls.",
+        name: "Not sure what to choose?",
+        value:
+          "Run `/panel list` for preset purposes. Use `/panel status` before reposting a fixed preset. If a workflow preset is refused, run that feature's status or health command and fix what it reports. If you do not have access, ask the server owner or an Administrator. Make sure Superior can View Channel, Send Messages, Read Message History, and Embed Links in the destination.",
       },
     );
   setPanelInstructionFooter(
     embed,
-    "Read the panel type that fits your task, then use its available controls.",
+    "Choose a panel path, complete its required settings, then test the posted controls.",
   );
   return createPanelPayload(embed);
 }

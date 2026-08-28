@@ -174,7 +174,7 @@ export async function handlePanelHelpCommand(
   }
   const guild = interaction.guild;
   const botMember = guild
-    ? guild.members.me ?? (await guild.members.fetchMe().catch(() => null))
+    ? (guild.members.me ?? (await guild.members.fetchMe().catch(() => null)))
     : null;
   if (!botMember || !canPostThemedPanel(channel, botMember)) {
     await replyPrivate(

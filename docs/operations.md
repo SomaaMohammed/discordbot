@@ -23,7 +23,7 @@ Interaction entries include a correlation ID, sanitized command/component route,
 Representative output has this shape:
 
 ```text
-[2026-08-11T10:00:00.000Z] [INFO] [interaction] Command interaction received correlationId="a1b2c3d4e5f6" operation="superior/backfillstats" guildId="123..." ageAtReceiptMs=42
+[2026-08-11T10:00:00.000Z] [INFO] [interaction] Command interaction received correlationId="a1b2c3d4e5f6" operation="activity/backfill" guildId="123..." ageAtReceiptMs=42
 [2026-08-11T10:00:00.120Z] [INFO] [interaction] Command interaction completed correlationId="a1b2c3d4e5f6" outcome="succeeded" acknowledgement="defer-reply" acknowledgementLatencyMs=18 totalDurationMs=120
 ```
 
@@ -144,7 +144,7 @@ Review migrated external bindings and persistent routes:
 9. Configure one conservative anti-spam rule in a disposable channel, run `/automod test`, then verify deletion, exemption, cooldown, and case/log behavior before wider enablement.
 10. Confirm `/onboarding status` shows Phase 4 delivery, verification, and human/bot automatic roles disabled with no invented member history. Verify the private lifecycle-log channel separately from public welcome/farewell destinations.
 11. Configure current rules and safe verified/unverified roles, then post a disposable verification panel. Confirm a pending native Membership Screening member receives no human/verification role until screening completes, and confirm verified-role addition precedes optional unverified-role removal.
-12. Create one disabled disposable role menu, add only current safe roles, verify its selection limits and prerequisite, enable and post it, exercise every selected mode used by the guild, then inspect `/rolemenu status`. Existing `/superior rolepanel` components must still retain their legacy behavior.
+12. Create one disabled disposable role menu, add only current safe roles, verify its selection limits and prerequisite, enable and post it, exercise every selected mode used by the guild, then inspect `/rolemenu status`. Role-panel components posted by older releases must still retain their legacy behavior.
 13. In a disposable test workflow, verify ticket closure/transcript delivery, suggestion submit/vote/review, private application submit/claim/decision, and a reversible moderation case.
 
 Do not interpret Discord message IDs alone as healthy bindings. The runtime re-fetches current channels, roles, messages, members, and bot permissions.
@@ -226,7 +226,7 @@ The current `restore` command intentionally accepts only v10. `./ops.sh restore`
 - Rules acknowledgement records one immutable current-version acceptance for the member, is never described as legal consent, adds the verified role before removing the optional unverified role, and exposes any partial outcome to bounded recovery.
 - Human and bot automatic-role lists are independently enabled, contain at most 10 safe roles each, and reject dangerous, managed, cross-guild, or unmanageable roles. No configuration change initiates an unbounded member scan.
 - Each enabled role menu contains at most 25 options and uses `toggle`, `exclusive`, or `limited` bounds. It changes only its own safe roles, preserves prior access on failed addition, and accurately records a partial removal for recovery.
-- Legacy `/superior` member timeout, untimeout, and bounded bulk-timeout actions fail closed until Phase 3 moderation cases are enabled; purge, channel lock/unlock, and slowmode remain independent.
+- `/timeout` member and bounded bulk-timeout actions fail closed until Phase 3 moderation cases are enabled; `/channel` purge, lock/unlock, and slowmode remain independent.
 - `/pingrole` produces exactly one approved role notification, rejects the wrong role/channel/thread, and enforces the 60-second user plus 30-second role defaults without an Administrator bypass.
 - Global command synchronization has registered `/pingrole`, `/restrictedping`, `/moderation`, `/report`, `/appeal`, `/automod`, `/onboarding`, and `/rolemenu`, and propagation has finished before stale definitions are treated as an incident.
 - Logs contain no token, environment value, raw message content, private note, report/appeal body, reviewer reason, application answer, suggestion detail, transcript content, rules text, welcome/farewell template, direct-message content, export, or database content.

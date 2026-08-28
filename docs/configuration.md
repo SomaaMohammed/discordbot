@@ -211,7 +211,7 @@ Every option role is freshly validated during configuration, posting, and select
 
 On interaction, Superior resolves the stored opaque menu and exact guild/channel/message/version binding, re-fetches the member and every referenced role, verifies Manage Roles/hierarchy and any prerequisite, validates the complete minimum/maximum plan, and serializes work per member/menu. Additions occur before removals when that protects prior access. If an addition fails, no prior menu role is removed. If additions succeed and a removal partially fails, the exact confirmed result and recovery work are stored and reported privately. Only roles represented by that menu may be removed; unrelated roles are never touched. Repeated selections are idempotent, copied/cross-guild IDs fail closed, and deleted roles/messages are reported unhealthy without scanning all members.
 
-`/rolemenu recover` verifies a missing message, stale definition, deleted option/prerequisite role, imported unverified binding, or partial member operation against current resources. Supply `member:` to retry that member's newest unresolved current-definition plan; additions still precede removals, and the original partial outcome remains in history beside the recovery operation. Reposting stays guild-scoped and does not reconstruct usage by fetching every guild member. Existing `/superior rolepanel` and `/superior rolepanelmulti` custom IDs remain on their legacy route and are never reinterpreted as persistent menu records.
+`/rolemenu recover` verifies a missing message, stale definition, deleted option/prerequisite role, imported unverified binding, or partial member operation against current resources. Supply `member:` to retry that member's newest unresolved current-definition plan; additions still precede removals, and the original partial outcome remains in history beside the recovery operation. Reposting stays guild-scoped and does not reconstruct usage by fetching every guild member. Role-panel custom IDs posted by older releases remain on their legacy route and are never reinterpreted as persistent menu records.
 
 ## Restricted role pings
 
@@ -259,7 +259,7 @@ A member who currently has `@Food` can run `/pingrole role:@Food` in `#food`; Su
 
 `/moderation configure` stores the moderation-log channel, private report and appeal destinations, reviewer roles, service state, binding-verification times, and update actors. `/moderation status` reports bounded health without exposing private content. `/moderation disable` stops new actions without erasing history. Changing a destination or reviewer role invalidates that binding until current guild ownership, private-channel visibility, reviewer access, and Superior's permissions are verified again.
 
-`/moderation warn`, `note`, `timeout`, `untimeout`, `kick`, `ban`, and `unban` create normalized guild-local case history. Destructive member actions require a 1-500-character public reason; a private moderator note is limited to 1,000 characters. History and case views return at most 10 rows per page, suppress mentions, and keep private notes inside authorized staff output. Legacy `/superior timeout`, `/superior untimeout`, and bounded multi-member timeout operations now fail closed while Phase 3 moderation cases are disabled, ensuring every successful legacy sanction can be recorded durably. When cases are enabled, successful targets create the same per-target cases; failed or skipped targets never receive successful cases. Legacy purge, channel lock/unlock, and slowmode actions remain available independently because they do not create member cases.
+`/moderation warn`, `note`, `timeout`, `untimeout`, `kick`, `ban`, and `unban` create normalized guild-local case history. Destructive member actions require a 1-500-character public reason; a private moderator note is limited to 1,000 characters. History and case views return at most 10 rows per page, suppress mentions, and keep private notes inside authorized staff output. `/timeout` provides the bounded Administrator timeout utilities and fails closed while Phase 3 moderation cases are disabled, ensuring every successful timeout can be recorded durably. When cases are enabled, successful targets create the same per-target cases; failed or skipped targets never receive successful cases. `/channel` cleanup and channel lock/slowmode actions remain independent because they do not create member cases.
 
 Cases record a stable opaque ID, guild-local number, target, actor, action, source, public reason, optional private note, relevant Discord outcome metadata, status, related case, timestamps, and up to 100 audit events. States distinguish `active`, `completed`, `voided`, `overturned`, and `failed`; supported actions include `warning`, `note`, `timeout`, `timeout-removed`, `kick`, `ban`, `unban`, `automod-warning`, and `automod-timeout`. `/moderation amend` appends the previous value to audit history. `/moderation void` changes the record only; it never silently reverses Discord state, and Superior refuses to void an active timeout, anti-spam timeout, or ban until the sanction is removed through a separately authorized action. Removing a timeout or ban creates its corresponding case and completes the original record before that original can be voided.
 
@@ -302,6 +302,8 @@ Superior has nine fixed gold presets:
 - `roles`: a launcher bound to one stored persistent role menu.
 
 `/panel post` targets a text or announcement channel and records the exact bot-authored message so `replace_existing` can refresh it safely. `/panel status` privately lists a bounded set of tracked panels and current feature health. Operational presets are refused when their stored configuration is disabled, missing, belongs to another guild, is imported but unverified, or fails current resource/permission checks. The safety panel enables only controls whose report/appeal service is verified; verification points to the current onboarding rules version; roles selects a stored enabled role menu rather than embedding arbitrary roles. Member-controlled text cannot select arbitrary styling and all payloads suppress automatic mentions.
+
+`/panel dmpanel` posts an untracked Administrator-only private-message button in the current text channel; its optional recipient defaults to the invoker. `/panel role-button` posts one safe self-service role button, while `/panel role-buttons` posts two to five unique safe roles. These role panels are also untracked, require Manage Roles and a bot role above every selected role, and use the current channel. `/panel vote` posts an Administrator-only yes/no or custom vote with bounded options and an optional 14-day deadline; it is limited to five active votes per channel.
 
 ## Ticket departments and forms
 
@@ -372,7 +374,7 @@ Import and purge affect only the live SQLite database. They do not delete downlo
 - `/restrictedping`: add/remove/list/info/enable/disable restricted role mappings, clean stale role/channel IDs, and configure cooldown/thread policy; owner-or-Administrator only.
 - `/onboarding`: status/configure, welcome, farewell, rules, verification, autorole, panel, member, recover, and disable operations.
 - `/rolemenu`: list/create/edit/status/enable/disable/archive/recover/post and option add/edit/remove/move.
-- `/panel`: list, post, and status for all nine fixed presets.
+- `/panel`: list, post, and status for nine fixed presets, plus private-message, role-button, and voting panels.
 - `/ticket`: status, panel, disable, recover; department list/create/edit/enable/disable/delete/health; field add/edit/remove/move.
 - `/suggestion`: submit, status, withdraw, configure, panel, list, review, disable, and recover.
 - `/application`: submit, status, withdraw, panel, recover; form list/create/edit/enable/disable/delete; field add/edit/remove/move.
@@ -380,9 +382,12 @@ Import and purge affect only the live SQLite database. They do not delete downlo
 - `/report`: submit, status, withdraw, and reviewer-authorized recover; review decisions use the private record controls.
 - `/appeal`: submit, status, withdraw, and reviewer-authorized recover; review decisions use the private record controls.
 - `/automod`: status, rule configure/enable/disable, exempt-role add/remove, exempt-channel add/remove, and non-mutating test.
-- `/superior`: `say`, `dmpanel`, `rolepanel`, `rolepanelmulti`, `purge`, `purgeuser`, `lock`, `unlock`, `slowmode`, `timeout`, `untimeout`, `mutemany`, `unmutemany`, `muteall`, `unmuteall`, `backfillstats`, `backfillstatus`, and `help`.
+- `/help`: command-family overview and practical next steps.
+- `/channel`: `announce`, `purge`, `purge-member`, `lock`, `unlock`, and `slowmode`.
+- `/timeout`: `set`, `remove`, `set-many`, `remove-many`, `set-all`, and `remove-all`.
+- `/activity`: `stats`, `leaderboard`, `backfill`, and `backfill-status`.
 - `/utility`: `ping`, `avatar`, `userinfo`, `serverinfo`, `roleinfo`, `channelinfo`, `snowflake`, and `timestamp`.
-- `/fun`: `battle`, `stats`, and `leaderboard`.
+- `/fun`: `battle`.
 - `/greetings send`: send one configured profile as the current member.
 
 The `roleinfo`, `channelinfo`, `snowflake`, and `timestamp` utilities validate bounded input, remain guild-scoped where relevant, and reply privately. See [Member capabilities](reference/member-capabilities.md) for the authorization matrix.

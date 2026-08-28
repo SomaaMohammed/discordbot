@@ -43,7 +43,7 @@ describe("readable bounded logging", () => {
 
     const classified = logClassifiedError("interaction", error, {
       correlationId: "abc123",
-      command: "superior/backfillstats",
+      command: "activity/backfill",
       ageMs: 3_100,
     });
 

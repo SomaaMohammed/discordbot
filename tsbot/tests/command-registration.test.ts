@@ -9,12 +9,12 @@ import {
 } from "../src/discord/registration.js";
 import {
   buildCommandDefinitions,
-  buildSuperiorCommandGuide,
+  buildCommandGuide,
 } from "../src/discord/commands.js";
 
 describe("command guide", () => {
   it("covers the complete Phase 4 command surface", () => {
-    const guide = buildSuperiorCommandGuide();
+    const guide = buildCommandGuide();
 
     for (const command of [
       "/access",
@@ -27,6 +27,10 @@ describe("command guide", () => {
       "/automod",
       "/onboarding",
       "/rolemenu",
+      "/channel",
+      "/timeout",
+      "/activity",
+      "/help",
     ]) {
       expect(guide).toContain(`\`${command}\``);
     }
@@ -43,7 +47,7 @@ describe("command guide", () => {
     const serialized = JSON.stringify(definitions);
 
     expect(serialized).not.toMatch(/mudae/i);
-    expect(buildSuperiorCommandGuide()).not.toMatch(/mudae/i);
+    expect(buildCommandGuide()).not.toMatch(/mudae/i);
   });
 
   it("publishes current configuration commands without removed setup aliases", () => {

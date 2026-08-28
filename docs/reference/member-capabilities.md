@@ -8,7 +8,7 @@ All members of an active guild may:
 
 - deliberately address the bot through the configured invocation, a bot mention, or a reply for natural chat, status, bounded dice, and bounded choices;
 - use `/utility ping`, `avatar`, `userinfo`, `serverinfo`, `roleinfo`, `channelinfo`, `snowflake`, and `timestamp`;
-- use `/fun battle`, `/fun stats`, and `/fun leaderboard`;
+- use `/fun battle`, `/activity stats`, and `/activity leaderboard`;
 - use `/greetings send` with a configured profile;
 - interact with a current role panel when the target role remains safe and manageable;
 - acknowledge the current server-rules version through a verified panel after native Membership Screening completes, and privately inspect the resulting concise status;
@@ -71,7 +71,7 @@ The owner or an Administrator may grant one narrow capability to a safe guild ro
 
 Discord cannot dynamically hide command subcommands for a guild's grants, so a delegate may see operations they cannot use. Runtime authorization returns a private denial. Deleting, managing, or moving a delegated role out of the guild makes its grant unusable after fresh verification.
 
-Delegates cannot grant, revoke, list, or inspect `/access` merely because they hold another capability. They also do not inherit `/config`, `/data`, or legacy `/superior` administrative authority. `moderation.manage` is the only delegated case/sanction authority; review capabilities do not imply it.
+Delegates cannot grant, revoke, list, or inspect `/access` merely because they hold another capability. They also do not inherit `/config`, `/data`, `/channel`, or `/timeout` Administrator authority. `moderation.manage` is the only delegated case/sanction authority; review capabilities do not imply it.
 
 `onboarding.configure` and `roles.configure` do not imply one another. Every use re-fetches the actor and exact granted role. For a non-owner role-menu configurator, the actor's current highest role must remain above each selected self-service role; a stale, deleted, managed, `@everyone`, duplicate, or cross-guild grant role provides no authority.
 
@@ -85,7 +85,7 @@ The guild owner and freshly verified members with Administrator permission retai
 
 - inspect or change optional guild settings with `/config`, including the explicit bot-state switch, limits, triggers, and greeting profiles;
 - grant/revoke/list/status delegated role capabilities with `/access`;
-- use `/superior` announcements, panels, message/channel/member moderation, bounded bulk actions, activity backfill, and help;
+- use `/channel` announcements and channel controls, `/panel` creation, `/timeout` bounded actions, `/activity backfill`, and `/help` when they hold the required Administrator permission;
 - configure/manage persistent cases, confidential reports/appeals, anti-spam rules/exemptions, and safety-panel health;
 - configure all nine fixed panel presets and all ticket/suggestion/application/moderation safety workflows;
 - configure welcome/farewell delivery, the private lifecycle log, versioned rules acknowledgement, automatic roles, verification panels, and bounded member recovery;

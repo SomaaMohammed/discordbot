@@ -40,6 +40,8 @@ export function clearBackfillStatus(guildId: string): void {
 }
 
 export const ACTIVITY_SUBCOMMANDS = new Set([
+  "backfill",
+  "backfill-status",
   "backfillstats",
   "backfillstatus",
 ]);
@@ -49,9 +51,11 @@ export async function handleActivityCommand(
   runtime: GuildRuntime,
 ): Promise<boolean> {
   switch (interaction.options.getSubcommand()) {
+    case "backfill":
     case "backfillstats":
       await handleBackfill(interaction, runtime);
       return true;
+    case "backfill-status":
     case "backfillstatus":
       await handleBackfillStatus(interaction, runtime);
       return true;
@@ -291,7 +295,7 @@ async function handleBackfill(
         .join("\n"),
     );
     try {
-      runtime.storage.recordCommandMetric("superior.backfillstats");
+      runtime.storage.recordCommandMetric("activity.backfill");
     } catch {
       // The backfill transaction and user-facing acknowledgement already
       // succeeded. Command metrics are ancillary and must not reverse that.
@@ -337,7 +341,7 @@ async function handleBackfillStatus(
       .join("\n"),
     true,
   );
-  runtime.storage.recordCommandMetric("superior.backfillstatus");
+  runtime.storage.recordCommandMetric("activity.backfill-status");
 }
 
 async function tallyMessage(

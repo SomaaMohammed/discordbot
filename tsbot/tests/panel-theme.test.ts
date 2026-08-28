@@ -175,25 +175,47 @@ describe("Superior panel theme and presets", () => {
     );
   });
 
-  it("renders a public panel guide covering every available panel category", () => {
+  it("renders a practical creation guide with settings, limits, and examples", () => {
     const guide = embedJson(renderPanelHowToGuide());
     const fields = JSON.stringify(guide.fields);
     for (const category of [
-      "Voting panels",
-      "Role panels",
-      "Role-menu panels",
+      "Choose a path",
+      "Fixed-preset workflow",
+      "`/panel post` settings",
+      "Preset readiness",
       "Private-message panels",
-      "Ticket panels",
-      "Suggestion panels",
-      "Application panels",
-      "Safety panels",
-      "Verification panels",
-      "Resource panels",
-      "Server-info panels",
-      "Help panels",
+      "Role-button panels",
+      "Voting panels: required settings",
+      "Voting panels: optional settings and limits",
+      "Common setups",
+      "Not sure what to choose?",
     ]) {
       expect(fields).toContain(category);
     }
+    expect(guide.title).toBe("Create a Server Panel");
+    expect(fields).toContain("replace_existing");
+    expect(fields).toContain("resource_title");
+    expect(fields).toContain("duration_minutes");
+    expect(fields).toContain("/panel dmpanel");
+    expect(fields).toContain("/panel vote");
+    expect(guide.description).toContain("/panel list");
+    expect(
+      (guide.fields ?? []).every(
+        (field: { name?: string; value?: string }) =>
+          (field.name?.length ?? 0) <= 256 &&
+          (field.value?.length ?? 0) <= 1_024,
+      ),
+    ).toBe(true);
+    expect(
+      (guide.description?.length ?? 0) +
+        (guide.title?.length ?? 0) +
+        (guide.footer?.text?.length ?? 0) +
+        (guide.fields ?? []).reduce(
+          (total: number, field: { name?: string; value?: string }) =>
+            total + (field.name?.length ?? 0) + (field.value?.length ?? 0),
+          0,
+        ),
+    ).toBeLessThanOrEqual(6_000);
     expect(guide.footer?.text).toMatch(/^How to use:/);
   });
 

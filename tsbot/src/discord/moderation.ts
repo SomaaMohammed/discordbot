@@ -102,6 +102,7 @@ export function clearModerationProcessState(guildId: string): void {
 }
 
 export const MODERATION_SUBCOMMANDS = new Set([
+  "purge-member",
   "purge",
   "purgeuser",
   "lock",
@@ -113,6 +114,12 @@ export const MODERATION_SUBCOMMANDS = new Set([
   "unmutemany",
   "muteall",
   "unmuteall",
+  "set",
+  "remove",
+  "set-many",
+  "remove-many",
+  "set-all",
+  "remove-all",
 ]);
 
 export async function handleModerationCommand(
@@ -123,17 +130,28 @@ export async function handleModerationCommand(
   await deferPrivate(interaction);
   const subcommand = interaction.options.getSubcommand();
   const caseConfiguration = legacyCaseConfiguration(runtime);
-  const appliesTimeout = ["timeout", "mutemany", "muteall"].includes(
-    subcommand,
-  );
+  const appliesTimeout = [
+    "timeout",
+    "set",
+    "mutemany",
+    "set-many",
+    "muteall",
+    "set-all",
+  ].includes(subcommand);
   if (
     [
       "timeout",
+      "set",
       "untimeout",
+      "remove",
       "mutemany",
+      "set-many",
       "unmutemany",
       "muteall",
+      "set-all",
       "unmuteall",
+      "remove-all",
+      "remove-many",
     ].includes(subcommand) &&
     (!caseConfiguration || (!caseConfiguration.casesEnabled && appliesTimeout))
   ) {
@@ -148,6 +166,7 @@ export async function handleModerationCommand(
       await handlePurge(interaction, runtime);
       return true;
     case "purgeuser":
+    case "purge-member":
       await handlePurgeUser(interaction, runtime);
       return true;
     case "lock":
@@ -160,6 +179,7 @@ export async function handleModerationCommand(
       await handleSlowmode(interaction, runtime);
       return true;
     case "timeout":
+    case "set":
       await runModerationTargetAction(
         runtime.guildId,
         interaction.options.getUser("member", true).id,
@@ -167,6 +187,7 @@ export async function handleModerationCommand(
       );
       return true;
     case "untimeout":
+    case "remove":
       await runModerationTargetAction(
         runtime.guildId,
         interaction.options.getUser("member", true).id,
@@ -174,15 +195,19 @@ export async function handleModerationCommand(
       );
       return true;
     case "mutemany":
+    case "set-many":
       await handleManyTimeouts(interaction, runtime, actor, false);
       return true;
     case "unmutemany":
+    case "remove-many":
       await handleManyTimeouts(interaction, runtime, actor, true);
       return true;
     case "muteall":
+    case "set-all":
       await handleAllTimeouts(interaction, runtime, actor, false);
       return true;
     case "unmuteall":
+    case "remove-all":
       await handleAllTimeouts(interaction, runtime, actor, true);
       return true;
     default:
@@ -263,7 +288,7 @@ async function handlePurge(
     deleteFailed,
   });
   await interaction.editReply(report);
-  runtime.storage.recordCommandMetric("superior.purge", !deleteFailed);
+  runtime.storage.recordCommandMetric("channel.purge", !deleteFailed);
   logDomainOutcome(
     "moderation",
     "purge",
@@ -367,7 +392,7 @@ async function handlePurgeUser(
     .join("\n");
   await interaction.editReply(report);
   runtime.storage.recordCommandMetric(
-    "superior.purgeuser",
+    "channel.purge-member",
     !fetchFailed && !deleteFailed,
   );
   logDomainOutcome(
@@ -537,7 +562,7 @@ async function handleLock(
   const report = `${unlocking ? "Unlocked" : "Locked"} <#${channel.id}> by changing only @everyone's explicit Send Messages deny.`;
   await replyPrivate(interaction, report);
   runtime.storage.recordCommandMetric(
-    `superior.${unlocking ? "unlock" : "lock"}`,
+    `channel.${unlocking ? "unlock" : "lock"}`,
   );
   logDomainOutcome(
     "moderation",
@@ -586,7 +611,7 @@ async function handleSlowmode(
     interaction,
     `Slowmode for <#${channel.id}> is now **${seconds} seconds**.`,
   );
-  runtime.storage.recordCommandMetric("superior.slowmode");
+  runtime.storage.recordCommandMetric("channel.slowmode");
   logDomainOutcome("moderation", "slowmode", runtime.guildId, "completed", {
     channelId: channel.id,
     state: seconds === 0 ? "disabled" : "enabled",
@@ -828,9 +853,7 @@ async function handleSingleTimeout(
         : `Timed out **${escapeMarkdown(member.displayName)}** for **${minutes} minutes**.`
     }${caseResult.status === "created" ? ` Case **#${caseResult.record.caseNumber}** was recorded.` : caseResult.status === "failed" ? " The Discord action succeeded, but its case record needs operator recovery." : ""}${logResult === "failed" || logResult === "unavailable" ? " Its moderation-log delivery needs authorized recovery." : ""}`,
   );
-  runtime.storage.recordCommandMetric(
-    `superior.${removing ? "untimeout" : "timeout"}`,
-  );
+  runtime.storage.recordCommandMetric(`timeout.${removing ? "remove" : "set"}`);
   logDomainOutcome(
     "moderation",
     removing ? "remove-timeout" : "apply-timeout",
@@ -918,7 +941,7 @@ async function handleManyTimeouts(
   );
   if (cancelled === 0) {
     runtime.storage.recordCommandMetric(
-      `superior.${removing ? "unmutemany" : "mutemany"}`,
+      `timeout.${removing ? "remove-many" : "set-many"}`,
       failures.length === 0,
     );
   }
@@ -1023,7 +1046,7 @@ async function handleAllTimeouts(
   );
   if (cancelled === 0) {
     runtime.storage.recordCommandMetric(
-      `superior.${removing ? "unmuteall" : "muteall"}`,
+      `timeout.${removing ? "remove-all" : "set-all"}`,
       failed === 0,
     );
   }

@@ -221,7 +221,7 @@ describe("purge accounting", () => {
       ),
     );
     expect(harness.recordCommandMetric).toHaveBeenCalledWith(
-      "superior.purge",
+      "channel.purge",
       true,
     );
   });
@@ -343,7 +343,7 @@ describe("purge-user accounting", () => {
       expect.stringMatching(/Deleted: \*\*1\*\*[\s\S]*History fetch stopped/),
     );
     expect(harness.recordCommandMetric).toHaveBeenCalledWith(
-      "superior.purgeuser",
+      "channel.purge-member",
       false,
     );
   });
@@ -370,7 +370,7 @@ describe("purge-user accounting", () => {
       ),
     );
     expect(harness.recordCommandMetric).toHaveBeenCalledWith(
-      "superior.purgeuser",
+      "channel.purge-member",
       false,
     );
   });

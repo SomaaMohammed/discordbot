@@ -107,7 +107,7 @@ describe("activity backfill", () => {
     expect(editReply).toHaveBeenCalledWith(
       expect.stringContaining("Users updated: **2**"),
     );
-    expect(recordCommandMetric).toHaveBeenCalledWith("superior.backfillstats");
+    expect(recordCommandMetric).toHaveBeenCalledWith("activity.backfill");
   });
 
   it("does not write partial metrics when a channel fetch fails", async () => {

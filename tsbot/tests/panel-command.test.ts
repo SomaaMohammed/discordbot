@@ -42,18 +42,21 @@ describe("/panel command definition", () => {
     const command = buildPanelCommandDefinition().toJSON();
 
     expect(command.name).toBe("panel");
-    expect(command.description).toMatch(/Superior server panels/i);
+    expect(command.description).toMatch(/create, post, and inspect/i);
     expect(command.dm_permission).toBe(false);
     expect(command.default_member_permissions).toBeUndefined();
     expect(command.options?.map(({ name }) => name)).toEqual([
       "list",
       "post",
       "help",
+      "dmpanel",
+      "role-button",
+      "role-buttons",
       "vote",
       "status",
     ]);
     expect(findSubcommand("list").description).toMatch(/presets/i);
-    expect(findSubcommand("status").description).toMatch(/ticket-panel/i);
+    expect(findSubcommand("status").description).toMatch(/tracked preset/i);
   });
 
   it("defines every preset for posting in the current channel", () => {
@@ -189,7 +192,9 @@ describe("/panel command definition", () => {
       min_value: 0,
       max_value: 20_160,
     });
-    expect(findSubcommand("help").description).toMatch(/guide/i);
+    expect(findSubcommand("help").description).toMatch(/creation guide/i);
+    expect(findSubcommand("dmpanel").description).toMatch(/private-message/i);
+    expect(findSubcommand("role-button").description).toMatch(/role button/i);
   });
 
   it("stays within Discord command, option, choice, and text limits", () => {

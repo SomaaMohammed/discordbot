@@ -61,8 +61,11 @@ const SAFE_ROLE_PERMISSION_MASK = [
 ].reduce((mask, permission) => mask | permission, 0n);
 
 export const PANEL_SUBCOMMANDS = new Set([
+  "announce",
   "say",
   "dmpanel",
+  "role-button",
+  "role-buttons",
   "rolepanel",
   "rolepanelmulti",
 ]);
@@ -76,15 +79,18 @@ export async function handlePanelCommand(
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
   switch (interaction.options.getSubcommand()) {
+    case "announce":
     case "say":
       await handleSay(interaction, runtime, actor);
       return true;
     case "dmpanel":
       await handleDmPanel(interaction, runtime, actor);
       return true;
+    case "role-button":
     case "rolepanel":
       await handleRolePanel(interaction, runtime, actor, false);
       return true;
+    case "role-buttons":
     case "rolepanelmulti":
       await handleRolePanel(interaction, runtime, actor, true);
       return true;
@@ -231,7 +237,7 @@ export async function handlePanelModal(
     return true;
   }
   await replyPrivate(interaction, "Your private message was delivered.");
-  runtime.storage.recordCommandMetric("superior.dmpanel.message");
+  runtime.storage.recordCommandMetric("panel.dmpanel.message");
   logDomainOutcome(
     "panel",
     "private-message-delivery",
@@ -298,7 +304,7 @@ async function handleSay(
     allowedMentions: mentionEveryone ? { parse: ["everyone"] } : { parse: [] },
   });
   await replyPrivate(interaction, `Announcement sent to <#${channel.id}>.`);
-  runtime.storage.recordCommandMetric("superior.say");
+  runtime.storage.recordCommandMetric("channel.announce");
   logDomainOutcome(
     "panel",
     "announcement-delivery",
@@ -379,7 +385,7 @@ async function handleDmPanel(
     interaction,
     `Private-message panel posted in <#${channel.id}>.`,
   );
-  runtime.storage.recordCommandMetric("superior.dmpanel");
+  runtime.storage.recordCommandMetric("panel.dmpanel");
   logDomainOutcome(
     "panel",
     "private-message-panel-post",
@@ -474,7 +480,7 @@ async function handleRolePanel(
   });
   await replyPrivate(interaction, `Role panel posted in <#${channel.id}>.`);
   runtime.storage.recordCommandMetric(
-    `superior.${multiple ? "rolepanelmulti" : "rolepanel"}`,
+    `panel.${multiple ? "role-buttons" : "role-button"}`,
   );
   logDomainOutcome("panel", "role-panel-post", runtime.guildId, "delivered", {
     channelId: channel.id,
@@ -570,7 +576,7 @@ async function handleRoleButton(
     interaction,
     `${removing ? "Removed" : "Added"} **${escapeMarkdown(role.name)}**.`,
   );
-  runtime.storage.recordCommandMetric("superior.rolepanel.click");
+  runtime.storage.recordCommandMetric("panel.role-button.click");
   logDomainOutcome(
     "panel",
     removing ? "role-remove" : "role-add",
