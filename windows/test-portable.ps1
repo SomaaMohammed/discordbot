@@ -70,6 +70,7 @@ try {
 
     $RequiredFiles = @(
         "SuperiorBot.exe",
+        "Update.exe",
         "Start Superior Bot.cmd",
         ".env.example",
         "README-WINDOWS.txt",
@@ -197,9 +198,11 @@ try {
     }
 
     $Launcher = Join-Path $PortableRoot "SuperiorBot.exe"
+    $Updater = Join-Path $PortableRoot "Update.exe"
     $BatchLauncher = Join-Path $PortableRoot "Start Superior Bot.cmd"
     Invoke-AndRequireSuccess -Executable (Join-Path $PortableRoot "runtime\node.exe") -Arguments @("--version") -ExpectedText "v22.12.0"
     Invoke-AndRequireSuccess -Executable $Launcher -Arguments @("--version") -ExpectedText "Superior Bot $Version"
+    Invoke-AndRequireSuccess -Executable $Updater -Arguments @("--version") -ExpectedText "Superior Bot updater $Version"
     Invoke-AndRequireSuccess -Executable $BatchLauncher -Arguments @("--version") -ExpectedText "Superior Bot $Version"
     $VersionInfo = (Get-Item -LiteralPath $Launcher).VersionInfo
     if ($VersionInfo.FileVersion -ne "$Version.0") {
@@ -207,6 +210,13 @@ try {
     }
     if ($VersionInfo.ProductVersion -ne $Version) {
         throw "Portable launcher ProductVersion is stale: $($VersionInfo.ProductVersion)"
+    }
+    $UpdaterVersionInfo = (Get-Item -LiteralPath $Updater).VersionInfo
+    if ($UpdaterVersionInfo.FileVersion -ne "$Version.0") {
+        throw "Portable updater FileVersion is stale: $($UpdaterVersionInfo.FileVersion)"
+    }
+    if ($UpdaterVersionInfo.ProductVersion -ne $Version) {
+        throw "Portable updater ProductVersion is stale: $($UpdaterVersionInfo.ProductVersion)"
     }
 
     $EnvironmentText = @"

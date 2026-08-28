@@ -21,6 +21,7 @@ const exactInputs = [
   "windows/launcher/LauncherSupport.cs",
   "windows/launcher/Program.cs",
   "windows/standalone/Program.cs",
+  "windows/updater/Program.cs",
   "windows/templates/Start Superior Bot.cmd",
   "windows/write-deterministic-zip.mjs",
 ];

@@ -141,7 +141,7 @@ $archive = Get-ChildItem .\release\SuperiorBot-*-win-x64.zip
 .\windows\test-standalone.ps1 -Executable .\SuperiorBot.exe
 ```
 
-The builder verifies SHA-256-pinned tool/runtime inputs, normalizes launcher source, produces deterministic ZIP metadata, and embeds the ZIP into the repository-root self-extracting `SuperiorBot.exe`. `package:win:verify` performs two clean-staging builds and requires byte-for-byte identical ZIP and executable output. Use `package:win` for one local iteration. Cache, staging, and release output are ignored; the requested standalone executable is tracked.
+The builder verifies SHA-256-pinned tool/runtime inputs, normalizes launcher source, produces deterministic ZIP metadata, and embeds the ZIP into the repository-root self-extracting `SuperiorBot.exe`. It also builds the repository-root `Update.exe`, which is included in the portable artifact. `package:win:verify` performs two clean-staging builds and requires byte-for-byte identical ZIP, updater, and executable output. Use `package:win` for one local iteration. Cache, staging, and release output are ignored; the requested standalone and updater executables are tracked.
 
 ## Version and release workflow
 
@@ -178,6 +178,7 @@ node --check dist/src/index.js        # repeat for every dist/src/**/*.js
 npm run package:win:verify
 ../windows/test-portable.ps1 -Artifact ../release/SuperiorBot-<version>-win-x64.zip
 ../windows/test-standalone.ps1 -Executable ../SuperiorBot.exe
+../windows/verify-release.ps1 -Executable ../SuperiorBot.exe -Updater ../Update.exe
 npm run artifact:verify
 ```
 

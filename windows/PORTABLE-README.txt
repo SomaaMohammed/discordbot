@@ -21,6 +21,9 @@ LAUNCHER COMMANDS
   SuperiorBot.exe --diagnostics
                               Show safe build/runtime/database diagnostics
                               without Discord login or secret values.
+  Update.exe --source <new SuperiorBot.exe> [--target <folder>]
+                              Replace the installed executable safely, preserve
+                              .env/database/backups, verify it, and restart it.
   SuperiorBot.exe             Start the bot.
   Start Superior Bot.cmd      Command Prompt fallback with the same options.
 
@@ -105,12 +108,14 @@ current-resource validation and explicit enablement. Legacy role panels retain
 their existing component behavior.
 
 UPDATING
-1. Stop the bot and create a validated schema-v10 backup.
-2. Extract the new release into a new folder.
-3. Copy only .env and the active database into that folder. Do not merge old
-   app, runtime, or tools directories.
-4. Run --version and --check, start the bot, and verify it before removing the
-   prior folder or backup.
+1. Build or download a trusted new SuperiorBot.exe and keep its SHA-256 hash.
+2. Stop the bot. Do not move or copy .env, superior.db, or the backups.
+3. Run `Update.exe --source C:\path\to\new\SuperiorBot.exe` from the
+   installed bot folder. Add `--sha256 <hash>` when a checksum is available.
+4. The updater creates an executable backup, replaces only SuperiorBot.exe,
+   runs --version and --check, and starts the new bot automatically. Use
+   `--no-start` when you want to start it manually.
+5. Keep the generated executable backup until the new release is verified.
 
 The v10 restore tool intentionally accepts only v10 backups. After this
 installation migrates, never start, deploy, test, or recommend a pre-v10

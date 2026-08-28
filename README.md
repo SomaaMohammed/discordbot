@@ -1,6 +1,6 @@
 # Superior
 
-Superior 7.0.0 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
+Superior 7.1.0 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
 
 ## Windows quick start
 
@@ -11,6 +11,8 @@ The repository-root `SuperiorBot.exe` is a self-extracting Windows x64 build. It
 3. Double-click `SuperiorBot.exe` to start.
 
 The first launch places the immutable bundled runtime in the current Windows user's local application-data cache. Configuration and the default `superior.db` remain beside the visible executable. The versioned portable ZIP is still produced for advanced maintenance that needs the bundled database tools. See the [Windows guide](docs/windows.md) for Discord setup, upgrades, backups, and troubleshooting.
+
+For a deployed Windows copy, place `Update.exe` beside `SuperiorBot.exe` and run `Update.exe --source <new SuperiorBot.exe>` after stopping the bot. It preserves `.env`, `superior.db`, and backups while validating and restarting the replacement.
 
 ## Active capabilities
 

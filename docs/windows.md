@@ -48,7 +48,7 @@ Run exactly one Superior process for one database. The Windows launcher holds na
 
 The versioned portable ZIP is available from CI for offline database maintenance. It exposes bundled `runtime`, `app`, and `tools` directories plus their manifest and checksums. The single-file launcher exposes start, version, configuration check, safe diagnostics, and help operations.
 
-The schema-v10 release refuses schema v9, v8, v7, v6, v5, v4, v3, and v2 during normal startup. Close every old `SuperiorBot.exe`, bundled `node.exe`, SQLite browser, and other process that can write the selected database. Extract the current portable ZIP into a new folder, copy the database into that folder as `superior.db`, and keep the original untouched.
+The portable release also includes `Update.exe`. It updates an installed `SuperiorBot.exe` from a newly built executable without moving `.env`, the active database, or their backups. The updater verifies the source version, refuses to replace a running bot, creates an executable backup, validates the replacement with `--version` and `--check`, and starts the new bot unless `--no-start` is supplied.
 
 For the normal schema-v9 upgrade from Superior 6.1.0, run:
 
@@ -89,12 +89,12 @@ After starting the schema-v10 release:
 
 ## Updating without a schema change
 
-1. Stop the existing bot and confirm no `SuperiorBot.exe` or bundled `node.exe` remains running.
-2. Create and validate a current schema-v10 backup with the portable backup/check tools.
-3. Place the new `SuperiorBot.exe` in a new writable folder.
-4. Copy only `.env` and the validated active database into the new folder.
-5. Run `--version` and `--check`, then start it.
-6. Keep the validated backup and prior artifact hash until verification succeeds, but do not start an older executable after migration. Old private runtime caches can be removed after the new version is verified and stopped.
+1. Build or download a trusted new `SuperiorBot.exe` and keep its published SHA-256 hash.
+2. Copy `Update.exe` into the installed bot folder if it is not already there.
+3. Stop the existing bot and confirm no `SuperiorBot.exe` or bundled `node.exe` remains running.
+4. From the installed bot folder, run `Update.exe --source C:\path\to\new\SuperiorBot.exe`. Add `--sha256 <hash>` when a checksum is available; use `--no-start` to skip automatic restart.
+5. The updater replaces only the executable, preserves `.env` and the active database in place, creates a timestamped executable backup under `backups`, runs `--version` and `--check`, and starts the new release.
+6. Keep the generated backup and prior artifact until verification succeeds. Do not start an older executable after migration.
 
 For a code rollback that retains schema v10, stop the process and use only a known-good schema-v10-capable executable with a validated v10 backup. After an installation migrates to v10, never start, deploy, test, or recommend 6.1.0 or another pre-v10 executable for it, even as part of incident recovery. Preserve the v10 database and use current-version recovery tooling or a forward fix. Current restore tooling accepts only v10 and cannot perform a release-level schema downgrade.
 

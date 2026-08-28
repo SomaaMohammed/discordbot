@@ -9,6 +9,7 @@ param(
     [string]$ReferenceAssembliesPackageSha256 = "8a7e348538e7eb91351696911689f49e3d4f63f8bab517432bbe159b8b1104a2",
     [string]$BetterSqlite3BinarySha256 = "8c041ef57dd1bb55b0032306594310625b7a7a374bc48956e0858645f56919c4",
     [string]$StandaloneOutput = "",
+    [string]$UpdaterOutput = "Update.exe",
     [switch]$KeepStaging
 )
 
@@ -202,6 +203,16 @@ elseif ([System.IO.Path]::IsPathRooted($StandaloneOutput)) {
 else {
     [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot $StandaloneOutput))
 }
+$UpdaterWorkOutput = Join-Path $WorkRoot "SuperiorBot-updater.exe"
+$UpdaterTarget = if ([string]::IsNullOrWhiteSpace($UpdaterOutput)) {
+    $null
+}
+elseif ([System.IO.Path]::IsPathRooted($UpdaterOutput)) {
+    [System.IO.Path]::GetFullPath($UpdaterOutput)
+}
+else {
+    [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot $UpdaterOutput))
+}
 
 New-Item -ItemType Directory -Path $WorkRoot, $CacheRoot, $OutputRoot -Force | Out-Null
 Remove-WorkItem -Path $StageRoot
@@ -214,6 +225,9 @@ if (Test-Path -LiteralPath $WorkArchive) {
 }
 if (Test-Path -LiteralPath $StandaloneWorkOutput) {
     Remove-Item -LiteralPath $StandaloneWorkOutput -Force
+}
+if (Test-Path -LiteralPath $UpdaterWorkOutput) {
+    Remove-Item -LiteralPath $UpdaterWorkOutput -Force
 }
 
 try {
@@ -403,6 +417,40 @@ internal static class BuildIdentity
     $BuildIdentityText = $BuildIdentityText.Replace("`r`n", "`n").Replace("`r", "`n")
     [System.IO.File]::WriteAllText($BuildIdentitySource, $BuildIdentityText, $Utf8NoBom)
 
+    if ($null -ne $UpdaterTarget) {
+        $UpdaterSource = Join-Path $WindowsDirectory "updater\Program.cs"
+        if (-not (Test-Path -LiteralPath $UpdaterSource -PathType Leaf)) {
+            throw "Cannot find the updater source: $UpdaterSource"
+        }
+        $CanonicalUpdaterSource = Join-Path $LauncherSourceRoot "UpdaterProgram.cs"
+        $UpdaterText = [System.IO.File]::ReadAllText($UpdaterSource)
+        $UpdaterText = $UpdaterText.Replace("`r`n", "`n").Replace("`r", "`n")
+        [System.IO.File]::WriteAllText($CanonicalUpdaterSource, $UpdaterText, $Utf8NoBom)
+
+        Invoke-NativeChecked -Executable $Compiler -Arguments @(
+            "/nologo",
+            "/noconfig",
+            "/nostdlib+",
+            "/deterministic+",
+            "/debug-",
+            "/optimize+",
+            "/langversion:7.3",
+            "/platform:x64",
+            "/target:exe",
+            "/pathmap:$LauncherSourceRoot=/_/windows/updater",
+            "/reference:$($CompilerReferences[0])",
+            "/reference:$($CompilerReferences[1])",
+            "/reference:$($CompilerReferences[2])",
+            "/out:$UpdaterWorkOutput",
+            $CanonicalUpdaterSource,
+            $BuildIdentitySource
+        ) -WorkingDirectory $RepositoryRoot
+        if (-not (Test-Path -LiteralPath $UpdaterWorkOutput -PathType Leaf)) {
+            throw "The updater compiler did not create $UpdaterWorkOutput"
+        }
+        Copy-Item -LiteralPath $UpdaterWorkOutput -Destination (Join-Path $StageRoot "Update.exe")
+    }
+
     Invoke-NativeChecked -Executable $Compiler -Arguments @(
         "/nologo",
         "/noconfig",
@@ -545,6 +593,20 @@ internal static class BuildIdentity
         Write-Host "Standalone SHA-256: $StandaloneHash"
     }
 
+    if ($null -ne $UpdaterTarget) {
+        $UpdaterParent = Split-Path -Parent $UpdaterTarget
+        if (-not (Test-Path -LiteralPath $UpdaterParent -PathType Container)) {
+            New-Item -ItemType Directory -Path $UpdaterParent -Force | Out-Null
+        }
+        if (Test-Path -LiteralPath $UpdaterTarget) {
+            Remove-Item -LiteralPath $UpdaterTarget -Force
+        }
+        Move-Item -LiteralPath $UpdaterWorkOutput -Destination $UpdaterTarget
+        $UpdaterHash = Get-Sha256Hex -LiteralPath $UpdaterTarget
+        Write-Host "Updater executable: $UpdaterTarget"
+        Write-Host "Updater SHA-256: $UpdaterHash"
+    }
+
     Write-Host "Portable artifact: $FinalArchive"
     Write-Host "SHA-256: $ArchiveHash"
 }
@@ -565,6 +627,9 @@ finally {
         }
         if (Test-Path -LiteralPath $StandaloneWorkOutput) {
             Remove-Item -LiteralPath $StandaloneWorkOutput -Force
+        }
+        if (Test-Path -LiteralPath $UpdaterWorkOutput) {
+            Remove-Item -LiteralPath $UpdaterWorkOutput -Force
         }
     }
 }

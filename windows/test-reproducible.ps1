@@ -27,16 +27,19 @@ $StandaloneArtifact = if ([System.IO.Path]::IsPathRooted($StandaloneOutput)) {
 else {
     [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot $StandaloneOutput))
 }
+$UpdaterArtifact = [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot "Update.exe"))
 
 Write-Host "Building the first portable artifact..."
 & $BuildScript -OutputDirectory $OutputDirectory -StandaloneOutput $StandaloneArtifact
 $FirstHash = Get-Sha256Hex -LiteralPath $Artifact
 $FirstStandaloneHash = Get-Sha256Hex -LiteralPath $StandaloneArtifact
+$FirstUpdaterHash = Get-Sha256Hex -LiteralPath $UpdaterArtifact
 
 Write-Host "Rebuilding from clean staging to verify byte-for-byte reproducibility..."
 & $BuildScript -OutputDirectory $OutputDirectory -StandaloneOutput $StandaloneArtifact
 $SecondHash = Get-Sha256Hex -LiteralPath $Artifact
 $SecondStandaloneHash = Get-Sha256Hex -LiteralPath $StandaloneArtifact
+$SecondUpdaterHash = Get-Sha256Hex -LiteralPath $UpdaterArtifact
 
 if ($FirstHash -ne $SecondHash) {
     throw "Portable rebuild was not byte-for-byte reproducible: $FirstHash != $SecondHash"
@@ -44,6 +47,10 @@ if ($FirstHash -ne $SecondHash) {
 if ($FirstStandaloneHash -ne $SecondStandaloneHash) {
     throw "Standalone rebuild was not byte-for-byte reproducible: $FirstStandaloneHash != $SecondStandaloneHash"
 }
+if ($FirstUpdaterHash -ne $SecondUpdaterHash) {
+    throw "Updater rebuild was not byte-for-byte reproducible: $FirstUpdaterHash != $SecondUpdaterHash"
+}
 
 Write-Host "Reproducible portable SHA-256: $SecondHash"
 Write-Host "Reproducible standalone SHA-256: $SecondStandaloneHash"
+Write-Host "Reproducible updater SHA-256: $SecondUpdaterHash"

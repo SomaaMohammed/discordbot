@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Executable = "SuperiorBot.exe",
+    [string]$Updater = "Update.exe",
     [string]$OutputDirectory = "release",
     [switch]$RequirePortableArtifact
 )
@@ -22,6 +23,12 @@ $ResolvedExecutable = if ([System.IO.Path]::IsPathRooted($Executable)) {
 else {
     [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot $Executable))
 }
+$ResolvedUpdater = if ([System.IO.Path]::IsPathRooted($Updater)) {
+    [System.IO.Path]::GetFullPath($Updater)
+}
+else {
+    [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot $Updater))
+}
 $ResolvedOutput = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
     [System.IO.Path]::GetFullPath($OutputDirectory)
 }
@@ -32,6 +39,9 @@ $ExpectedArchive = Join-Path $ResolvedOutput "SuperiorBot-$ExpectedVersion-win-x
 
 if (-not (Test-Path -LiteralPath $ResolvedExecutable -PathType Leaf)) {
     throw "Standalone executable is missing: $ResolvedExecutable"
+}
+if (-not (Test-Path -LiteralPath $ResolvedUpdater -PathType Leaf)) {
+    throw "Updater executable is missing: $ResolvedUpdater"
 }
 if ($RequirePortableArtifact -and -not (Test-Path -LiteralPath $ExpectedArchive -PathType Leaf)) {
     throw "Versioned portable artifact is missing: $ExpectedArchive"
@@ -48,6 +58,18 @@ if ($VersionInfo.ProductVersion -ne $ExpectedVersion) {
 $VersionOutput = & $ResolvedExecutable --version 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0 -or -not $VersionOutput.Contains("Superior Bot $ExpectedVersion")) {
     throw "SuperiorBot.exe --version disagrees with package.json:`n$VersionOutput"
+}
+
+$UpdaterVersionOutput = & $ResolvedUpdater --version 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0 -or -not $UpdaterVersionOutput.Contains("Superior Bot updater $ExpectedVersion")) {
+    throw "Update.exe --version disagrees with package.json:`n$UpdaterVersionOutput"
+}
+$UpdaterVersionInfo = (Get-Item -LiteralPath $ResolvedUpdater).VersionInfo
+if ($UpdaterVersionInfo.FileVersion -ne "$ExpectedVersion.0") {
+    throw "Update.exe FileVersion is stale. Expected $ExpectedVersion.0; got $($UpdaterVersionInfo.FileVersion)."
+}
+if ($UpdaterVersionInfo.ProductVersion -ne $ExpectedVersion) {
+    throw "Update.exe ProductVersion is stale. Expected $ExpectedVersion; got $($UpdaterVersionInfo.ProductVersion)."
 }
 
 $SourceIdentityTool = Join-Path $WindowsDirectory "compute-source-identity.mjs"
