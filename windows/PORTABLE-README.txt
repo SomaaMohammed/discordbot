@@ -57,7 +57,7 @@ DATA AND BACKUPS
   package-lock hash, and deterministic source identity used for this build.
 
 SCHEMA UPGRADE
-Version 7.2.5 will not start against schema v1, unknown, malformed, or partial
+Version 7.2.6 will not start against schema v1, unknown, malformed, or partial
 databases. It automatically upgrades exact schema v2-v9 databases when you run
 SuperiorBot.exe. Close every old bot, bundled node.exe, and SQLite editor first;
 keep the original database untouched; and copy the working database into this

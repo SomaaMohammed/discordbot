@@ -76,4 +76,20 @@ describe("latency instrumentation", () => {
     await expect(fetchCurrentBotMember(guild)).resolves.toBeNull();
     expect(fetchMe).toHaveBeenCalledTimes(2);
   });
+
+  it("does not let a fresh bot-member read share a weaker request", async () => {
+    const fetchMe = vi.fn(() => Promise.resolve(null));
+    const guild = {
+      id: "123456789012345678",
+      members: { me: null, fetchMe },
+    } as never;
+
+    await Promise.all([
+      fetchCurrentBotMember(guild),
+      fetchCurrentBotMember(guild, { force: true }),
+    ]);
+
+    expect(fetchMe).toHaveBeenCalledTimes(2);
+    expect(fetchMe.mock.calls).toEqual([[], [{ cache: true, force: true }]]);
+  });
 });

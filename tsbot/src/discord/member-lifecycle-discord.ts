@@ -23,6 +23,11 @@ import { KeyedSerialQueue } from "./keyed-serial-queue.js";
 import { inspectOnboardingChannel } from "./onboarding-permissions.js";
 import { createSuperiorEmbed } from "./panel-theme.js";
 import { assignableRoleSafetyIssue } from "./role-policy.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildMemberCoalesced,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 
 type MemberLifecycleEventKind = "join" | "update" | "leave";
 
@@ -420,13 +425,15 @@ export function createDiscordMemberLifecycleEffects(
       assertCurrentRequest(runtime, guild, request.guildId, isCurrentEvent);
       assertDefinitionCurrent(isDefinitionCurrent);
       const [member, botMember, role] = await Promise.all([
-        guild.members
-          .fetch({ user: request.memberId, cache: true, force: true })
-          .catch(() => null),
-        guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
-        guild.roles
-          .fetch(request.roleId, { cache: true, force: true })
-          .catch(() => null),
+        fetchGuildMemberCoalesced(guild, request.memberId, {
+          cache: true,
+          force: true,
+        }),
+        fetchCurrentBotMember(guild, { force: true }),
+        fetchGuildRoleCoalesced(guild, request.roleId, {
+          cache: true,
+          force: true,
+        }),
       ]);
       if (!member || !botMember || !role)
         throw new Error("Automatic-role resources are unavailable");

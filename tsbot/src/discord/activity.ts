@@ -10,6 +10,7 @@ import {
 import type { GuildRuntime } from "../runtime.js";
 import type { UserMetrics } from "../types.js";
 import { logDomainOutcome } from "./domain-outcomes.js";
+import { fetchCurrentBotMember } from "./fetch-coalescing.js";
 
 const MAX_BACKFILL_MESSAGES = 50_000;
 const METRIC_LABELS: Record<keyof UserMetrics, string> = {
@@ -136,8 +137,7 @@ async function handleBackfill(
     );
     return;
   }
-  const botMember =
-    guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+  const botMember = await fetchCurrentBotMember(guild);
   if (!botMember) {
     status.running = false;
     status.error = "Bot member unavailable";

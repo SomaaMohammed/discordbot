@@ -32,6 +32,10 @@ import {
   inspectTicketManagerRoles,
   MAX_TICKET_MANAGER_ROLES,
 } from "./ticket-permissions.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 
 interface AccessRepository extends CapabilityGrantReader {
   grantRoleCapability(
@@ -230,7 +234,7 @@ async function preflightTicketManagerGrant(
   if (!guild || guild.id !== runtime.guildId) return false;
   const [current, botMember] = await Promise.all([
     inspectTicketManagerRoles(guild, repository),
-    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+    fetchCurrentBotMember(guild, { force: true }),
   ]);
   if (current.issues.length > 0) {
     await replyPrivate(interaction, current.issues.join(" "));
@@ -556,9 +560,14 @@ async function listCapabilityGrants(
 
   const lines = await Promise.all(
     visible.map(async (grant) => {
-      const role = await interaction
-        .guild!.roles.fetch(grant.roleId, { cache: true, force: true })
-        .catch(() => null);
+      const role = await fetchGuildRoleCoalesced(
+        interaction.guild!,
+        grant.roleId,
+        {
+          cache: true,
+          force: true,
+        },
+      );
       const roleLabel =
         role?.guild.id === runtime.guildId
           ? `**${escapeMarkdown(role.name)}**`
@@ -692,7 +701,7 @@ async function verifyMutationContext(
   const [verifiedRole, botMember] = await Promise.all([
     fetchAndValidateRole(guild, expectedRoleId),
     verifyTicketManagerHierarchy
-      ? guild.members.fetchMe({ cache: true, force: true }).catch(() => null)
+      ? fetchCurrentBotMember(guild, { force: true })
       : Promise.resolve(null),
   ]);
   const authority = await authorizeOwnerOrAdministrator(

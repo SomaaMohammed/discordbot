@@ -17,6 +17,10 @@ import type {
 } from "../types.js";
 import { fetchAndValidateRole } from "./authorization.js";
 import { validateSupportRole } from "./ticket-authorization.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 
 export const MAX_TICKET_MANAGER_ROLES = 25;
 const TICKET_MANAGER_GRANT_PAGE_SIZE = 100;
@@ -54,10 +58,11 @@ export async function inspectTicketConfigurationResources(
       guild.channels
         .fetch(configuration.logChannelId, { cache: true, force: true })
         .catch(() => null),
-      guild.roles
-        .fetch(configuration.supportRoleId, { cache: true, force: true })
-        .catch(() => null),
-      guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+      fetchGuildRoleCoalesced(guild, configuration.supportRoleId, {
+        cache: true,
+        force: true,
+      }),
+      fetchCurrentBotMember(guild, { force: true }),
       inspectTicketManagerRoles(guild, grants),
     ]);
   const category =

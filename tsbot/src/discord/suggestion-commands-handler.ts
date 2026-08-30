@@ -27,6 +27,7 @@ import {
   authorizeConfiguredRoleOrCapability,
   fetchAndValidateRole,
 } from "./authorization.js";
+import { fetchGuildMemberCoalesced } from "./fetch-coalescing.js";
 import {
   createSuggestionSubmitModal,
   suggestionStatusMessage,
@@ -757,13 +758,11 @@ async function fetchActor(
   interaction: ChatInputCommandInteraction,
   runtime: GuildRuntime,
 ): Promise<GuildMember | null> {
-  const actor = await interaction
-    .guild!.members.fetch({
-      user: interaction.user.id,
-      cache: true,
-      force: true,
-    })
-    .catch(() => null);
+  const actor = await fetchGuildMemberCoalesced(
+    interaction.guild!,
+    interaction.user.id,
+    { cache: true, force: true },
+  );
   if (!actor || actor.guild.id !== runtime.guildId) {
     await replyPrivate(
       interaction,

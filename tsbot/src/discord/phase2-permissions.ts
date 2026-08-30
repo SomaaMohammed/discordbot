@@ -13,6 +13,10 @@ import type {
   TicketDepartment,
 } from "../types.js";
 import { validateSupportRole } from "./ticket-authorization.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 
 export interface SuggestionResources {
   channel: GuildTextBasedChannel | null;
@@ -75,10 +79,11 @@ export async function inspectSuggestionResources(
           .fetch(configuration.reviewChannelId, { cache: true, force: true })
           .catch(() => null)
       : Promise.resolve(null),
-    guild.roles
-      .fetch(configuration.reviewerRoleId, { cache: true, force: true })
-      .catch(() => null),
-    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+    fetchGuildRoleCoalesced(guild, configuration.reviewerRoleId, {
+      cache: true,
+      force: true,
+    }),
+    fetchCurrentBotMember(guild, { force: true }),
   ]);
   const channel = isPublicTextChannel(channelValue, guild.id)
     ? channelValue
@@ -168,10 +173,11 @@ export async function inspectApplicationResources(
     guild.channels
       .fetch(form.reviewChannelId, { cache: true, force: true })
       .catch(() => null),
-    guild.roles
-      .fetch(form.reviewerRoleId, { cache: true, force: true })
-      .catch(() => null),
-    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+    fetchGuildRoleCoalesced(guild, form.reviewerRoleId, {
+      cache: true,
+      force: true,
+    }),
+    fetchCurrentBotMember(guild, { force: true }),
   ]);
   const reviewChannel =
     channelValue?.type === ChannelType.GuildText &&

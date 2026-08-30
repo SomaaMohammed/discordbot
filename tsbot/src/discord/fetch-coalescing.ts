@@ -4,6 +4,7 @@ import { observeLatency } from "../latency.js";
 type MemberFetchOptions = {
   readonly cache?: boolean;
   readonly force?: boolean;
+  readonly input?: "id" | "object";
 };
 
 const memberRequests = new WeakMap<
@@ -11,7 +12,10 @@ const memberRequests = new WeakMap<
   Map<string, Promise<GuildMember | null>>
 >();
 const roleRequests = new WeakMap<Guild, Map<string, Promise<Role | null>>>();
-const botMemberRequests = new WeakMap<Guild, Promise<GuildMember | null>>();
+const botMemberRequests = new WeakMap<
+  Guild,
+  Map<"forced" | "normal", Promise<GuildMember | null>>
+>();
 
 /**
  * Coalesces only overlapping member requests. A settled request is removed so
@@ -27,13 +31,14 @@ export function fetchGuildMemberCoalesced(
     requests = new Map();
     memberRequests.set(guild, requests);
   }
-  const existing = requests.get(userId);
+  const requestKey = `${userId}:${options.force === true ? "forced" : "normal"}:${options.input ?? "object"}`;
+  const existing = requests.get(requestKey);
   const request =
     existing ??
     fetchMember(guild, userId, options).finally(() => {
-      if (requests?.get(userId) === request) requests.delete(userId);
+      if (requests?.get(requestKey) === request) requests.delete(requestKey);
     });
-  if (!existing) requests.set(userId, request);
+  if (!existing) requests.set(requestKey, request);
   return observeLatency(
     "authorization.member.fetch",
     "guild-member",
@@ -42,23 +47,25 @@ export function fetchGuildMemberCoalesced(
   );
 }
 
-/** Coalesces only overlapping role reads; role validation remains forced. */
+/** Coalesces only overlapping role reads; callers choose fresh or cache-safe reads. */
 export function fetchGuildRoleCoalesced(
   guild: Guild,
   roleId: string,
+  options: MemberFetchOptions = { cache: true, force: true },
 ): Promise<Role | null> {
   let requests = roleRequests.get(guild);
   if (!requests) {
     requests = new Map();
     roleRequests.set(guild, requests);
   }
-  const existing = requests.get(roleId);
+  const requestKey = `${roleId}:${options.force === true ? "forced" : "normal"}`;
+  const existing = requests.get(requestKey);
   const request =
     existing ??
-    fetchRole(guild, roleId).finally(() => {
-      if (requests?.get(roleId) === request) requests.delete(roleId);
+    fetchRole(guild, roleId, options).finally(() => {
+      if (requests?.get(requestKey) === request) requests.delete(requestKey);
     });
-  if (!existing) requests.set(roleId, request);
+  if (!existing) requests.set(requestKey, request);
   return observeLatency(
     "authorization.role.fetch",
     "guild-role",
@@ -83,15 +90,21 @@ export function fetchCurrentBotMember(
       { guildId: guild.id, cache: "hit" },
     );
   }
-  const existing = botMemberRequests.get(guild);
+  let requests = botMemberRequests.get(guild);
+  if (!requests) {
+    requests = new Map();
+    botMemberRequests.set(guild, requests);
+  }
+  const requestKey = options.force === true ? "forced" : "normal";
+  const existing = requests.get(requestKey);
   const request =
     existing ??
     fetchBotMember(guild, options.force === true).finally(() => {
-      if (botMemberRequests.get(guild) === request) {
-        botMemberRequests.delete(guild);
+      if (requests?.get(requestKey) === request) {
+        requests.delete(requestKey);
       }
     });
-  if (!existing) botMemberRequests.set(guild, request);
+  if (!existing) requests.set(requestKey, request);
   return observeLatency(
     "authorization.bot-member.fetch",
     "current-bot-member",
@@ -105,18 +118,27 @@ function fetchMember(
   userId: string,
   options: MemberFetchOptions,
 ): Promise<GuildMember | null> {
-  return guild.members
-    .fetch({
-      user: userId,
+  const request =
+    options.input === "id"
+      ? guild.members.fetch(userId)
+      : guild.members.fetch({
+          user: userId,
+          cache: options.cache ?? true,
+          force: options.force ?? true,
+        });
+  return request.catch(() => null);
+}
+
+function fetchRole(
+  guild: Guild,
+  roleId: string,
+  options: MemberFetchOptions,
+): Promise<Role | null> {
+  return guild.roles
+    .fetch(roleId, {
       cache: options.cache ?? true,
       force: options.force ?? true,
     })
-    .catch(() => null);
-}
-
-function fetchRole(guild: Guild, roleId: string): Promise<Role | null> {
-  return guild.roles
-    .fetch(roleId, { cache: true, force: true })
     .catch(() => null);
 }
 

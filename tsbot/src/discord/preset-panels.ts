@@ -174,7 +174,7 @@ export async function handlePanelHelpCommand(
   }
   const guild = interaction.guild;
   const botMember = guild
-    ? (guild.members.me ?? (await guild.members.fetchMe().catch(() => null)))
+    ? await fetchCurrentBotMember(guild, { force: false })
     : null;
   if (!botMember || !canPostThemedPanel(channel, botMember)) {
     await replyPrivate(
@@ -317,8 +317,7 @@ async function postSuperiorPanelSerial(
   }
   const guild = interaction.guild;
   if (!requiresFreshTarget) {
-    const botMember =
-      guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+    const botMember = await fetchCurrentBotMember(guild, { force: false });
     if (!botMember || !canPostThemedPanel(options.channel, botMember)) {
       await replyPrivate(
         interaction,
@@ -601,7 +600,7 @@ async function postSuperiorPanelSerial(
       guild.channels
         .fetch(options.channel.id, { cache: true, force: true })
         .catch(() => null),
-      guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+      fetchCurrentBotMember(guild, { force: true }),
     ]);
     if (
       !freshChannel ||

@@ -19,6 +19,11 @@ import { classifyError } from "../errors.js";
 import type { GuildRuntime } from "../runtime.js";
 import { logDomainOutcome } from "./domain-outcomes.js";
 import { createSuperiorEmbed } from "./panel-theme.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildMemberCoalesced,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 
 export const ROLE_BUTTON_PREFIX = "superior:role:";
 export const DM_BUTTON_PREFIX = "superior:dm:";
@@ -167,8 +172,16 @@ export async function handlePanelModal(
   }
   const guild = interaction.guild;
   const [sender, target] = await Promise.all([
-    guild.members.fetch(interaction.user.id).catch(() => null),
-    guild.members.fetch(modalTarget.targetId).catch(() => null),
+    fetchGuildMemberCoalesced(guild, interaction.user.id, {
+      cache: true,
+      force: false,
+      input: "id",
+    }),
+    fetchGuildMemberCoalesced(guild, modalTarget.targetId, {
+      cache: true,
+      force: false,
+      input: "id",
+    }),
   ]);
   if (!sender || sender.guild.id !== runtime.guildId) {
     await replyPrivate(
@@ -511,11 +524,13 @@ async function handleRoleButton(
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   }
   const [member, botMember, role] = await Promise.all([
-    guild.members.fetch(interaction.user.id).catch(() => null),
-    Promise.resolve(
-      guild.members.me ?? guild.members.fetchMe().catch(() => null),
-    ),
-    guild.roles.fetch(roleId).catch(() => null),
+    fetchGuildMemberCoalesced(guild, interaction.user.id, {
+      cache: true,
+      force: false,
+      input: "id",
+    }),
+    fetchCurrentBotMember(guild),
+    fetchGuildRoleCoalesced(guild, roleId, { cache: true, force: false }),
   ]);
   if (!member) {
     await replyPrivate(
@@ -728,8 +743,7 @@ async function getBotMember(
 ): Promise<GuildMember | null> {
   const guild = interaction.guild;
   if (!guild || guild.id !== runtime.guildId) return null;
-  const botMember =
-    guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+  const botMember = await fetchCurrentBotMember(guild);
   if (!botMember) {
     await replyPrivate(
       interaction,

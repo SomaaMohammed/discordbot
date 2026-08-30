@@ -13,6 +13,7 @@ import {
   type SafeMudaeDeliveryFailure,
 } from "./mudae-watch-delivery.js";
 import { parseMudaeRoll } from "./mudae-roll-parser.js";
+import { fetchGuildMemberCoalesced } from "./discord/fetch-coalescing.js";
 
 export interface PrivateMudaeWatchReservation {
   readonly guildId: string;
@@ -314,7 +315,12 @@ export async function resolveCurrentRecipientMember(
   }
   const cached = guild.members.cache.get(recipientUserId);
   const member =
-    cached ?? (await guild.members.fetch(recipientUserId).catch(() => null));
+    cached ??
+    (await fetchGuildMemberCoalesced(guild, recipientUserId, {
+      cache: true,
+      force: false,
+      input: "id",
+    }));
   if (
     !member ||
     member.id !== recipientUserId ||

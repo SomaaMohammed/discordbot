@@ -28,6 +28,10 @@ import { logDomainOutcome } from "./domain-outcomes.js";
 import { deliverModerationCaseLog } from "./moderation-log-delivery.js";
 import { runModerationTargetAction } from "./moderation-action-queue.js";
 import { authorizeOwnerOrAdministrator } from "./authorization.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildMemberCoalesced,
+} from "./fetch-coalescing.js";
 
 interface CaseAwareModerationStorage {
   getModerationConfiguration(): ModerationConfiguration | null;
@@ -698,12 +702,11 @@ async function handleSingleTimeout(
     ? terminalAuthority.member
     : null;
   const [actionMember, actionBot] = await Promise.all([
-    interaction
-      .guild!.members.fetch({ user: member.id, cache: true, force: true })
-      .catch(() => null),
-    interaction
-      .guild!.members.fetchMe({ cache: true, force: true })
-      .catch(() => null),
+    fetchGuildMemberCoalesced(interaction.guild!, member.id, {
+      cache: true,
+      force: true,
+    }),
+    fetchCurrentBotMember(interaction.guild!, { force: true }),
   ]);
   const terminalIssue =
     terminalAuthority.allowed && actionMember && actionBot
@@ -810,9 +813,11 @@ async function handleSingleTimeout(
     );
     return;
   }
-  const refreshed = await interaction
-    .guild!.members.fetch({ user: member.id, cache: true, force: true })
-    .catch(() => null);
+  const refreshed = await fetchGuildMemberCoalesced(
+    interaction.guild!,
+    member.id,
+    { cache: true, force: true },
+  );
   const confirmedState = refreshed
     ? removing
       ? !refreshed.isCommunicationDisabled()
@@ -1086,10 +1091,11 @@ async function applyLegacyTimeoutMember(
     try {
       const authority = await authorizeOwnerOrAdministrator(guild, actor.id);
       const [freshMember, freshBot] = await Promise.all([
-        guild.members
-          .fetch({ user: memberId, cache: true, force: true })
-          .catch(() => null),
-        guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+        fetchGuildMemberCoalesced(guild, memberId, {
+          cache: true,
+          force: true,
+        }),
+        fetchCurrentBotMember(guild, { force: true }),
       ]);
       if (
         !authority.allowed ||

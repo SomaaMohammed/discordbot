@@ -24,6 +24,7 @@ import { clearPanelProcessState } from "./panels.js";
 import { clearAntiSpamProcessState } from "./anti-spam-enforcement.js";
 import { getInteractionLifecycle } from "./interaction-lifecycle.js";
 import { evaluateGuildManagement } from "./ticket-authorization.js";
+import { fetchCurrentBotMember } from "./fetch-coalescing.js";
 
 const CONFIG_ADMIN_ERROR =
   "Only the server owner or a member with Administrator permission can manage Superior configuration.";
@@ -431,9 +432,7 @@ async function updateChannel(
       );
       return;
     }
-    const botMember =
-      interaction.guild.members.me ??
-      (await interaction.guild.members.fetchMe().catch(() => null));
+    const botMember = await fetchCurrentBotMember(interaction.guild);
     const permissions = botMember ? channel.permissionsFor(botMember) : null;
     if (
       !permissions?.has(PermissionFlagsBits.ViewChannel) ||
@@ -879,8 +878,7 @@ export async function validateGuildConfiguration(
     if (!channel || channel.guild.id !== guild.id || !channel.isTextBased()) {
       errors.push("The configured log channel is unavailable.");
     } else {
-      const botMember =
-        guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+      const botMember = await fetchCurrentBotMember(guild);
       const permissions = botMember ? channel.permissionsFor(botMember) : null;
       if (
         !permissions?.has(PermissionFlagsBits.ViewChannel) ||

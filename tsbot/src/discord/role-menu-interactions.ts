@@ -8,6 +8,10 @@ import {
 import { classifyError } from "../errors.js";
 import type { GuildRuntime } from "../runtime.js";
 import { logDomainOutcome } from "./domain-outcomes.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildMemberCoalesced,
+} from "./fetch-coalescing.js";
 import { KeyedSerialQueue } from "./keyed-serial-queue.js";
 import {
   ROLE_MENU_CUSTOM_ID_PREFIX,
@@ -171,10 +175,11 @@ async function applyRoleMenuSelection(
   }
 
   const [member, botMember] = await Promise.all([
-    guild.members
-      .fetch({ user: interaction.user.id, cache: true, force: true })
-      .catch(() => null),
-    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+    fetchGuildMemberCoalesced(guild, interaction.user.id, {
+      cache: true,
+      force: true,
+    }),
+    fetchCurrentBotMember(guild, { force: true }),
   ]);
   if (
     !member ||

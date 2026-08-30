@@ -9,6 +9,11 @@ import {
 import type { ModerationConfiguration } from "../types.js";
 import type { GuildCapability, RoleCapabilityGrant } from "../types.js";
 import { fetchAndValidateRole } from "./authorization.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildMemberCoalesced,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 
 export type SafetyWorkflow = "reports" | "appeals";
 
@@ -60,12 +65,13 @@ export async function inspectSafetyWorkflowResources(
         .fetch(channelId, { cache: true, force: true })
         .catch(() => null),
       fetchAndValidateRole(guild, roleId),
-      guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+      fetchCurrentBotMember(guild, { force: true }),
       Promise.all(
         delegatedGrants.map((grant) =>
-          guild.roles
-            .fetch(grant.roleId, { cache: true, force: true })
-            .catch(() => null),
+          fetchGuildRoleCoalesced(guild, grant.roleId, {
+            cache: true,
+            force: true,
+          }),
         ),
       ),
     ]);
@@ -169,7 +175,7 @@ async function isFreshAdministratorPrincipal(
 ): Promise<boolean> {
   let role: Role | null = null;
   try {
-    role = await guild.roles.fetch(principalId, {
+    role = await fetchGuildRoleCoalesced(guild, principalId, {
       cache: true,
       force: true,
     });
@@ -185,8 +191,7 @@ async function isFreshAdministratorPrincipal(
   }
   let member: GuildMember | null = null;
   try {
-    member = await guild.members.fetch({
-      user: principalId,
+    member = await fetchGuildMemberCoalesced(guild, principalId, {
       cache: true,
       force: true,
     });
@@ -208,7 +213,7 @@ export async function inspectModerationLogChannel(
     guild.channels
       .fetch(channelId, { cache: true, force: true })
       .catch(() => null),
-    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+    fetchCurrentBotMember(guild, { force: true }),
   ]);
   const channel =
     channelValue?.type === ChannelType.GuildText &&

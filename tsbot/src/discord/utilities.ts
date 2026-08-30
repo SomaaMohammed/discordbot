@@ -13,6 +13,7 @@ import {
 import { DateTime } from "luxon";
 import type { GuildRuntime } from "../runtime.js";
 import { SUPERIOR_PANEL_COLOR } from "./panel-theme.js";
+import { fetchGuildMemberCoalesced } from "./fetch-coalescing.js";
 
 const UTILITY_COMMAND_NAME = "utility";
 const DISCORD_EPOCH_MS = 1_420_070_400_000n;
@@ -253,7 +254,11 @@ async function handleUserInfo(
   }
   const targetUser =
     interaction.options.getUser("member", false) ?? interaction.user;
-  const member = await guild.members.fetch(targetUser.id).catch(() => null);
+  const member = await fetchGuildMemberCoalesced(guild, targetUser.id, {
+    cache: true,
+    force: false,
+    input: "id",
+  });
   if (!runtime.isCurrent()) {
     await replyCancelled(interaction);
     return;

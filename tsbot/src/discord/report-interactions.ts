@@ -38,6 +38,7 @@ import {
 } from "./report-delivery.js";
 import { parseReportOpenCustomId } from "./panel-theme.js";
 import { inspectSafetyWorkflowResources } from "./safety-permissions.js";
+import { fetchGuildMemberCoalesced } from "./fetch-coalescing.js";
 
 const SNOWFLAKE = /^\d{17,20}$/u;
 const LINKABLE_REPORT_CASE_ACTIONS = new Set([
@@ -916,9 +917,10 @@ async function fetchMember(
   guild: NonNullable<ModalSubmitInteraction["guild"]>,
   id: string,
 ): Promise<GuildMember | null> {
-  return guild.members
-    .fetch({ user: id, cache: true, force: true })
-    .catch(() => null);
+  return fetchGuildMemberCoalesced(guild, id, {
+    cache: true,
+    force: true,
+  });
 }
 type ReportDecisionTarget =
   | { status: "member"; member: GuildMember }

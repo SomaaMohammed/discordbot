@@ -33,6 +33,11 @@ import {
 import { clearAntiSpamProcessState } from "./anti-spam-enforcement.js";
 import { runModerationTargetAction } from "./moderation-action-queue.js";
 import { safeDisplayText } from "./forms.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildMemberCoalesced,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 
 interface ModerationCommandStorage {
   getModerationConfiguration(): ModerationConfiguration | null;
@@ -611,7 +616,7 @@ async function performSerializedAction(
       grants: runtime.storage,
     });
     const [finalBot, finalBanState] = await Promise.all([
-      guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+      fetchCurrentBotMember(guild, { force: true }),
       fetchBanState(guild, userId),
     ]);
     const finalConfiguration = storage.getModerationConfiguration();
@@ -739,10 +744,11 @@ async function performSerializedAction(
     grants: runtime.storage,
   });
   const [terminalTarget, terminalBot] = await Promise.all([
-    guild.members
-      .fetch({ user: selected.id, cache: true, force: true })
-      .catch(() => null),
-    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+    fetchGuildMemberCoalesced(guild, selected.id, {
+      cache: true,
+      force: true,
+    }),
+    fetchCurrentBotMember(guild, { force: true }),
   ]);
   const terminalActor = terminalAuthorization.allowed
     ? terminalAuthorization.member
@@ -1068,13 +1074,11 @@ async function createAndDeliver(
 ): Promise<void> {
   const record = storage.createModerationCase(input);
   if (record.actionType === "warning") {
-    const target = await interaction
-      .guild!.members.fetch({
-        user: record.targetUserId,
-        cache: true,
-        force: true,
-      })
-      .catch(() => null);
+    const target = await fetchGuildMemberCoalesced(
+      interaction.guild!,
+      record.targetUserId,
+      { cache: true, force: true },
+    );
     await target
       ?.send({
         content:
@@ -1829,9 +1833,10 @@ async function selectedRole(
 ) {
   const selected = interaction.options.getRole(name, false);
   if (!selected) return null;
-  const role = await interaction
-    .guild!.roles.fetch(selected.id, { cache: true, force: true })
-    .catch(() => null);
+  const role = await fetchGuildRoleCoalesced(interaction.guild!, selected.id, {
+    cache: true,
+    force: true,
+  });
   return role &&
     role.guild.id === interaction.guildId &&
     role.id !== interaction.guildId &&

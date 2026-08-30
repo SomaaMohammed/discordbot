@@ -34,6 +34,10 @@ import { parseAppealOpenCustomId } from "./panel-theme.js";
 import { inspectSafetyWorkflowResources } from "./safety-permissions.js";
 import { KeyedSerialQueue } from "./keyed-serial-queue.js";
 import { runModerationTargetAction } from "./moderation-action-queue.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildMemberCoalesced,
+} from "./fetch-coalescing.js";
 
 const ELIGIBLE_ACTIONS = new Set(["warning", "timeout", "kick", "ban"]);
 const SAFE_OVERTURN_PUBLIC_REASON =
@@ -806,7 +810,7 @@ async function applyOverturn(
     }
     const [target, botMember] = await Promise.all([
       fetchMember(guild, moderationCase.targetUserId),
-      guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+      fetchCurrentBotMember(guild, { force: true }),
     ]);
     if (
       !target ||
@@ -958,7 +962,7 @@ async function applyOverturn(
       : null;
     const [actionTarget, actionBot] = await Promise.all([
       fetchMember(guild, target.id),
-      guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+      fetchCurrentBotMember(guild, { force: true }),
     ]);
     if (
       !actionTarget ||
@@ -1499,9 +1503,10 @@ async function fetchMember(
   guild: NonNullable<ModalSubmitInteraction["guild"]>,
   id: string,
 ): Promise<GuildMember | null> {
-  return guild.members
-    .fetch({ user: id, cache: true, force: true })
-    .catch(() => null);
+  return fetchGuildMemberCoalesced(guild, id, {
+    cache: true,
+    force: true,
+  });
 }
 type AppealReviewTarget =
   | { status: "member"; member: GuildMember }

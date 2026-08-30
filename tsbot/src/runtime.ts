@@ -156,7 +156,10 @@ export function createRuntime(
           let persistedSettings = structuredClone(initialExpectation.settings);
           let persistedLifecycleJoinedAt = initialExpectation.lifecycleJoinedAt;
           let settings = structuredClone(initialExpectation.settings);
-          const guildStorage = storage.forGuild(normalizedGuildId);
+          const guildStorage = instrumentRuntimeGuildStorage(
+            storage.forGuild(normalizedGuildId),
+            () => runtime.invalidateGuild(normalizedGuildId),
+          );
           let runtimeGeneration = generation;
 
           const guildRuntime: GuildRuntime = {
@@ -380,6 +383,94 @@ export function createRuntime(
   }
   return runtime;
 }
+
+/**
+ * Configuration writes must evict the cached runtime after they commit. The
+ * storage layer remains usable on its own for migrations and offline tools;
+ * this narrow proxy only applies the runtime cache policy to interaction
+ * scoped storage.
+ */
+function instrumentRuntimeGuildStorage(
+  storage: GuildStorage,
+  invalidate: () => void,
+): GuildStorage {
+  const wrappedMethods = new Map<PropertyKey, (...args: never[]) => unknown>();
+  return new Proxy(storage, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (
+        typeof value !== "function" ||
+        !RUNTIME_INVALIDATING_GUILD_STORAGE_METHODS.has(property)
+      ) {
+        return value;
+      }
+      const existing = wrappedMethods.get(property);
+      if (existing) return existing;
+      const wrapped = (...args: never[]): unknown => {
+        const result = value.apply(target, args);
+        invalidate();
+        return result;
+      };
+      wrappedMethods.set(property, wrapped);
+      return wrapped;
+    },
+  });
+}
+
+const RUNTIME_INVALIDATING_GUILD_STORAGE_METHODS = new Set<PropertyKey>([
+  "upsertOnboardingConfiguration",
+  "disableOnboardingConfiguration",
+  "createOnboardingRulesVersion",
+  "createAndActivateOnboardingRulesVersion",
+  "replaceOnboardingAutoroles",
+  "invalidateOnboardingRole",
+  "invalidateOnboardingChannel",
+  "createRoleMenu",
+  "updateRoleMenu",
+  "setRoleMenuState",
+  "createRoleMenuOption",
+  "updateRoleMenuOption",
+  "moveRoleMenuOption",
+  "reorderRoleMenuOptions",
+  "removeRoleMenuOption",
+  "createRoleMenuPost",
+  "upsertRoleMenuPost",
+  "setRoleMenuPostState",
+  "upsertModerationConfiguration",
+  "disableModerationConfiguration",
+  "upsertAntiSpamRule",
+  "setAntiSpamRuleEnabled",
+  "addAntiSpamExemptRole",
+  "removeAntiSpamExemptRole",
+  "addAntiSpamExemptChannel",
+  "removeAntiSpamExemptChannel",
+  "grantRoleCapability",
+  "revokeRoleCapability",
+  "configureRestrictedPingRole",
+  "setRestrictedPingRoleEnabled",
+  "createTicketDepartment",
+  "updateTicketDepartment",
+  "setTicketDepartmentEnabled",
+  "disableAllTicketDepartments",
+  "deleteTicketDepartment",
+  "upsertTicketDepartmentField",
+  "removeTicketDepartmentField",
+  "reorderTicketDepartmentFields",
+  "upsertSuggestionConfiguration",
+  "disableSuggestionConfiguration",
+  "createApplicationForm",
+  "updateApplicationForm",
+  "setApplicationFormEnabled",
+  "deleteApplicationForm",
+  "upsertApplicationFormField",
+  "removeApplicationFormField",
+  "reorderApplicationFormFields",
+  "upsertTicketConfiguration",
+  "disableTicketConfiguration",
+  "createPostedPanel",
+  "upsertPostedPanel",
+  "deletePostedPanel",
+]);
 
 function createPrivateMudaeWatcher(
   storage: BotStorage,

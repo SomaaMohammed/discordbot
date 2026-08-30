@@ -21,6 +21,7 @@ import type {
   PostedPanel,
 } from "../types.js";
 import { authorizeCapability } from "./authorization.js";
+import { fetchGuildMemberCoalesced } from "./fetch-coalescing.js";
 import { KeyedSerialQueue } from "./keyed-serial-queue.js";
 import { runPanelPostSerial } from "./panel-post-queue.js";
 import type {
@@ -1175,9 +1176,10 @@ async function showMember(
   runtime: GuildRuntime,
 ): Promise<void> {
   const user = interaction.options.getUser("member", true);
-  const member = await interaction
-    .guild!.members.fetch({ user: user.id, cache: true, force: true })
-    .catch(() => null);
+  const member = await fetchGuildMemberCoalesced(interaction.guild!, user.id, {
+    cache: true,
+    force: true,
+  });
   const state = runtime.storage.getMemberOnboardingState(user.id);
   const acceptances = runtime.storage.listMemberRuleAcceptances(user.id, 25, 0);
   const operations = runtime.storage.listOnboardingRoleOperations({
@@ -1248,9 +1250,10 @@ async function recoverMember(
   actor: GuildMember,
 ): Promise<void> {
   const user = interaction.options.getUser("member", true);
-  const member = await interaction
-    .guild!.members.fetch({ user: user.id, cache: true, force: true })
-    .catch(() => null);
+  const member = await fetchGuildMemberCoalesced(interaction.guild!, user.id, {
+    cache: true,
+    force: true,
+  });
   if (!member)
     throw new Error("That member is no longer available in this server.");
   if (!member.user.bot && member.pending)

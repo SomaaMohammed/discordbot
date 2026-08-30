@@ -27,6 +27,7 @@ import {
   fetchAndValidateRole,
   fetchVerifiedGuildMember,
 } from "./authorization.js";
+import { fetchCurrentBotMember } from "./fetch-coalescing.js";
 
 export type RestrictedPingParentChannel =
   TextChannel | NewsChannel | ForumChannel | MediaChannel;
@@ -194,7 +195,7 @@ export async function inspectRestrictedPingBinding(
     guild.channels
       .fetch(channelId, { cache: true, force: true })
       .catch(() => null),
-    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+    fetchCurrentBotMember(guild, { force: true }),
   ]);
   if (!roleResult.valid) return roleResult;
   if (!rawChannel) return { valid: false, issue: "channel-unavailable" };
@@ -248,7 +249,7 @@ export async function executeRestrictedPing(options: {
     guild.channels
       .fetch(options.channelId, { cache: true, force: true })
       .catch(() => null),
-    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+    fetchCurrentBotMember(guild, { force: true }),
   ]);
   if (!memberResult.valid) {
     return { status: "member-unavailable", role: null };

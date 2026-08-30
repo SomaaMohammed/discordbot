@@ -14,6 +14,10 @@ import {
   type CapabilityGrantReader,
 } from "./authorization.js";
 import { assignableRoleSafetyIssue } from "./role-policy.js";
+import {
+  fetchCurrentBotMember as fetchCoalescedBotMember,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 
 export interface OnboardingChannelInspection {
   readonly channel: GuildTextBasedChannel | null;
@@ -49,10 +53,9 @@ export async function fetchCurrentOnboardingMember(
 
 export async function fetchCurrentBotMember(
   guild: Guild,
+  options: { readonly force?: boolean } = { force: true },
 ): Promise<GuildMember | null> {
-  const member = await guild.members
-    .fetchMe({ cache: true, force: true })
-    .catch(() => null);
+  const member = await fetchCoalescedBotMember(guild, options);
   return member?.guild.id === guild.id && member.user.bot ? member : null;
 }
 
@@ -132,9 +135,10 @@ export async function fetchOnboardingRole(
   roleId: string,
 ): Promise<Role | null> {
   if (!/^\d{17,20}$/u.test(roleId)) return null;
-  const role = await guild.roles
-    .fetch(roleId, { cache: true, force: true })
-    .catch(() => null);
+  const role = await fetchGuildRoleCoalesced(guild, roleId, {
+    cache: true,
+    force: true,
+  });
   return role?.guild.id === guild.id && role.id === roleId ? role : null;
 }
 

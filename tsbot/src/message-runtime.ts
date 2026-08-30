@@ -22,6 +22,10 @@ import { logError, logInfo } from "./logging.js";
 import { buildConversationReply, escapeUserText } from "./reply-catalog.js";
 import type { BotRuntime, GuildRuntime } from "./runtime.js";
 import { AsyncWorkTracker } from "./discord/work-tracker.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildMemberCoalesced,
+} from "./discord/fetch-coalescing.js";
 import { describeMudaeDeliveryFailure } from "./mudae-watch-delivery.js";
 import type { PrivateMudaeWatcher } from "./mudae-watch-service.js";
 import type {
@@ -444,14 +448,16 @@ async function applyReplyModerationTimeout(
     );
     return;
   }
-  const freshActor = await guild.members
-    .fetch({ user: actor.id, cache: true, force: true })
-    .catch(() => null);
+  const freshActor = await fetchGuildMemberCoalesced(guild, actor.id, {
+    cache: true,
+    force: true,
+  });
   const [freshTarget, freshBot] = await Promise.all([
-    guild.members
-      .fetch({ user: target.id, cache: true, force: true })
-      .catch(() => null),
-    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+    fetchGuildMemberCoalesced(guild, target.id, {
+      cache: true,
+      force: true,
+    }),
+    fetchCurrentBotMember(guild, { force: true }),
   ]);
   const latestConfiguration = storage.getModerationConfiguration();
   const freshEligibility =
@@ -776,8 +782,7 @@ async function resolveBotMember(
   if (guild.id !== guildId) {
     return null;
   }
-  const member =
-    guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+  const member = await fetchCurrentBotMember(guild);
   return member?.guild.id === guildId ? member : null;
 }
 
@@ -818,7 +823,11 @@ async function resolveReferencedMember(
   ) {
     return message.member;
   }
-  const target = await guild.members.fetch(message.author.id).catch(() => null);
+  const target = await fetchGuildMemberCoalesced(guild, message.author.id, {
+    cache: true,
+    force: false,
+    input: "id",
+  });
   return target?.guild.id === guildId && target.id === message.author.id
     ? target
     : null;

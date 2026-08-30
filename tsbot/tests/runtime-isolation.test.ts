@@ -110,6 +110,24 @@ describe("runtime tenant isolation", () => {
     expect(refreshed?.settings.timezone).toBe("Europe/London");
   });
 
+  it("invalidates only the mutated guild after a scoped configuration write", async () => {
+    const runtime = createTestRuntime();
+    approveAndEnable(runtime, GUILD_A);
+    approveAndEnable(runtime, GUILD_B);
+    const firstA = await runtime.forGuild(GUILD_A);
+    const firstB = await runtime.forGuild(GUILD_B);
+
+    firstA!.storage.upsertSuggestionConfiguration({
+      suggestionChannelId: "333333333333333333",
+      reviewerRoleId: "444444444444444444",
+    });
+
+    expect(firstA!.isCurrent()).toBe(false);
+    expect(firstB!.isCurrent()).toBe(true);
+    expect(await runtime.forGuild(GUILD_A)).not.toBe(firstA);
+    expect(await runtime.forGuild(GUILD_B)).toBe(firstB);
+  });
+
   it("detects optimistic settings conflicts instead of overwriting", async () => {
     const runtime = createTestRuntime();
     approveAndEnable(runtime, GUILD_A);

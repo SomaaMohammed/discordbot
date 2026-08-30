@@ -13,6 +13,7 @@ import {
   evaluateSyntheticAntiSpam,
 } from "./anti-spam-detector.js";
 import { clearAntiSpamProcessState } from "./anti-spam-enforcement.js";
+import { fetchGuildRoleCoalesced } from "./fetch-coalescing.js";
 
 interface AutomodStorage {
   getModerationConfiguration(): ModerationConfiguration | null;
@@ -215,9 +216,10 @@ async function mutateRoleExemption(
   operation: string,
 ): Promise<void> {
   const selected = interaction.options.getRole("role", true);
-  const role = await interaction
-    .guild!.roles.fetch(selected.id, { cache: true, force: true })
-    .catch(() => null);
+  const role = await fetchGuildRoleCoalesced(interaction.guild!, selected.id, {
+    cache: true,
+    force: true,
+  });
   if (
     !role ||
     role.guild.id !== runtime.guildId ||

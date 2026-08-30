@@ -21,6 +21,11 @@ import type {
   RoleMenuUpdateInput,
 } from "../types.js";
 import { authorizeCapability } from "./authorization.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildMemberCoalesced,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 import { KeyedSerialQueue } from "./keyed-serial-queue.js";
 import { canPostThemedPanel } from "./ticket-permissions.js";
 import {
@@ -443,9 +448,9 @@ async function postMenu(
     menu,
   );
   const channel = await currentTextChannel(interaction);
-  const botMember = await interaction
-    .guild!.members.fetchMe({ cache: true, force: true })
-    .catch(() => null);
+  const botMember = await fetchCurrentBotMember(interaction.guild!, {
+    force: true,
+  });
   if (!channel || !botMember || !canPostThemedPanel(channel, botMember))
     throw new Error(
       "Superior needs View Channel, Send Messages, Read Message History, and Embed Links in that text channel.",
@@ -569,21 +574,21 @@ async function recoverMemberSelection(
   options: readonly RoleMenuOption[],
   memberId: string,
 ): Promise<void> {
-  const member = await interaction
-    .guild!.members.fetch({ user: memberId, cache: true, force: true })
-    .catch(() => null);
+  const member = await fetchGuildMemberCoalesced(interaction.guild!, memberId, {
+    cache: true,
+    force: true,
+  });
   if (!member || member.guild.id !== runtime.guildId)
     throw new Error("That member is no longer available in this server.");
   if (member.user.bot)
     throw new TypeError("Bots cannot use or recover self-service role menus.");
 
   if (menu.requiredRoleId) {
-    const prerequisite = await interaction
-      .guild!.roles.fetch(menu.requiredRoleId, {
-        cache: true,
-        force: true,
-      })
-      .catch(() => null);
+    const prerequisite = await fetchGuildRoleCoalesced(
+      interaction.guild!,
+      menu.requiredRoleId,
+      { cache: true, force: true },
+    );
     if (
       !prerequisite ||
       prerequisiteRoleSafetyIssue(prerequisite, runtime.guildId)
@@ -971,8 +976,8 @@ async function fetchSafeAssignableRole(
   actor: GuildMember,
 ): Promise<Role> {
   const [role, botMember] = await Promise.all([
-    guild.roles.fetch(roleId, { cache: true, force: true }).catch(() => null),
-    guild.members.fetchMe({ cache: true, force: true }).catch(() => null),
+    fetchGuildRoleCoalesced(guild, roleId, { cache: true, force: true }),
+    fetchCurrentBotMember(guild, { force: true }),
   ]);
   if (!role || !botMember)
     throw new Error("Superior could not freshly verify that role.");

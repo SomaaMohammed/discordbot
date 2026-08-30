@@ -19,6 +19,11 @@ import {
 import { logDomainOutcome } from "./domain-outcomes.js";
 import { deliverModerationCaseLog } from "./moderation-log-delivery.js";
 import { runModerationTargetAction } from "./moderation-action-queue.js";
+import {
+  fetchCurrentBotMember as fetchCoalescedBotMember,
+  fetchGuildMemberCoalesced,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 
 export type AntiSpamEnforcementAction =
   "delete" | "delete-and-warn" | "delete-and-timeout";
@@ -698,7 +703,7 @@ async function isFreshlyExempt(
   const roleIds = storage.listAntiSpamExemptRoleIds();
   for (const roleId of roleIds) {
     if (roleId === message.guildId || !member.roles.cache.has(roleId)) continue;
-    const role = await message.guild!.roles.fetch(roleId, {
+    const role = await fetchGuildRoleCoalesced(message.guild!, roleId, {
       cache: true,
       force: true,
     });
@@ -721,9 +726,10 @@ async function fetchCurrentMember(
 ): Promise<GuildMember | null> {
   const guild = message.guild;
   if (!guild || guild.id !== message.guildId) return null;
-  const member = await guild.members
-    .fetch({ user: message.author.id, cache: true, force: true })
-    .catch(() => null);
+  const member = await fetchGuildMemberCoalesced(guild, message.author.id, {
+    cache: true,
+    force: true,
+  });
   return member?.guild.id === guild.id ? member : null;
 }
 
@@ -732,9 +738,7 @@ async function fetchCurrentBotMember(
 ): Promise<GuildMember | null> {
   const guild = message.guild;
   if (!guild || guild.id !== message.guildId) return null;
-  const member = await guild.members
-    .fetchMe({ cache: true, force: true })
-    .catch(() => null);
+  const member = await fetchCoalescedBotMember(guild, { force: true });
   return member?.guild.id === guild.id ? member : null;
 }
 

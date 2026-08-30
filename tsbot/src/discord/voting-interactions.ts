@@ -781,7 +781,7 @@ function getInteractionVotingChannel(
 }
 
 async function getCurrentBotMember(guild: Guild): Promise<GuildMember | null> {
-  return guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+  return fetchCurrentBotMember(guild);
 }
 
 function getMissingVotingPermissions(
