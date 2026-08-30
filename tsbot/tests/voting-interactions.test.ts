@@ -82,9 +82,7 @@ describe("voting-panel Discord interactions", () => {
         content: expect.stringContaining("Voting panel created"),
       }),
     );
-    expect(harness.message.edit).toHaveBeenCalledWith(
-      expect.objectContaining({ allowedMentions: { parse: [] } }),
-    );
+    expect(harness.message.edit).not.toHaveBeenCalled();
   });
 
   it("keeps vote confirmations and voter lists ephemeral", async () => {
@@ -129,6 +127,45 @@ describe("voting-panel Discord interactions", () => {
       expect.objectContaining({
         embeds: [expect.anything()],
         allowedMentions: { parse: [] },
+      }),
+    );
+  });
+
+  it("rolls back the posted message when persistence fails", async () => {
+    const harness = createCommandHarness();
+    harness.storage.createVotingPanel.mockImplementation(() => {
+      throw new Error("synthetic persistence failure");
+    });
+
+    await handleVotingPanelCommand(
+      harness.interaction as never,
+      harness.runtime,
+    );
+
+    expect(harness.message.delete).toHaveBeenCalledOnce();
+    expect(harness.interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("posted panel was removed"),
+      }),
+    );
+  });
+
+  it("reports a posting failure without creating or deleting stored state", async () => {
+    const harness = createCommandHarness();
+    harness.channel.send.mockRejectedValueOnce(
+      new Error("synthetic send failure"),
+    );
+
+    await handleVotingPanelCommand(
+      harness.interaction as never,
+      harness.runtime,
+    );
+
+    expect(harness.storage.createVotingPanel).not.toHaveBeenCalled();
+    expect(harness.message.delete).not.toHaveBeenCalled();
+    expect(harness.interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("could not post"),
       }),
     );
   });

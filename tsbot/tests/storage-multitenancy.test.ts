@@ -145,6 +145,25 @@ describe("active guild storage", () => {
     expect(b.metricsGet("command_usage.superior.purge", "0")).toBe("0");
   });
 
+  it("defers nonessential metric writes to the attached work scheduler", () => {
+    const storage = makeStorage();
+    storage.ensureGuild(GUILD_A);
+    const guild = storage.forGuild(GUILD_A);
+    const queued: Array<() => void | Promise<void>> = [];
+    storage.setNonessentialScheduler((task) => queued.push(task));
+
+    guild.recordCommandMetric("utility.ping");
+    guild.incrementUserMetric(USER_A, "messages_sent");
+
+    expect(queued).toHaveLength(2);
+    expect(guild.metricsGet("command_usage.utility.ping", "0")).toBe("0");
+    expect(guild.getUserMetrics(USER_A).messages_sent).toBe(0);
+
+    for (const task of queued) task();
+    expect(guild.metricsGet("command_usage.utility.ping", "0")).toBe("1");
+    expect(guild.getUserMetrics(USER_A).messages_sent).toBe(1);
+  });
+
   it("transactionally replaces activity metrics without duplicating backfills", () => {
     const storage = makeStorage();
     storage.ensureGuild(GUILD_A);

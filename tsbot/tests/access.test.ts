@@ -216,6 +216,41 @@ describe("central capability authorization", () => {
     });
   });
 
+  it("coalesces overlapping member and role reads without caching authorization", async () => {
+    let releaseMember!: () => void;
+    const memberReady = new Promise<void>((resolve) => {
+      releaseMember = resolve;
+    });
+    const harness = createGuildHarness();
+    harness.memberFetch.mockImplementation(async () => {
+      await memberReady;
+      return harness.member;
+    });
+
+    const context = {
+      guild: harness.guild,
+      userId: MEMBER_ID,
+      capability: "tickets.configure" as const,
+      configuredRoleId: ROLE_ID,
+      grants: { listCapabilitiesForRoles: vi.fn(() => []) },
+    };
+    const first = authorizeConfiguredRoleOrCapability(context);
+    const second = authorizeConfiguredRoleOrCapability(context);
+    await Promise.resolve();
+    releaseMember();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ allowed: true }),
+      expect.objectContaining({ allowed: true }),
+    ]);
+    expect(harness.memberFetch).toHaveBeenCalledTimes(1);
+    expect(harness.roleFetch).toHaveBeenCalledTimes(1);
+
+    await authorizeConfiguredRoleOrCapability(context);
+    expect(harness.memberFetch).toHaveBeenCalledTimes(2);
+    expect(harness.roleFetch).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     {
       label: "deleted",

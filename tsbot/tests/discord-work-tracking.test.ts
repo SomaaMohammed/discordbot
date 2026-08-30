@@ -133,6 +133,37 @@ describe("Discord work tracking", () => {
     expect(runtime.forGuild).not.toHaveBeenCalled();
   });
 
+  it("drains nonessential storage work before shutdown closes its lifecycle", async () => {
+    const workGate = deferred<void>();
+    let scheduleNonessential!: (task: () => void | Promise<void>) => void;
+    const runtime = {
+      forGuild: vi.fn(async () => null),
+      storage: {
+        setNonessentialScheduler: vi.fn(
+          (scheduler: (task: () => void | Promise<void>) => void) => {
+            scheduleNonessential = scheduler;
+          },
+        ),
+      },
+    } as unknown as BotRuntime;
+    const client = createDiscordClient(runtime);
+    clients.push(client);
+    scheduleNonessential(() => workGate.promise);
+
+    const lifecycle = getDiscordClientWorkLifecycle(client)!;
+    lifecycle.stop();
+    let completed = false;
+    const drain = lifecycle.drain(1_000).then((result) => {
+      completed = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(completed).toBe(false);
+
+    workGate.resolve();
+    await expect(drain).resolves.toBe(true);
+  });
+
   it("tracks and drains every member lifecycle gateway event", async () => {
     const runtime = {
       forGuild: vi.fn(async () => null),

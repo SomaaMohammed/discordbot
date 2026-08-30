@@ -11,6 +11,7 @@ import {
   type SlashCommandSubcommandsOnlyBuilder,
 } from "discord.js";
 import { logInfo } from "../logging.js";
+import { observeLatency } from "../latency.js";
 import type { BotRuntime, GuildRuntime } from "../runtime.js";
 import { handleActivityCommand, handleFunCommand } from "./activity.js";
 import { buildActivityCommandDefinition } from "./activity-command.js";
@@ -633,29 +634,55 @@ async function replyPrivate(
   content: string,
 ): Promise<void> {
   if (interaction.deferred && !interaction.replied) {
-    await interaction.editReply({ content, allowedMentions: { parse: [] } });
+    await observeLatency(
+      "discord.editReply",
+      "editReply",
+      () => interaction.editReply({ content, allowedMentions: { parse: [] } }),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
     return;
   }
   if (interaction.replied) {
-    await interaction.followUp({
-      content,
-      flags: MessageFlags.Ephemeral,
-      allowedMentions: { parse: [] },
-    });
+    await observeLatency(
+      "discord.followUp",
+      "followUp",
+      () =>
+        interaction.followUp({
+          content,
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        }),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
     return;
   }
-  await interaction.reply({
-    content,
-    flags: MessageFlags.Ephemeral,
-    allowedMentions: { parse: [] },
-  });
+  await observeLatency(
+    "discord.reply",
+    "reply",
+    () =>
+      interaction.reply({
+        content,
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      }),
+    { guildId: interaction.guildId ?? "dm" },
+    "info",
+  );
 }
 
 async function deferPrivate(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await observeLatency(
+      "discord.deferReply",
+      "deferReply",
+      () => interaction.deferReply({ flags: MessageFlags.Ephemeral }),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
   }
 }
 
@@ -663,6 +690,12 @@ async function deferPublic(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply();
+    await observeLatency(
+      "discord.deferReply",
+      "deferReply",
+      () => interaction.deferReply(),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
   }
 }

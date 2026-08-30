@@ -8,6 +8,7 @@ import { logInfo, logWarn } from "../logging.js";
 import type { BotRuntime, GuildRuntime } from "../runtime.js";
 import type { VotingPanel } from "../types.js";
 import { deliverVotingPanelCompletion } from "./voting-interactions.js";
+import { fetchCurrentBotMember } from "./fetch-coalescing.js";
 
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 15_000;
 
@@ -133,8 +134,7 @@ async function completeDuePanel(
     );
     return;
   }
-  const botMember =
-    guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+  const botMember = await fetchCurrentBotMember(guild);
   const allowEveryoneMention = Boolean(
     transition.panel.mentionEveryoneOnCompletion &&
     botMember &&

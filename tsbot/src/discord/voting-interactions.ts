@@ -14,6 +14,7 @@ import {
   type MessageEditOptions,
 } from "discord.js";
 import { SUPERIOR_PANEL_COLOR } from "./panel-theme.js";
+import { observeLatency } from "../latency.js";
 import type { GuildRuntime } from "../runtime.js";
 import type {
   VotingPanel,
@@ -23,6 +24,7 @@ import type {
   VotingPanelVoter,
 } from "../types.js";
 import { fetchVerifiedGuildMember } from "./authorization.js";
+import { fetchCurrentBotMember } from "./fetch-coalescing.js";
 import {
   VOTING_PANEL_LIMITS,
   buildVotingPanelPayload,
@@ -170,11 +172,18 @@ export async function handleVotingPanelCommand(
 
   let message: Message;
   try {
-    message = await channel.send(
-      buildVotingPanelPayload(draft, {
-        phase: "creation",
-        allowEveryoneMention: canMentionEveryone,
-      }),
+    message = await observeLatency(
+      "discord.send",
+      "voting-panel",
+      () =>
+        channel.send(
+          buildVotingPanelPayload(draft, {
+            phase: "creation",
+            allowEveryoneMention: canMentionEveryone,
+          }),
+        ),
+      { guildId: runtime.guildId },
+      "info",
     );
   } catch {
     await replyPublic(
@@ -212,7 +221,6 @@ export async function handleVotingPanelCommand(
     return;
   }
 
-  await refreshVotingPanelMessage(message, saved).catch(() => undefined);
   recordVotingMetric(runtime, "panel.vote.create");
   await replyPublic(
     interaction,
@@ -264,7 +272,13 @@ export async function refreshVotingPanelMessage(
   message: EditableVotingMessage,
   panel: VotingPanelView,
 ): Promise<void> {
-  await message.edit(buildVotingPanelPayload(panel));
+  await observeLatency(
+    "discord.edit",
+    "voting-panel",
+    () => message.edit(buildVotingPanelPayload(panel)),
+    { guildId: panel.guildId },
+    "info",
+  );
 }
 
 /**
@@ -280,7 +294,13 @@ export async function deliverVotingPanelCompletion(
     phase: "completion",
     allowEveryoneMention: options.allowEveryoneMention,
   });
-  await message.edit({ ...payload, content: payload.content ?? null });
+  await observeLatency(
+    "discord.edit",
+    "voting-panel-completion",
+    () => message.edit({ ...payload, content: payload.content ?? null }),
+    { guildId: panel.guildId },
+    "info",
+  );
 }
 
 interface ParsedVotingCreateRequest {
@@ -427,16 +447,18 @@ async function handleOptionButton(
     await replyPrivate(interaction, selectionFailureMessage(result.status));
     return;
   }
-  await refreshVotingPanelMessage(interaction.message, result.panel).catch(
-    () => undefined,
-  );
-  const selection = storage.getVotingPanelSelection(voteId, member.id);
+  const selection = result.optionIds;
   await replyPrivate(
     interaction,
     current.multiSelect
       ? `Your selections: ${formatSelectedOptions(result.panel, selection)}.`
       : `Your vote: ${formatSelectedOptions(result.panel, selection)}.`,
   );
+  scheduleVotingBackground(runtime, async () => {
+    await refreshVotingPanelMessage(interaction.message, result.panel).catch(
+      () => undefined,
+    );
+  });
   recordVotingMetric(runtime, "panel.vote.select");
 }
 
@@ -584,22 +606,11 @@ async function handleManagementButton(
     return;
   }
 
-  const botMember = await getCurrentBotMember(guild);
   const channel = getInteractionVotingChannel(interaction);
-  const allowCompletionMention = Boolean(
-    parsed.kind === "close" &&
-    transition.panel.status === "completed" &&
-    transition.panel.mentionEveryoneOnCompletion &&
-    botMember &&
-    channel
-      ?.permissionsFor(botMember)
-      ?.has(PermissionFlagsBits.MentionEveryone),
-  );
-  await deliverVotingPanelCompletion(sourceMessage, transition.panel, {
-    allowEveryoneMention: allowCompletionMention,
-  }).catch(() => undefined);
+  const transitionedPanel = transition.panel;
+  if (!transitionedPanel) return;
   const action =
-    transition.panel.status === "completed" ? "completed" : "cancelled";
+    transitionedPanel.status === "completed" ? "completed" : "cancelled";
   if (transition.status === "transitioned") {
     recordVotingMetric(
       runtime,
@@ -612,6 +623,21 @@ async function handleManagementButton(
       : `This vote was already ${action}.`;
   if (fromPanelOptions) await replyPrivate(interaction, response);
   else await replyPublic(interaction, response);
+  scheduleVotingBackground(runtime, async () => {
+    const botMember = await getCurrentBotMember(guild);
+    const allowCompletionMention = Boolean(
+      parsed.kind === "close" &&
+      transitionedPanel.status === "completed" &&
+      transitionedPanel.mentionEveryoneOnCompletion &&
+      botMember &&
+      channel
+        ?.permissionsFor(botMember)
+        ?.has(PermissionFlagsBits.MentionEveryone),
+    );
+    await deliverVotingPanelCompletion(sourceMessage, transitionedPanel, {
+      allowEveryoneMention: allowCompletionMention,
+    }).catch(() => undefined);
+  });
 }
 
 async function resolveVotingManagementMessage(
@@ -870,7 +896,13 @@ function truncateVoterList(mentions: readonly string[]): string {
 
 async function deferPrivate(interaction: ButtonInteraction): Promise<void> {
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await observeLatency(
+      "discord.deferReply",
+      "deferReply",
+      () => interaction.deferReply({ flags: MessageFlags.Ephemeral }),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
   }
 }
 
@@ -878,7 +910,13 @@ async function deferPublic(
   interaction: ButtonInteraction | ChatInputCommandInteraction,
 ): Promise<void> {
   if (!interaction.deferred && !interaction.replied)
-    await interaction.deferReply();
+    await observeLatency(
+      "discord.deferReply",
+      "deferReply",
+      () => interaction.deferReply(),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
 }
 
 async function replyPrivate(
@@ -886,25 +924,46 @@ async function replyPrivate(
   content: string,
 ): Promise<void> {
   if (interaction.deferred && !interaction.replied) {
-    await interaction.editReply({
-      content,
-      allowedMentions: SAFE_ALLOWED_MENTIONS,
-    });
+    await observeLatency(
+      "discord.editReply",
+      "editReply",
+      () =>
+        interaction.editReply({
+          content,
+          allowedMentions: SAFE_ALLOWED_MENTIONS,
+        }),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
     return;
   }
   if (interaction.replied) {
-    await interaction.followUp({
-      content,
-      flags: MessageFlags.Ephemeral,
-      allowedMentions: SAFE_ALLOWED_MENTIONS,
-    });
+    await observeLatency(
+      "discord.followUp",
+      "followUp",
+      () =>
+        interaction.followUp({
+          content,
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: SAFE_ALLOWED_MENTIONS,
+        }),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
     return;
   }
-  await interaction.reply({
-    content,
-    flags: MessageFlags.Ephemeral,
-    allowedMentions: SAFE_ALLOWED_MENTIONS,
-  });
+  await observeLatency(
+    "discord.reply",
+    "reply",
+    () =>
+      interaction.reply({
+        content,
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: SAFE_ALLOWED_MENTIONS,
+      }),
+    { guildId: interaction.guildId ?? "dm" },
+    "info",
+  );
 }
 
 async function replyPrivateEmbed(
@@ -922,10 +981,22 @@ async function replyPrivatePayload(
   payload: MessageEditOptions & MessageCreateOptions,
 ): Promise<void> {
   if (interaction.deferred && !interaction.replied) {
-    await interaction.editReply(payload);
+    await observeLatency(
+      "discord.editReply",
+      "editReply",
+      () => interaction.editReply(payload),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
     return;
   }
-  await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
+  await observeLatency(
+    "discord.reply",
+    "reply",
+    () => interaction.reply({ ...payload, flags: MessageFlags.Ephemeral }),
+    { guildId: interaction.guildId ?? "dm" },
+    "info",
+  );
 }
 
 async function replyPublic(
@@ -933,20 +1004,41 @@ async function replyPublic(
   content: string,
 ): Promise<void> {
   if (interaction.deferred && !interaction.replied) {
-    await interaction.editReply({
-      content,
-      allowedMentions: SAFE_ALLOWED_MENTIONS,
-    });
+    await observeLatency(
+      "discord.editReply",
+      "editReply",
+      () =>
+        interaction.editReply({
+          content,
+          allowedMentions: SAFE_ALLOWED_MENTIONS,
+        }),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
     return;
   }
   if (interaction.replied) {
-    await interaction.followUp({
-      content,
-      allowedMentions: SAFE_ALLOWED_MENTIONS,
-    });
+    await observeLatency(
+      "discord.followUp",
+      "followUp",
+      () =>
+        interaction.followUp({
+          content,
+          allowedMentions: SAFE_ALLOWED_MENTIONS,
+        }),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
     return;
   }
-  await interaction.reply({ content, allowedMentions: SAFE_ALLOWED_MENTIONS });
+  await observeLatency(
+    "discord.reply",
+    "reply",
+    () =>
+      interaction.reply({ content, allowedMentions: SAFE_ALLOWED_MENTIONS }),
+    { guildId: interaction.guildId ?? "dm" },
+    "info",
+  );
 }
 
 function createVotingPanelId(): string {
@@ -958,6 +1050,19 @@ function recordVotingMetric(runtime: GuildRuntime, key: string): void {
     recordCommandMetric?: (metric: string) => void;
   };
   metrics.recordCommandMetric?.(key);
+}
+
+function scheduleVotingBackground(
+  runtime: GuildRuntime,
+  task: () => Promise<void>,
+): void {
+  if (runtime.runInBackground) {
+    runtime.runInBackground(task);
+    return;
+  }
+  void Promise.resolve()
+    .then(task)
+    .catch(() => undefined);
 }
 
 function errorMessage(error: unknown): string {

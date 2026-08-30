@@ -21,6 +21,7 @@ import {
   logWarn,
   type LogMetadata,
 } from "../logging.js";
+import { observeLatency } from "../latency.js";
 
 export const INTERACTION_ACK_DEADLINE_MS = 3_000;
 export const INTERACTION_STALE_CUTOFF_MS = 2_850;
@@ -291,7 +292,16 @@ export async function runBoundedAutocomplete(
     if (responsePromise) return responsePromise;
     claimed = true;
     try {
-      responsePromise = originalRespond(choices);
+      responsePromise = observeLatency(
+        "discord.respond",
+        "autocomplete",
+        () => originalRespond(choices),
+        {
+          guildId: interaction.guildId ?? "dm",
+          correlationId: lifecycle.correlationId,
+        },
+        "info",
+      );
     } catch (error) {
       claimed = false;
       throw error;
@@ -399,22 +409,43 @@ export async function replyWithUnexpectedInteractionError(
 
   try {
     if (interaction.deferred && !interaction.replied) {
-      await interaction.editReply({ content, allowedMentions: { parse: [] } });
+      await observeLatency(
+        "discord.editReply",
+        "editReply",
+        () =>
+          interaction.editReply({ content, allowedMentions: { parse: [] } }),
+        { guildId: interaction.guildId ?? "dm" },
+        "info",
+      );
       return true;
     }
     if (interaction.replied) {
-      await interaction.followUp({
-        content,
-        flags: MessageFlags.Ephemeral,
-        allowedMentions: { parse: [] },
-      });
+      await observeLatency(
+        "discord.followUp",
+        "followUp",
+        () =>
+          interaction.followUp({
+            content,
+            flags: MessageFlags.Ephemeral,
+            allowedMentions: { parse: [] },
+          }),
+        { guildId: interaction.guildId ?? "dm" },
+        "info",
+      );
       return true;
     }
-    await interaction.reply({
-      content,
-      flags: MessageFlags.Ephemeral,
-      allowedMentions: { parse: [] },
-    });
+    await observeLatency(
+      "discord.reply",
+      "reply",
+      () =>
+        interaction.reply({
+          content,
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        }),
+      { guildId: interaction.guildId ?? "dm" },
+      "info",
+    );
     return true;
   } catch (error) {
     const fallback = classifyError(error);
@@ -506,10 +537,19 @@ function prepareAtReceipt(
 
   // Calling deferReply begins the Discord acknowledgement request immediately,
   // before the tracked handler is placed on a promise continuation.
-  const acknowledgement = interaction.deferReply(
-    interactionUsesPublicDeferral(interaction)
-      ? {}
-      : { flags: MessageFlags.Ephemeral },
+  const acknowledgement = observeLatency(
+    "discord.deferReply",
+    "deferReply",
+    () =>
+      interaction.deferReply(
+        interactionUsesPublicDeferral(interaction)
+          ? {}
+          : { flags: MessageFlags.Ephemeral },
+      ),
+    {
+      guildId: interaction.guildId ?? "dm",
+    },
+    "info",
   );
   return acknowledgement.then(
     () => {

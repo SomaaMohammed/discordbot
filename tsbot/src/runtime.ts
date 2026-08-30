@@ -22,6 +22,9 @@ import {
   type PrivateMudaeWatchDeduplicationStore,
   type PrivateMudaeWatchLogger,
 } from "./mudae-watch-service.js";
+import { observeLatency, observeLatencySync } from "./latency.js";
+
+export type BackgroundWork = () => void | Promise<void>;
 
 export interface GuildRuntime {
   readonly guildId: string;
@@ -36,6 +39,7 @@ export interface GuildRuntime {
   refreshSettings: () => Promise<GuildSettings>;
   saveSettings: (settings: GuildSettings) => Promise<GuildSettings>;
   setEnabled: (enabled: boolean) => Promise<GuildSettings>;
+  runInBackground: (task: BackgroundWork) => void;
 }
 
 export interface BotRuntime {
@@ -96,6 +100,11 @@ export function createRuntime(
     ? createPrivateMudaeWatcher(storage, applicationRoot)
     : null;
   const guildGenerations = new Map<string, number>();
+  const guildRuntimeCache = new Map<string, GuildRuntime>();
+  const guildRuntimeLoads = new Map<
+    string,
+    { generation: number; promise: Promise<GuildRuntime | null> }
+  >();
   const interactionFormSnapshots = new Map<string, InteractionFormSnapshot>();
   const randomInt = (maxExclusive: number): number =>
     Math.floor(Math.random() * Math.max(maxExclusive, 1));
@@ -112,90 +121,168 @@ export function createRuntime(
     async forGuild(guildId: string): Promise<GuildRuntime | null> {
       const normalizedGuildId = String(guildId).trim();
       if (!/^\d{17,20}$/.test(normalizedGuildId)) return null;
-      const initialExpectation =
-        storage.getGuildEnableExpectation(normalizedGuildId);
-      if (!initialExpectation) return null;
+      const generation = guildGenerations.get(normalizedGuildId) ?? 0;
+      const cached = guildRuntimeCache.get(normalizedGuildId);
+      if (cached && cached.generation === generation) {
+        return observeLatency(
+          "runtime.forGuild",
+          "forGuild",
+          async () => cached,
+          { guildId: normalizedGuildId, cache: "hit" },
+        );
+      }
+      const existingLoad = guildRuntimeLoads.get(normalizedGuildId);
+      if (existingLoad?.generation === generation) {
+        return observeLatency(
+          "runtime.forGuild",
+          "forGuild",
+          () => existingLoad.promise,
+          { guildId: normalizedGuildId, cache: "coalesced" },
+        );
+      }
 
-      let persistedSettings = structuredClone(initialExpectation.settings);
-      let persistedLifecycleJoinedAt = initialExpectation.lifecycleJoinedAt;
-      let settings = structuredClone(initialExpectation.settings);
-      const guildStorage = storage.forGuild(normalizedGuildId);
-      let generation = guildGenerations.get(normalizedGuildId) ?? 0;
+      const promise = observeLatency(
+        "runtime.forGuild",
+        "forGuild",
+        async () => {
+          const initialExpectation = observeLatencySync(
+            "sqlite.operation",
+            "getGuildEnableExpectation",
+            () => storage.getGuildEnableExpectation(normalizedGuildId),
+            { guildId: normalizedGuildId },
+          );
+          if (!initialExpectation) return null;
 
-      const guildRuntime: GuildRuntime = {
-        guildId: normalizedGuildId,
-        botVersion: processConfig.botVersion,
-        storage: guildStorage,
-        settings,
-        get generation(): number {
-          return generation;
-        },
-        now: () => getNow(settings.timezone),
-        randomInt,
-        isCurrent(): boolean {
-          if ((guildGenerations.get(normalizedGuildId) ?? 0) !== generation) {
-            return false;
+          let persistedSettings = structuredClone(initialExpectation.settings);
+          let persistedLifecycleJoinedAt = initialExpectation.lifecycleJoinedAt;
+          let settings = structuredClone(initialExpectation.settings);
+          const guildStorage = storage.forGuild(normalizedGuildId);
+          let runtimeGeneration = generation;
+
+          const guildRuntime: GuildRuntime = {
+            guildId: normalizedGuildId,
+            botVersion: processConfig.botVersion,
+            storage: guildStorage,
+            settings,
+            get generation(): number {
+              return runtimeGeneration;
+            },
+            now: () => getNow(settings.timezone),
+            randomInt,
+            isCurrent(): boolean {
+              if (
+                (guildGenerations.get(normalizedGuildId) ?? 0) !==
+                runtimeGeneration
+              ) {
+                return false;
+              }
+              return observeLatencySync(
+                "sqlite.operation",
+                "isGuildCurrent",
+                () => storage.isGuildCurrent(normalizedGuildId),
+                { guildId: normalizedGuildId },
+              );
+            },
+            invalidate(): void {
+              runtime.invalidateGuild(normalizedGuildId);
+            },
+            refreshSettings(): Promise<GuildSettings> {
+              return observeLatency(
+                "runtime.refreshSettings",
+                "refreshSettings",
+                async () => {
+                  const refreshed = observeLatencySync(
+                    "sqlite.operation",
+                    "getGuildEnableExpectation",
+                    () => storage.getGuildEnableExpectation(normalizedGuildId),
+                    { guildId: normalizedGuildId },
+                  );
+                  if (!refreshed) {
+                    throw new Error(
+                      `Guild ${normalizedGuildId} is no longer registered in storage`,
+                    );
+                  }
+                  persistedSettings = structuredClone(refreshed.settings);
+                  persistedLifecycleJoinedAt = refreshed.lifecycleJoinedAt;
+                  settings = structuredClone(refreshed.settings);
+                  guildRuntime.settings = settings;
+                  return settings;
+                },
+                { guildId: normalizedGuildId },
+              );
+            },
+            async saveSettings(
+              nextSettings: GuildSettings,
+            ): Promise<GuildSettings> {
+              const saved = observeLatencySync(
+                "sqlite.operation",
+                "saveGuildSettings",
+                () =>
+                  storage.saveGuildSettings(
+                    normalizedGuildId,
+                    nextSettings,
+                    persistedSettings,
+                  ),
+                { guildId: normalizedGuildId },
+              );
+              runtime.invalidateGuild(normalizedGuildId);
+              runtimeGeneration =
+                guildGenerations.get(normalizedGuildId) ?? runtimeGeneration;
+              persistedSettings = structuredClone(saved);
+              settings = structuredClone(saved);
+              guildRuntime.settings = settings;
+              return settings;
+            },
+            async setEnabled(enabled: boolean): Promise<GuildSettings> {
+              const saved = observeLatencySync(
+                "sqlite.operation",
+                "setGuildEnabled",
+                () =>
+                  storage.setGuildEnabled(
+                    normalizedGuildId,
+                    enabled,
+                    enabled
+                      ? {
+                          settings: persistedSettings,
+                          lifecycleJoinedAt: persistedLifecycleJoinedAt,
+                        }
+                      : undefined,
+                  ),
+                { guildId: normalizedGuildId },
+              );
+              runtime.invalidateGuild(normalizedGuildId);
+              runtimeGeneration =
+                guildGenerations.get(normalizedGuildId) ?? runtimeGeneration;
+              persistedSettings = structuredClone(saved);
+              settings = structuredClone(saved);
+              guildRuntime.settings = settings;
+              return settings;
+            },
+            runInBackground(task: BackgroundWork): void {
+              storage.scheduleNonessential(task);
+            },
+          };
+          if ((guildGenerations.get(normalizedGuildId) ?? 0) === generation) {
+            guildRuntimeCache.set(normalizedGuildId, guildRuntime);
           }
-          const record = storage.getGuild(normalizedGuildId);
-          const currentSettings = storage.getGuildSettings(normalizedGuildId);
-          return Boolean(
-            record?.enabled &&
-            record.leftAt === null &&
-            currentSettings?.enabled,
-          );
+          return guildRuntime;
         },
-        invalidate(): void {
-          runtime.invalidateGuild(normalizedGuildId);
-        },
-        async refreshSettings(): Promise<GuildSettings> {
-          const refreshed =
-            storage.getGuildEnableExpectation(normalizedGuildId);
-          if (!refreshed) {
-            throw new Error(
-              `Guild ${normalizedGuildId} is no longer registered in storage`,
-            );
+        { guildId: normalizedGuildId },
+      );
+      guildRuntimeLoads.set(normalizedGuildId, { generation, promise });
+      void promise.then(
+        () => {
+          if (guildRuntimeLoads.get(normalizedGuildId)?.promise === promise) {
+            guildRuntimeLoads.delete(normalizedGuildId);
           }
-          persistedSettings = structuredClone(refreshed.settings);
-          persistedLifecycleJoinedAt = refreshed.lifecycleJoinedAt;
-          settings = structuredClone(refreshed.settings);
-          guildRuntime.settings = settings;
-          return settings;
         },
-        async saveSettings(
-          nextSettings: GuildSettings,
-        ): Promise<GuildSettings> {
-          const saved = storage.saveGuildSettings(
-            normalizedGuildId,
-            nextSettings,
-            persistedSettings,
-          );
-          runtime.invalidateGuild(normalizedGuildId);
-          generation = guildGenerations.get(normalizedGuildId) ?? generation;
-          persistedSettings = structuredClone(saved);
-          settings = structuredClone(saved);
-          guildRuntime.settings = settings;
-          return settings;
+        () => {
+          if (guildRuntimeLoads.get(normalizedGuildId)?.promise === promise) {
+            guildRuntimeLoads.delete(normalizedGuildId);
+          }
         },
-        async setEnabled(enabled: boolean): Promise<GuildSettings> {
-          const saved = storage.setGuildEnabled(
-            normalizedGuildId,
-            enabled,
-            enabled
-              ? {
-                  settings: persistedSettings,
-                  lifecycleJoinedAt: persistedLifecycleJoinedAt,
-                }
-              : undefined,
-          );
-          runtime.invalidateGuild(normalizedGuildId);
-          generation = guildGenerations.get(normalizedGuildId) ?? generation;
-          persistedSettings = structuredClone(saved);
-          settings = structuredClone(saved);
-          guildRuntime.settings = settings;
-          return settings;
-        },
-      };
-      return guildRuntime;
+      );
+      return promise;
     },
     interactionFormsForGuild(guildId: string): InteractionFormSnapshot | null {
       const normalizedGuildId = String(guildId).trim();
@@ -204,16 +291,26 @@ export function createRuntime(
     },
     invalidateGuild(guildId: string): void {
       const normalizedGuildId = String(guildId);
-      guildGenerations.set(
-        normalizedGuildId,
-        (guildGenerations.get(normalizedGuildId) ?? 0) + 1,
+      guildRuntimeCache.delete(normalizedGuildId);
+      const nextGeneration = (guildGenerations.get(normalizedGuildId) ?? 0) + 1;
+      guildGenerations.set(normalizedGuildId, nextGeneration);
+      storage.scheduleNonessential(() =>
+        refreshInteractionFormSnapshot(normalizedGuildId, nextGeneration),
       );
-      refreshInteractionFormSnapshot(normalizedGuildId);
     },
   };
 
-  const refreshInteractionFormSnapshot = (guildId: string): void => {
+  const refreshInteractionFormSnapshot = (
+    guildId: string,
+    expectedGeneration?: number,
+  ): void => {
     try {
+      if (
+        expectedGeneration !== undefined &&
+        (guildGenerations.get(guildId) ?? 0) !== expectedGeneration
+      ) {
+        return;
+      }
       const guild = storage.getGuild(guildId);
       const settings = storage.getGuildSettings(guildId);
       if (
@@ -252,6 +349,12 @@ export function createRuntime(
             guildStorage.listTicketDepartmentFields(department.departmentId),
           ),
         }));
+      if (
+        expectedGeneration !== undefined &&
+        (guildGenerations.get(guildId) ?? 0) !== expectedGeneration
+      ) {
+        return;
+      }
       interactionFormSnapshots.set(guildId, {
         guildId,
         suggestionConfiguration:

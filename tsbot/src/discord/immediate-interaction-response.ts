@@ -10,6 +10,7 @@ import {
   isDiscordInteractionAcknowledged,
   isDiscordInteractionExpired,
 } from "../errors.js";
+import { observeLatency } from "../latency.js";
 import type { BotRuntime, InteractionFormSnapshot } from "../runtime.js";
 import {
   buildApplicationFormSelect,
@@ -131,12 +132,22 @@ function recoverImmediateBuildFailure(
     // Start the acknowledgement before formatting the build failure for the
     // terminal. This is a single private recovery attempt; a rejected token is
     // never followed by another Discord response.
-    response = interaction.reply({
-      content:
-        "Superior could not prepare that control safely. Try the current command or panel again.",
-      flags: MessageFlags.Ephemeral,
-      allowedMentions: { parse: [] },
-    });
+    response = observeLatency(
+      "discord.reply",
+      "immediate-build-recovery",
+      () =>
+        interaction.reply({
+          content:
+            "Superior could not prepare that control safely. Try the current command or panel again.",
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: { parse: [] },
+        }),
+      {
+        guildId: interaction.guildId ?? "dm",
+        correlationId: lifecycle.correlationId,
+      },
+      "info",
+    );
   } catch (responseError) {
     lifecycle.fail(responseError, {
       stage: "immediate-build-recovery-reply",
@@ -553,7 +564,16 @@ function showModal(
   modal: Parameters<ButtonInteraction["showModal"]>[0],
   lifecycle: InteractionLifecycle,
 ): Promise<ImmediateInteractionResponse> {
-  const response = interaction.showModal(modal);
+  const response = observeLatency(
+    "discord.showModal",
+    "showModal",
+    () => interaction.showModal(modal),
+    {
+      guildId: interaction.guildId ?? "dm",
+      correlationId: lifecycle.correlationId,
+    },
+    "info",
+  );
   return response.then(
     () => {
       lifecycle.markAcknowledged("show-modal");
@@ -575,12 +595,22 @@ function replyPrivate(
   content: string,
   components: InteractionReplyOptions["components"] = [],
 ): Promise<ImmediateInteractionResponse> {
-  const response = interaction.reply({
-    content,
-    components,
-    flags: MessageFlags.Ephemeral,
-    allowedMentions: { parse: [] },
-  });
+  const response = observeLatency(
+    "discord.reply",
+    "reply",
+    () =>
+      interaction.reply({
+        content,
+        components,
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      }),
+    {
+      guildId: interaction.guildId ?? "dm",
+      correlationId: lifecycle.correlationId,
+    },
+    "info",
+  );
   return response.then(
     () => {
       lifecycle.markAcknowledged("immediate-private-reply");

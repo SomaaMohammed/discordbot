@@ -8,6 +8,7 @@ import {
   sanitizeGuildSettings,
   serializeGuildSettings,
 } from "../guild-settings.js";
+import { observeLatencySync } from "../latency.js";
 import type {
   CapabilityGrantResult,
   CapabilityRevokeResult,
@@ -317,6 +318,8 @@ export interface UserMetricReplacement {
 
 export class BotStorage {
   private db: Database.Database | null = null;
+  private nonessentialScheduler:
+    ((task: () => void | Promise<void>) => void) | null = null;
 
   public constructor(private readonly config: Pick<ProcessConfig, "dbFile">) {}
 
@@ -442,6 +445,24 @@ export class BotStorage {
     this.db = null;
   }
 
+  /**
+   * Hooks nonessential writes into the Discord event work lifecycle. Tests and
+   * offline CLIs intentionally run them inline when no scheduler is attached.
+   */
+  public setNonessentialScheduler(
+    scheduler: ((task: () => void | Promise<void>) => void) | null,
+  ): void {
+    this.nonessentialScheduler = scheduler;
+  }
+
+  public scheduleNonessential(task: () => void | Promise<void>): void {
+    if (this.nonessentialScheduler) {
+      this.nonessentialScheduler(task);
+      return;
+    }
+    task();
+  }
+
   public pruneMudaeWatchDeliveries(): number {
     return pruneAllMudaeWatchDeliveries(this.requireDatabase());
   }
@@ -451,7 +472,9 @@ export class BotStorage {
     if (!this.getGuild(normalized)) {
       throw new Error(`Guild ${normalized} is not configured`);
     }
-    return new GuildStorage(this.requireDatabase(), this, normalized);
+    return instrumentGuildStorage(
+      new GuildStorage(this.requireDatabase(), this, normalized),
+    );
   }
 
   public ensureGuild(
@@ -586,12 +609,60 @@ export class BotStorage {
   public getGuildEnableExpectation(
     guildId: string,
   ): GuildEnableExpectation | null {
+    const db = this.requireDatabase();
     const normalized = assertDiscordSnowflake(guildId);
-    const settings = this.getGuildSettings(normalized);
-    const guild = this.getGuild(normalized);
-    return settings && guild
-      ? { settings, lifecycleJoinedAt: guild.joinedAt }
-      : null;
+    const row = db
+      .prepare(
+        `SELECT guilds.enabled, guilds.joined_at,
+                guild_settings.settings_version, guild_settings.settings_json
+         FROM guilds
+         JOIN guild_settings ON guild_settings.guild_id = guilds.guild_id
+         WHERE guilds.guild_id = ?`,
+      )
+      .get(normalized) as
+      | {
+          enabled: number;
+          joined_at: string | null;
+          settings_version: number;
+          settings_json: string;
+        }
+      | undefined;
+    if (!row) return null;
+    const settings = parseGuildSettingsJson(row.settings_json);
+    if (
+      row.settings_version !== settings.version ||
+      settings.enabled !== Boolean(row.enabled)
+    ) {
+      throw new Error(`Guild ${normalized} enabled state is inconsistent`);
+    }
+    return { settings, lifecycleJoinedAt: row.joined_at };
+  }
+
+  public isGuildCurrent(guildId: string): boolean {
+    const db = this.requireDatabase();
+    const normalized = assertDiscordSnowflake(guildId);
+    const row = db
+      .prepare(
+        `SELECT guilds.enabled, guilds.left_at,
+                guild_settings.settings_version, guild_settings.settings_json
+         FROM guilds
+         JOIN guild_settings ON guild_settings.guild_id = guilds.guild_id
+         WHERE guilds.guild_id = ?`,
+      )
+      .get(normalized) as
+      | {
+          enabled: number;
+          left_at: string | null;
+          settings_version: number;
+          settings_json: string;
+        }
+      | undefined;
+    if (!row) return false;
+    const settings = parseGuildSettingsJson(row.settings_json);
+    if (row.settings_version !== settings.version) {
+      throw new Error(`Guild ${normalized} settings version is inconsistent`);
+    }
+    return Boolean(row.enabled && row.left_at === null && settings.enabled);
   }
 
   public saveGuildSettings(
@@ -3228,6 +3299,20 @@ export class GuildStorage {
   }
 
   public recordCommandMetric(commandName: string, success = true): void {
+    // Keep input validation synchronous even when the write is deferred.
+    commandMetricKey(commandName);
+    if (!success) commandMetricKey(commandName, true);
+    this.root.scheduleNonessential(() =>
+      observeLatencySync(
+        "sqlite.operation",
+        "recordCommandMetric",
+        () => this.recordCommandMetricNow(commandName, success),
+        { guildId: this.guildId },
+      ),
+    );
+  }
+
+  private recordCommandMetricNow(commandName: string, success: boolean): void {
     const usageKey = commandMetricKey(commandName);
     const failureKey = success ? null : commandMetricKey(commandName, true);
     const record = this.db.transaction(() => {
@@ -3248,7 +3333,18 @@ export class GuildStorage {
     metric: UserActivityMetric,
     amount = 1,
   ): number {
-    return this.metricsIncrement(buildUserMetricKey(userId, metric), amount);
+    const metricKey = buildUserMetricKey(userId, metric);
+    const normalizedAmount = normalizeMetricValue(amount);
+    let result = 0;
+    this.root.scheduleNonessential(() => {
+      result = observeLatencySync(
+        "sqlite.operation",
+        "incrementUserMetric",
+        () => this.metricsIncrement(metricKey, normalizedAmount),
+        { guildId: this.guildId },
+      );
+    });
+    return result;
   }
 
   public setUserMetric(
@@ -3381,6 +3477,30 @@ export class GuildStorage {
     update.immediate();
     return value;
   }
+}
+
+/** Adds per-operation SQLite timing without exposing SQL, keys, or payloads. */
+function instrumentGuildStorage(storage: GuildStorage): GuildStorage {
+  const wrappedMethods = new Map<PropertyKey, (...args: never[]) => unknown>();
+  return new Proxy(storage, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function" || property === "constructor") {
+        return value;
+      }
+      const existing = wrappedMethods.get(property);
+      if (existing) return existing;
+      const wrapped = (...args: never[]): unknown =>
+        observeLatencySync(
+          "sqlite.operation",
+          typeof property === "string" ? property : "method",
+          () => value.apply(target, args),
+          { guildId: target.guildId },
+        );
+      wrappedMethods.set(property, wrapped);
+      return wrapped;
+    },
+  });
 }
 
 function parseGuildRow(row: GuildRow): GuildRecord {

@@ -19,6 +19,7 @@ import {
   handleStringSelectMenuInteraction,
 } from "./commands.js";
 import { logClassifiedError, logError, logInfo, logWarn } from "../logging.js";
+import { observeLatency } from "../latency.js";
 import { wireMessageRuntime } from "../message-runtime.js";
 import type { BotRuntime } from "../runtime.js";
 import { synchronizeCommands } from "./registration.js";
@@ -74,9 +75,21 @@ export function createDiscordClient(
     partials: [Partials.Channel, Partials.Message, Partials.Reaction],
     allowedMentions: { parse: [], repliedUser: false },
   });
+  instrumentDiscordRestLatency(client);
   const workTracker = new AsyncWorkTracker();
   const eventLoopDiagnostics = new EventLoopDiagnostics();
   const votingPanelScheduler = createVotingPanelScheduler(client, runtime);
+  runtime.storage?.setNonessentialScheduler?.((task) => {
+    const tracked = workTracker.run(async () => {
+      await task();
+    });
+    void tracked.catch((error) => {
+      logClassifiedError("background-work", error, {
+        stage: "nonessential-task",
+        outcome: "failed",
+      });
+    });
+  });
   const workLifecycle: DiscordClientWorkLifecycle = {
     stop(): void {
       workTracker.stopAccepting();
@@ -651,6 +664,48 @@ export function recordGuildAvailable(
   }
   runtime.invalidateGuild(guildId);
   return { record, rejoined };
+}
+
+/**
+ * Measures the REST calls that implement Discord replies, edits, and sends.
+ * Route strings are used only for local classification; neither routes (which
+ * can contain interaction tokens) nor request bodies are emitted.
+ */
+function instrumentDiscordRestLatency(client: Client): void {
+  const originalRequest = client.rest.request.bind(client.rest);
+  type RestRequest = Parameters<typeof client.rest.request>[0];
+  client.rest.request = ((request: RestRequest) => {
+    const operation = classifyDiscordRestOperation(request);
+    if (!operation) return originalRequest(request);
+    return observeLatency(
+      "discord.rest",
+      operation,
+      () => originalRequest(request),
+      {},
+    );
+  }) as typeof client.rest.request;
+}
+
+function classifyDiscordRestOperation(
+  request: Parameters<Client["rest"]["request"]>[0],
+): "reply" | "edit" | "follow-up" | "send" | "delete" | null {
+  const route = String(request.fullRoute);
+  const method = request.method.toUpperCase();
+  if (route.includes("/interactions/") && route.endsWith("/callback")) {
+    return "reply";
+  }
+  if (route.includes("/webhooks/") && route.includes("/messages/@original")) {
+    return method === "DELETE" ? "delete" : "edit";
+  }
+  if (route.includes("/webhooks/")) {
+    return method === "DELETE" ? "delete" : "follow-up";
+  }
+  if (route.includes("/channels/") && route.includes("/messages")) {
+    if (method === "POST") return "send";
+    if (method === "PATCH") return "edit";
+    if (method === "DELETE") return "delete";
+  }
+  return null;
 }
 
 function hasGuildJoinChanged(

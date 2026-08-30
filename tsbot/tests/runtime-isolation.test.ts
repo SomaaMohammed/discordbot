@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRuntime, type BotRuntime } from "../src/runtime.js";
 import { GuildSettingsConflictError } from "../src/storage/db.js";
 
@@ -61,13 +61,60 @@ describe("runtime tenant isolation", () => {
 
     expect(oldA?.isCurrent()).toBe(false);
     expect(oldB?.isCurrent()).toBe(true);
-    expect((await runtime.forGuild(GUILD_A))?.isCurrent()).toBe(true);
+    const refreshedA = await runtime.forGuild(GUILD_A);
+    expect(refreshedA?.isCurrent()).toBe(true);
+    expect(refreshedA).not.toBe(oldA);
+  });
+
+  it("reuses the same runtime instance until its guild is invalidated", async () => {
+    const runtime = createTestRuntime();
+    approveAndEnable(runtime, GUILD_A);
+
+    const first = await runtime.forGuild(GUILD_A);
+    const second = await runtime.forGuild(GUILD_A);
+
+    expect(second).toBe(first);
+    runtime.invalidateGuild(GUILD_A);
+    expect(await runtime.forGuild(GUILD_A)).not.toBe(first);
+  });
+
+  it("coalesces concurrent runtime loads for one guild", async () => {
+    const runtime = createTestRuntime();
+    approveAndEnable(runtime, GUILD_A);
+    const load = vi.spyOn(runtime.storage, "getGuildEnableExpectation");
+
+    const loaded = await Promise.all([
+      runtime.forGuild(GUILD_A),
+      runtime.forGuild(GUILD_A),
+      runtime.forGuild(GUILD_A),
+    ]);
+
+    expect(loaded[0]).not.toBeNull();
+    expect(loaded[1]).toBe(loaded[0]);
+    expect(loaded[2]).toBe(loaded[0]);
+    expect(load).toHaveBeenCalledOnce();
+  });
+
+  it("invalidates the cached runtime after a settings write", async () => {
+    const runtime = createTestRuntime();
+    approveAndEnable(runtime, GUILD_A);
+    const first = await runtime.forGuild(GUILD_A);
+
+    await first!.saveSettings({
+      ...first!.settings,
+      timezone: "Europe/London",
+    });
+    const refreshed = await runtime.forGuild(GUILD_A);
+
+    expect(refreshed).not.toBe(first);
+    expect(refreshed?.settings.timezone).toBe("Europe/London");
   });
 
   it("detects optimistic settings conflicts instead of overwriting", async () => {
     const runtime = createTestRuntime();
     approveAndEnable(runtime, GUILD_A);
     const first = await runtime.forGuild(GUILD_A);
+    runtime.invalidateGuild(GUILD_A);
     const second = await runtime.forGuild(GUILD_A);
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();

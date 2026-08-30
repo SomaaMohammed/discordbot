@@ -5,6 +5,10 @@ import {
   type Role,
 } from "discord.js";
 import type { GuildCapability, RoleCapabilityGrant } from "./capabilities.js";
+import {
+  fetchGuildMemberCoalesced,
+  fetchGuildRoleCoalesced,
+} from "./fetch-coalescing.js";
 
 export type CapabilityAuthorizationGrant =
   | "owner"
@@ -90,9 +94,10 @@ export async function fetchVerifiedGuildMember(
   if (!guild || !userId) {
     return { valid: false, member: null, reason: "member-unavailable" };
   }
-  const member = await guild.members
-    .fetch({ user: userId, cache: true, force: true })
-    .catch(() => null);
+  const member = await fetchGuildMemberCoalesced(guild, userId, {
+    cache: true,
+    force: true,
+  });
   if (!member) {
     return { valid: false, member: null, reason: "member-unavailable" };
   }
@@ -323,9 +328,7 @@ export async function fetchAndValidateRole(
   guild: Guild,
   roleId: string,
 ): Promise<VerifiedRoleResult> {
-  const role = await guild.roles
-    .fetch(roleId, { cache: true, force: true })
-    .catch(() => null);
+  const role = await fetchGuildRoleCoalesced(guild, roleId);
   if (!role) return { valid: false, reason: "role-unavailable" };
   if (role.guild.id !== guild.id || role.id !== roleId) {
     return { valid: false, reason: "role-mismatch" };
