@@ -755,8 +755,7 @@ function normalizeVotingPanelStatus(value: unknown): VotingPanelStatus {
  */
 function isVotingPanelExpired(panel: VotingPanel): boolean {
   return (
-    panel.deadlineAt !== null &&
-    Date.parse(panel.deadlineAt) <= Date.now()
+    panel.deadlineAt !== null && Date.parse(panel.deadlineAt) <= Date.now()
   );
 }
 

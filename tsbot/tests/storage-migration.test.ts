@@ -1198,10 +1198,7 @@ describe("explicit schema migration to v11", () => {
         migrated
           .prepare("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([
-        { version: 10 },
-        { version: 11 },
-      ]);
+      ).toEqual([{ version: 10 }, { version: 11 }]);
       expect(schemaObjects(migrated, "table")).toEqual(
         [...V11_TABLE_NAMES].sort(),
       );

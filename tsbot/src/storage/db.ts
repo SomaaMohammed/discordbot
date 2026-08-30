@@ -1817,7 +1817,12 @@ export class GuildStorage {
     actorId: string,
     timestamp: string,
   ): VotingPanelTransitionResult {
-    return this.voting.transitionVotingPanel(voteId, status, actorId, timestamp);
+    return this.voting.transitionVotingPanel(
+      voteId,
+      status,
+      actorId,
+      timestamp,
+    );
   }
 
   public getModerationConfiguration(): ModerationConfiguration | null {

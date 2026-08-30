@@ -109,11 +109,7 @@ export async function handleSuggestionCommand(
 
   if (subcommand === "panel") {
     if (
-      !(await requireCapability(
-        interaction,
-        runtime,
-        "suggestions.configure",
-      ))
+      !(await requireCapability(interaction, runtime, "suggestions.configure"))
     ) {
       return;
     }

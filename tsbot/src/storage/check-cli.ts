@@ -36,7 +36,9 @@ function parseArguments(argv: string[]): CheckArguments {
     throw new Error(`Unknown or incomplete db:check option: ${argument}`);
   }
   if (!dbFile || expect === undefined) {
-    throw new Error("Usage: db:check --db <path> --expect 2|3|4|5|6|7|8|9|10|11");
+    throw new Error(
+      "Usage: db:check --db <path> --expect 2|3|4|5|6|7|8|9|10|11",
+    );
   }
   return { dbFile, expect };
 }

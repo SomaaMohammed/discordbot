@@ -6422,8 +6422,7 @@ function hasCascadeForeignKey(
 ): boolean {
   const pairs = rows
     .filter(
-      (row) =>
-        row.table === table && row.on_delete.toUpperCase() === "CASCADE",
+      (row) => row.table === table && row.on_delete.toUpperCase() === "CASCADE",
     )
     .map((row) => `${row.from}:${row.to}`)
     .sort();
