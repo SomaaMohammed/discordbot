@@ -671,7 +671,7 @@ export function recordGuildAvailable(
  * Route strings are used only for local classification; neither routes (which
  * can contain interaction tokens) nor request bodies are emitted.
  */
-function instrumentDiscordRestLatency(client: Client): void {
+export function instrumentDiscordRestLatency(client: Client): void {
   const originalRequest = client.rest.request.bind(client.rest);
   type RestRequest = Parameters<typeof client.rest.request>[0];
   client.rest.request = ((request: RestRequest) => {

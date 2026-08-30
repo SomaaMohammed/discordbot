@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { observeLatency, observeLatencySync } from "../src/latency.js";
-import { fetchCurrentBotMember } from "../src/discord/fetch-coalescing.js";
+import {
+  fetchCurrentBotMember,
+  fetchGuildMemberCoalesced,
+  fetchGuildMemberCoalescedOrThrow,
+  fetchGuildRoleCoalesced,
+} from "../src/discord/fetch-coalescing.js";
+import { instrumentDiscordRestLatency } from "../src/discord/bot.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -91,5 +97,110 @@ describe("latency instrumentation", () => {
 
     expect(fetchMe).toHaveBeenCalledTimes(2);
     expect(fetchMe.mock.calls).toEqual([[], [{ cache: true, force: true }]]);
+  });
+
+  it("coalesces overlapping member and role reads without weakening fresh reads", async () => {
+    let releaseMember: ((value: unknown) => void) | undefined;
+    let releaseRole: ((value: unknown) => void) | undefined;
+    const member = { id: "223456789012345678" };
+    const role = { id: "323456789012345678" };
+    const fetchMember = vi.fn(
+      () =>
+        new Promise<unknown>((resolve) => {
+          releaseMember = resolve;
+        }),
+    );
+    const fetchRole = vi.fn(
+      () =>
+        new Promise<unknown>((resolve) => {
+          releaseRole = resolve;
+        }),
+    );
+    const guild = {
+      id: "123456789012345678",
+      members: { fetch: fetchMember },
+      roles: { fetch: fetchRole },
+    } as never;
+
+    const memberReads = Promise.all([
+      fetchGuildMemberCoalesced(guild, member.id),
+      fetchGuildMemberCoalesced(guild, member.id),
+    ]);
+    const roleReads = Promise.all([
+      fetchGuildRoleCoalesced(guild, role.id),
+      fetchGuildRoleCoalesced(guild, role.id),
+    ]);
+    expect(fetchMember).toHaveBeenCalledOnce();
+    expect(fetchRole).toHaveBeenCalledOnce();
+    releaseMember?.(member);
+    releaseRole?.(role);
+    await expect(memberReads).resolves.toEqual([member, member]);
+    await expect(roleReads).resolves.toEqual([role, role]);
+
+    fetchMember.mockResolvedValue(member);
+    fetchRole.mockResolvedValue(role);
+    await Promise.all([
+      fetchGuildMemberCoalesced(guild, member.id, {
+        cache: true,
+        force: false,
+      }),
+      fetchGuildMemberCoalesced(guild, member.id, { cache: true, force: true }),
+      fetchGuildRoleCoalesced(guild, role.id, {
+        cache: true,
+        force: false,
+      }),
+      fetchGuildRoleCoalesced(guild, role.id, { cache: true, force: true }),
+    ]);
+    expect(fetchMember).toHaveBeenCalledTimes(3);
+    expect(fetchRole).toHaveBeenCalledTimes(3);
+  });
+
+  it("preserves strict member-fetch errors while recording safe latency metadata", async () => {
+    vi.stubEnv("SUPERIOR_LOG_LEVEL", "DEBUG");
+    const output = vi
+      .spyOn(console, "debug")
+      .mockImplementation(() => undefined);
+    const secret = "private-member-fetch-error";
+    const guild = {
+      id: "123456789012345678",
+      members: {
+        fetch: vi.fn(() =>
+          Promise.reject(Object.assign(new Error(secret), { code: 10_007 })),
+        ),
+      },
+    } as never;
+
+    await expect(
+      fetchGuildMemberCoalescedOrThrow(guild, "223456789012345678"),
+    ).rejects.toMatchObject({ code: 10_007 });
+
+    const line = String(output.mock.calls.at(-1)?.[0]);
+    expect(line).toContain('stage="authorization.member.fetch"');
+    expect(line).toContain('outcome="failed"');
+    expect(line).not.toContain(secret);
+  });
+
+  it("instruments Discord REST edits without logging routes or bodies", async () => {
+    vi.stubEnv("SUPERIOR_LOG_LEVEL", "DEBUG");
+    const output = vi
+      .spyOn(console, "debug")
+      .mockImplementation(() => undefined);
+    const secret = "interaction-token-or-user-content";
+    const request = vi.fn(() => Promise.resolve({ ok: true }));
+    const client = { rest: { request } } as unknown as {
+      rest: { request: (input: unknown) => Promise<unknown> };
+    };
+
+    instrumentDiscordRestLatency(client as never);
+    await client.rest.request({
+      fullRoute: `/webhooks/${secret}/messages/@original`,
+      method: "PATCH",
+      body: { content: secret },
+    });
+
+    const line = String(output.mock.calls.at(-1)?.[0]);
+    expect(line).toContain('stage="discord.rest"');
+    expect(line).toContain('operation="edit"');
+    expect(line).not.toContain(secret);
   });
 });

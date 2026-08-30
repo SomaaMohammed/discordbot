@@ -36,6 +36,7 @@ import { safeDisplayText } from "./forms.js";
 import {
   fetchCurrentBotMember,
   fetchGuildMemberCoalesced,
+  fetchGuildMemberCoalescedOrThrow,
   fetchGuildRoleCoalesced,
 } from "./fetch-coalescing.js";
 
@@ -1990,8 +1991,7 @@ async function reconcileExpiredTimeoutCases(
     candidates.map((record) => record.targetUserId),
   )) {
     try {
-      const member = await guild.members.fetch({
-        user: targetId,
+      const member = await fetchGuildMemberCoalescedOrThrow(guild, targetId, {
         cache: true,
         force: true,
       });

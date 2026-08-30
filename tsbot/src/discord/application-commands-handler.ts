@@ -31,7 +31,10 @@ import {
   fetchAndValidateRole,
 } from "./authorization.js";
 import { inspectContentDestinationBoundary } from "./content-destination-boundary.js";
-import { fetchGuildMemberCoalesced } from "./fetch-coalescing.js";
+import {
+  fetchGuildMemberCoalesced,
+  fetchGuildRoles,
+} from "./fetch-coalescing.js";
 import {
   applicationStatusMessage,
   createApplicationSubmitModal,
@@ -640,7 +643,7 @@ function listApplicationReviewGrants(
 async function fetchCurrentGuildRoles(
   guild: Guild,
 ): Promise<Map<string, Role> | null> {
-  const roles = await guild.roles.fetch().catch(() => null);
+  const roles = await fetchGuildRoles(guild);
   return roles &&
     [...roles.values()].every((role) => role.guild.id === guild.id)
     ? roles

@@ -38,7 +38,10 @@ import {
 } from "./report-delivery.js";
 import { parseReportOpenCustomId } from "./panel-theme.js";
 import { inspectSafetyWorkflowResources } from "./safety-permissions.js";
-import { fetchGuildMemberCoalesced } from "./fetch-coalescing.js";
+import {
+  fetchGuildMemberCoalesced,
+  fetchGuildMemberCoalescedOrThrow,
+} from "./fetch-coalescing.js";
 
 const SNOWFLAKE = /^\d{17,20}$/u;
 const LINKABLE_REPORT_CASE_ACTIONS = new Set([
@@ -930,8 +933,7 @@ async function fetchReportDecisionTarget(
   id: string,
 ): Promise<ReportDecisionTarget> {
   try {
-    const member = await guild.members.fetch({
-      user: id,
+    const member = await fetchGuildMemberCoalescedOrThrow(guild, id, {
       cache: true,
       force: true,
     });
@@ -959,8 +961,7 @@ async function fetchMemberForClaimRecovery(
   | { status: "absent" | "unavailable"; member: null }
 > {
   try {
-    const member = await guild.members.fetch({
-      user: id,
+    const member = await fetchGuildMemberCoalescedOrThrow(guild, id, {
       cache: true,
       force: true,
     });

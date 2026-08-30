@@ -9,7 +9,11 @@ import type {
   TicketDepartment,
   TicketDepartmentField,
 } from "./types.js";
-import { BotStorage, type GuildStorage } from "./storage/db.js";
+import {
+  BotStorage,
+  instrumentBotStorage,
+  type GuildStorage,
+} from "./storage/db.js";
 import { logDebug, logError, logInfo, logWarn } from "./logging.js";
 import { CURRENT_SCHEMA_VERSION } from "./storage/schema.js";
 import { loadPrivateMudaeWatchConfig } from "./mudae-watch-config.js";
@@ -79,7 +83,9 @@ export function createRuntime(
   processConfig: ProcessConfig,
   applicationRoot?: string,
 ): BotRuntime {
-  const storage = new BotStorage({ dbFile: processConfig.dbFile });
+  const storage = instrumentBotStorage(
+    new BotStorage({ dbFile: processConfig.dbFile }),
+  );
   storage.initStorage();
   logInfo("storage", "Database opened and validated", {
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -436,6 +442,9 @@ const RUNTIME_INVALIDATING_GUILD_STORAGE_METHODS = new Set<PropertyKey>([
   "createRoleMenuPost",
   "upsertRoleMenuPost",
   "setRoleMenuPostState",
+  "invalidateRoleMenuRole",
+  "markRoleMenuChannelMissing",
+  "markRoleMenuMessageMissing",
   "upsertModerationConfiguration",
   "disableModerationConfiguration",
   "upsertAntiSpamRule",
@@ -448,6 +457,10 @@ const RUNTIME_INVALIDATING_GUILD_STORAGE_METHODS = new Set<PropertyKey>([
   "revokeRoleCapability",
   "configureRestrictedPingRole",
   "setRestrictedPingRoleEnabled",
+  "addRestrictedPingMapping",
+  "removeRestrictedPingMapping",
+  "cleanupRestrictedPingRole",
+  "cleanupRestrictedPingChannel",
   "createTicketDepartment",
   "updateTicketDepartment",
   "setTicketDepartmentEnabled",

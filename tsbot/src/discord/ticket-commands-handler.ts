@@ -16,6 +16,7 @@ import type {
   TicketRecord,
 } from "../types.js";
 import { authorizeSupportRoleOrCapability } from "./authorization.js";
+import { fetchGuildMemberCoalescedOrThrow } from "./fetch-coalescing.js";
 import { postTicketLauncher } from "./preset-panels.js";
 import {
   buildTicketWelcomePayload,
@@ -1087,8 +1088,7 @@ async function fetchTicketOpener(
   | { status: "missing" | "unavailable"; member: null }
 > {
   try {
-    const member = await guild.members.fetch({
-      user: openerId,
+    const member = await fetchGuildMemberCoalescedOrThrow(guild, openerId, {
       cache: true,
       force: true,
     });

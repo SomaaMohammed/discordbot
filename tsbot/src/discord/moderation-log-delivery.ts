@@ -22,6 +22,7 @@ import {
   createSuperiorEmbed,
 } from "./panel-theme.js";
 import { inspectModerationLogChannel } from "./safety-permissions.js";
+import { fetchGuildMemberCoalescedOrThrow } from "./fetch-coalescing.js";
 
 interface ModerationLogStorage {
   getModerationConfiguration(): {
@@ -417,8 +418,7 @@ async function resolveCaseDisplays(
   const resolve = async (userId: string): Promise<string | null> => {
     let member = null;
     try {
-      member = await guild.members.fetch({
-        user: userId,
+      member = await fetchGuildMemberCoalescedOrThrow(guild, userId, {
         cache: true,
         force: true,
       });

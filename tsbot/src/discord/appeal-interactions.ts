@@ -37,6 +37,7 @@ import { runModerationTargetAction } from "./moderation-action-queue.js";
 import {
   fetchCurrentBotMember,
   fetchGuildMemberCoalesced,
+  fetchGuildMemberCoalescedOrThrow,
 } from "./fetch-coalescing.js";
 
 const ELIGIBLE_ACTIONS = new Set(["warning", "timeout", "kick", "ban"]);
@@ -1516,8 +1517,7 @@ async function fetchAppealReviewTarget(
   id: string,
 ): Promise<AppealReviewTarget> {
   try {
-    const member = await guild.members.fetch({
-      user: id,
+    const member = await fetchGuildMemberCoalescedOrThrow(guild, id, {
       cache: true,
       force: true,
     });
@@ -1545,8 +1545,7 @@ async function fetchMemberForClaimRecovery(
   | { status: "absent" | "unavailable"; member: null }
 > {
   try {
-    const member = await guild.members.fetch({
-      user: id,
+    const member = await fetchGuildMemberCoalescedOrThrow(guild, id, {
       cache: true,
       force: true,
     });

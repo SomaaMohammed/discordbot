@@ -1,20 +1,23 @@
-import type { Guild, GuildMember, Role } from "discord.js";
+import type { Collection, Guild, GuildMember, Role } from "discord.js";
 import { observeLatency } from "../latency.js";
 
-type MemberFetchOptions = {
+export type GuildFetchOptions = {
   readonly cache?: boolean;
   readonly force?: boolean;
   readonly input?: "id" | "object";
 };
 
-const memberRequests = new WeakMap<
-  Guild,
-  Map<string, Promise<GuildMember | null>>
->();
+type FetchCacheStatus = "miss" | "coalesced";
+type RequestResult<T> = {
+  readonly request: Promise<T>;
+  readonly cache: FetchCacheStatus;
+};
+
+const memberRequests = new WeakMap<Guild, Map<string, Promise<GuildMember>>>();
 const roleRequests = new WeakMap<Guild, Map<string, Promise<Role | null>>>();
 const botMemberRequests = new WeakMap<
   Guild,
-  Map<"forced" | "normal", Promise<GuildMember | null>>
+  Map<"forced" | "normal", Promise<GuildMember>>
 >();
 
 /**
@@ -24,8 +27,37 @@ const botMemberRequests = new WeakMap<
 export function fetchGuildMemberCoalesced(
   guild: Guild,
   userId: string,
-  options: MemberFetchOptions = { cache: true, force: true },
+  options: GuildFetchOptions = { cache: true, force: true },
 ): Promise<GuildMember | null> {
+  const { request, cache } = getMemberRequest(guild, userId, options);
+  return observeLatency(
+    "authorization.member.fetch",
+    "guild-member",
+    () => request.catch(() => null),
+    { guildId: guild.id, cache },
+  );
+}
+
+/** Preserves Discord errors for recovery paths that distinguish missing members. */
+export function fetchGuildMemberCoalescedOrThrow(
+  guild: Guild,
+  userId: string,
+  options: GuildFetchOptions = { cache: true, force: true },
+): Promise<GuildMember> {
+  const { request, cache } = getMemberRequest(guild, userId, options);
+  return observeLatency(
+    "authorization.member.fetch",
+    "guild-member",
+    () => request,
+    { guildId: guild.id, cache },
+  );
+}
+
+function getMemberRequest(
+  guild: Guild,
+  userId: string,
+  options: GuildFetchOptions,
+): RequestResult<GuildMember> {
   let requests = memberRequests.get(guild);
   if (!requests) {
     requests = new Map();
@@ -33,26 +65,49 @@ export function fetchGuildMemberCoalesced(
   }
   const requestKey = `${userId}:${options.force === true ? "forced" : "normal"}:${options.input ?? "object"}`;
   const existing = requests.get(requestKey);
-  const request =
-    existing ??
-    fetchMember(guild, userId, options).finally(() => {
-      if (requests?.get(requestKey) === request) requests.delete(requestKey);
-    });
-  if (!existing) requests.set(requestKey, request);
-  return observeLatency(
-    "authorization.member.fetch",
-    "guild-member",
-    () => request,
-    { guildId: guild.id, cache: existing ? "coalesced" : "miss" },
-  );
+  if (existing) return { request: existing, cache: "coalesced" };
+  const request = fetchMember(guild, userId, options).finally(() => {
+    if (requests?.get(requestKey) === request) requests.delete(requestKey);
+  });
+  requests.set(requestKey, request);
+  return { request, cache: "miss" };
 }
 
 /** Coalesces only overlapping role reads; callers choose fresh or cache-safe reads. */
 export function fetchGuildRoleCoalesced(
   guild: Guild,
   roleId: string,
-  options: MemberFetchOptions = { cache: true, force: true },
+  options: GuildFetchOptions = { cache: true, force: true },
 ): Promise<Role | null> {
+  const { request, cache } = getRoleRequest(guild, roleId, options);
+  return observeLatency(
+    "authorization.role.fetch",
+    "guild-role",
+    () => request.catch(() => null),
+    { guildId: guild.id, cache },
+  );
+}
+
+/** Preserves Discord errors for role recovery paths that inspect error codes. */
+export function fetchGuildRoleCoalescedOrThrow(
+  guild: Guild,
+  roleId: string,
+  options: GuildFetchOptions = { cache: true, force: true },
+): Promise<Role | null> {
+  const { request, cache } = getRoleRequest(guild, roleId, options);
+  return observeLatency(
+    "authorization.role.fetch",
+    "guild-role",
+    () => request,
+    { guildId: guild.id, cache },
+  );
+}
+
+function getRoleRequest(
+  guild: Guild,
+  roleId: string,
+  options: GuildFetchOptions,
+): RequestResult<Role | null> {
   let requests = roleRequests.get(guild);
   if (!requests) {
     requests = new Map();
@@ -60,23 +115,42 @@ export function fetchGuildRoleCoalesced(
   }
   const requestKey = `${roleId}:${options.force === true ? "forced" : "normal"}`;
   const existing = requests.get(requestKey);
-  const request =
-    existing ??
-    fetchRole(guild, roleId, options).finally(() => {
-      if (requests?.get(requestKey) === request) requests.delete(requestKey);
-    });
-  if (!existing) requests.set(requestKey, request);
+  if (existing) return { request: existing, cache: "coalesced" };
+  const request = fetchRole(guild, roleId, options).finally(() => {
+    if (requests?.get(requestKey) === request) requests.delete(requestKey);
+  });
+  requests.set(requestKey, request);
+  return { request, cache: "miss" };
+}
+
+/** Measures a bulk member read without introducing a completed member cache. */
+export function fetchGuildMembers(
+  guild: Guild,
+): Promise<Collection<string, GuildMember> | null> {
+  return observeLatency(
+    "authorization.member.fetch",
+    "guild-members",
+    () => guild.members.fetch(),
+    { guildId: guild.id, cache: "miss" },
+  ).catch(() => null);
+}
+
+/** Measures a bulk role read without introducing a completed role cache. */
+export function fetchGuildRoles(
+  guild: Guild,
+): Promise<Collection<string, Role> | null> {
   return observeLatency(
     "authorization.role.fetch",
-    "guild-role",
-    () => request,
-    { guildId: guild.id, cache: existing ? "coalesced" : "miss" },
-  );
+    "guild-roles",
+    () => guild.roles.fetch(),
+    { guildId: guild.id, cache: "miss" },
+  ).catch(() => null);
 }
 
 /**
  * Uses the already-known bot member when callers permit it, otherwise shares
- * one in-flight fetch. No completed forced fetch is retained as an auth cache.
+ * one in-flight fetch. Forced and non-forced requests never share a promise.
+ * No completed forced fetch is retained as an auth cache.
  */
 export function fetchCurrentBotMember(
   guild: Guild,
@@ -100,15 +174,13 @@ export function fetchCurrentBotMember(
   const request =
     existing ??
     fetchBotMember(guild, options.force === true).finally(() => {
-      if (requests?.get(requestKey) === request) {
-        requests.delete(requestKey);
-      }
+      if (requests?.get(requestKey) === request) requests.delete(requestKey);
     });
   if (!existing) requests.set(requestKey, request);
   return observeLatency(
     "authorization.bot-member.fetch",
     "current-bot-member",
-    () => request,
+    () => request.catch(() => null),
     { guildId: guild.id, cache: existing ? "coalesced" : "miss" },
   );
 }
@@ -116,39 +188,30 @@ export function fetchCurrentBotMember(
 function fetchMember(
   guild: Guild,
   userId: string,
-  options: MemberFetchOptions,
-): Promise<GuildMember | null> {
-  const request =
-    options.input === "id"
-      ? guild.members.fetch(userId)
-      : guild.members.fetch({
-          user: userId,
-          cache: options.cache ?? true,
-          force: options.force ?? true,
-        });
-  return request.catch(() => null);
+  options: GuildFetchOptions,
+): Promise<GuildMember> {
+  return options.input === "id"
+    ? guild.members.fetch(userId)
+    : guild.members.fetch({
+        user: userId,
+        cache: options.cache ?? true,
+        force: options.force ?? true,
+      });
 }
 
 function fetchRole(
   guild: Guild,
   roleId: string,
-  options: MemberFetchOptions,
+  options: GuildFetchOptions,
 ): Promise<Role | null> {
-  return guild.roles
-    .fetch(roleId, {
-      cache: options.cache ?? true,
-      force: options.force ?? true,
-    })
-    .catch(() => null);
+  return guild.roles.fetch(roleId, {
+    cache: options.cache ?? true,
+    force: options.force ?? true,
+  });
 }
 
-function fetchBotMember(
-  guild: Guild,
-  force: boolean,
-): Promise<GuildMember | null> {
-  return (
-    force
-      ? guild.members.fetchMe({ cache: true, force: true })
-      : guild.members.fetchMe()
-  ).catch(() => null);
+function fetchBotMember(guild: Guild, force: boolean): Promise<GuildMember> {
+  return force
+    ? guild.members.fetchMe({ cache: true, force: true })
+    : guild.members.fetchMe();
 }

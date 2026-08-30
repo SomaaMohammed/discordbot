@@ -3479,6 +3479,43 @@ export class GuildStorage {
   }
 }
 
+/** Adds timing to root SQLite operations without exposing arguments or SQL. */
+export function instrumentBotStorage(storage: BotStorage): BotStorage {
+  const wrappedMethods = new Map<PropertyKey, (...args: never[]) => unknown>();
+  return new Proxy(storage, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (
+        typeof value !== "function" ||
+        property === "constructor" ||
+        ROOT_STORAGE_EXCLUDED_METHODS.has(property)
+      ) {
+        return value;
+      }
+      const existing = wrappedMethods.get(property);
+      if (existing) return existing;
+      const wrapped = (...args: never[]): unknown =>
+        observeLatencySync(
+          "sqlite.operation",
+          typeof property === "string" ? property : "method",
+          () => value.apply(target, args),
+        );
+      wrappedMethods.set(property, wrapped);
+      return wrapped;
+    },
+  });
+}
+
+const ROOT_STORAGE_EXCLUDED_METHODS = new Set<PropertyKey>([
+  "forGuild",
+  "getGuildEnableExpectation",
+  "isGuildCurrent",
+  "saveGuildSettings",
+  "setGuildEnabled",
+  "setNonessentialScheduler",
+  "scheduleNonessential",
+]);
+
 /** Adds per-operation SQLite timing without exposing SQL, keys, or payloads. */
 function instrumentGuildStorage(storage: GuildStorage): GuildStorage {
   const wrappedMethods = new Map<PropertyKey, (...args: never[]) => unknown>();

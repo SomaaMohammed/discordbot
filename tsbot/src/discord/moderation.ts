@@ -31,6 +31,7 @@ import { authorizeOwnerOrAdministrator } from "./authorization.js";
 import {
   fetchCurrentBotMember,
   fetchGuildMemberCoalesced,
+  fetchGuildMembers,
 } from "./fetch-coalescing.js";
 
 interface CaseAwareModerationStorage {
@@ -983,7 +984,13 @@ async function handleAllTimeouts(
   }
   const botMember = await getBotMemberAfterDefer(interaction, runtime);
   if (!botMember || !interaction.guild) return;
-  const members = await interaction.guild.members.fetch();
+  const members = await fetchGuildMembers(interaction.guild);
+  if (!members) {
+    await interaction.editReply(
+      "Could not fetch the current server members, so no timeouts were changed.",
+    );
+    return;
+  }
   const eligible = [...members.values()].filter(
     (member) =>
       getTimeoutIssue(member, actor, botMember) === null &&
