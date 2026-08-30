@@ -1,6 +1,6 @@
 {
   "name": "superior-discord-bot",
-  "version": "7.1.0",
+  "version": "7.2.4",
   "description": "Multi-server utility and moderation runtime for Superior",
   "private": true,
   "main": "dist/src/index.js",
@@ -23,11 +23,11 @@
     "version:patch": "npm run version:bump -- patch",
     "version:minor": "npm run version:bump -- minor",
     "version:major": "npm run version:bump -- major",
-    "package:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ../windows/build-portable.ps1 -StandaloneOutput SuperiorBot.exe",
-    "package:win:verify": "powershell -NoProfile -ExecutionPolicy Bypass -File ../windows/test-reproducible.ps1",
+    "package:win": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ../windows/build-portable.ps1 -StandaloneOutput SuperiorBot.exe",
+    "package:win:verify": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ../windows/test-reproducible.ps1",
     "powershell:check": "node ../scripts/check-powershell.mjs",
-    "artifact:verify": "powershell -NoProfile -ExecutionPolicy Bypass -File ../windows/verify-release.ps1",
-    "release:build": "powershell -NoProfile -ExecutionPolicy Bypass -File ../windows/release-build.ps1",
+    "artifact:verify": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ../windows/verify-release.ps1",
+    "release:build": "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ../windows/release-build.ps1",
     "release:patch": "npm run version:patch && npm run release:build",
     "release:minor": "npm run version:minor && npm run release:build",
     "release:major": "npm run version:major && npm run release:build",
@@ -46,17 +46,17 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.14.0"
   },
   "dependencies": {
-    "better-sqlite3": "^12.9.0",
+    "better-sqlite3": "13.0.3",
     "discord.js": "^14.27.0",
     "dotenv": "^17.4.2",
     "luxon": "^3.7.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
+    "@types/better-sqlite3": "9.6.0",
     "@types/luxon": "^3.7.1",
     "@types/node": "^25.6.0",
     "prettier": "^3.9.6",

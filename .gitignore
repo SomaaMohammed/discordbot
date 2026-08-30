@@ -6,6 +6,8 @@
 !.env.example
 /mudae-watch.private.json
 /emoji-replies.json
+/owo-watcher.json
+/windows/type-owo-commands.ps1
 
 # Local editor and agent state
 .github/prompts/

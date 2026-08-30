@@ -155,7 +155,7 @@ export function createReportDecisionModal(
 export function buildReportReviewPayload(
   report: MemberReport,
 ): MessageCreateOptions & MessageEditOptions {
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Report")
     .setTitle(`Private Report #${report.reportNumber}`)
     .setDescription(escapeMarkdown(safeDisplayText(report.explanation, 2_000)))
     .addFields(

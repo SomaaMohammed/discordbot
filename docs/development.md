@@ -1,6 +1,6 @@
 # Development
 
-The maintained application is a strict TypeScript project in `tsbot/`. Superior requires Node.js 22.12.0 or newer.
+The maintained application is a strict TypeScript project in `tsbot/`. Superior requires Node.js 22.14.0 or newer.
 
 ## Architecture
 
@@ -80,7 +80,7 @@ Onboarding persists Discord IDs, configuration/templates/rules, acceptance times
 
 ## Initialization and migration
 
-A missing or empty database is initialized transactionally at v10. Startup accepts exact v10 only and refuses v1 through v9, malformed, partial, and unknown layouts. Schema upgrades are explicit offline operator actions.
+A missing or empty database is initialized transactionally at v10. The strict storage layer accepts exact v10 only and refuses v1 through v9, malformed, partial, and unknown layouts. The self-contained Windows launcher adds a pre-login convenience layer that validates, backs up, dry-runs, and upgrades supported v2-v9 files; direct source startup and maintenance CLIs remain explicit.
 
 The v9-to-v10 migration validates the exact source and completes in one immediate outer transaction. It preserves every v9 row, setting, metric, grant, panel, ticket, suggestion, application, restricted-ping, moderation, report, appeal, anti-spam, delivery, audit, and external Discord identifier. It rebuilds only the delegated-capability and panel-preset constraints needed for `onboarding.configure`, `roles.configure`, `verification`, and `roles`, preserving existing grants/panels exactly, and adds empty/default-disabled Phase 4 tables. It never invents a join, acceptance, rules version, menu, or role outcome and performs no Discord delivery or mutation. Dry-run executes this complete transaction and deliberately rolls it back; any failure leaves the source exact v9.
 
@@ -129,7 +129,7 @@ Run `npm run security:check`, `bash -n ../ops.sh`, ShellCheck when available, an
 
 ## Windows packaging
 
-From a Windows x64 checkout with Node.js available for development:
+From a Windows x64 checkout with Node.js and PowerShell 7 (`pwsh`) available for development:
 
 ```powershell
 cd tsbot
@@ -142,6 +142,14 @@ $archive = Get-ChildItem .\release\SuperiorBot-*-win-x64.zip
 ```
 
 The builder verifies SHA-256-pinned tool/runtime inputs, normalizes launcher source, produces deterministic ZIP metadata, and embeds the ZIP into the repository-root self-extracting `SuperiorBot.exe`. It also builds the repository-root `Update.exe`, which is included in the portable artifact. `package:win:verify` performs two clean-staging builds and requires byte-for-byte identical ZIP, updater, and executable output. Use `package:win` for one local iteration. Cache, staging, and release output are ignored; the requested standalone and updater executables are tracked.
+
+For a Raycast Run Command, select the **Default** shell and use this command:
+
+```text
+C:\Desktop\imperial-court-bot\windows\package-and-run.cmd
+```
+
+The wrapper launches PowerShell 7 explicitly, packages the Windows executable, applies a newer build through `Update.exe`, and otherwise starts the installed executable from `C:\Desktop\Superior`.
 
 ## Version and release workflow
 

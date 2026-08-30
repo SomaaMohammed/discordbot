@@ -112,6 +112,10 @@ import { buildRoleMenuCommandDefinition } from "./role-menu-command.js";
 import { handleRoleMenuCommand } from "./role-menu-commands-handler.js";
 import { handleVerificationButton } from "./verification-interactions.js";
 import { handleRoleMenuSelect } from "./role-menu-interactions.js";
+import {
+  buildOperatorCommandDefinition,
+  handleOperatorCommand,
+} from "./operator-command.js";
 export function buildCommandDefinitions(): Array<
   | SlashCommandBuilder
   | SlashCommandOptionsOnlyBuilder
@@ -153,6 +157,7 @@ export function buildCommandDefinitions(): Array<
   return [
     buildConfigCommandDefinition(),
     buildDataCommandDefinition(),
+    buildOperatorCommandDefinition(),
     buildHelpCommandDefinition(),
     buildChannelCommandDefinition(),
     buildTimeoutCommandDefinition(),
@@ -202,6 +207,11 @@ export async function handleChatInputCommand(
     return;
   }
   let guildRuntime = await runtime.forGuild(interaction.guildId);
+  if (command === "operator") {
+    await deferPrivate(interaction);
+    await handleOperatorCommand(interaction, runtime, guildRuntime);
+    return;
+  }
   if (command === "config" || command === "data") {
     await deferPrivate(interaction);
     const actor = await requireConfigurationAdmin(interaction);

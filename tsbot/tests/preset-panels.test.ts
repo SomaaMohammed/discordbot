@@ -679,7 +679,7 @@ describe("preset panel delivery", () => {
       expect.objectContaining({
         embeds: [
           expect.objectContaining({
-            data: expect.objectContaining({ color: 0xd4af37 }),
+            data: expect.objectContaining({ color: 0x000000 }),
           }),
         ],
         allowedMentions: { parse: [] },

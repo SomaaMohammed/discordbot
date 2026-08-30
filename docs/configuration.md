@@ -38,12 +38,13 @@ Core replies and panels normally need View Channels, Send Messages, Embed Links,
 
 Copy `.env.example` to `.env` in the application root. For a Windows portable build, that is the folder containing `SuperiorBot.exe`.
 
-| Variable                    | Required      | Meaning                                                                                     |
-| --------------------------- | ------------- | ------------------------------------------------------------------------------------------- |
-| `DISCORD_TOKEN`             | Yes           | Bot token from the Developer Portal.                                                        |
-| `DB_FILE`                   | No            | SQLite path. A relative value resolves from the application root; default is `superior.db`. |
-| `COMMAND_REGISTRATION_MODE` | No            | `global` for production or `guild` for development. Defaults to `global`.                   |
-| `DEV_GUILD_IDS`             | In guild mode | Comma-separated development guild IDs.                                                      |
+| Variable                    | Required      | Meaning                                                                                       |
+| --------------------------- | ------------- | --------------------------------------------------------------------------------------------- |
+| `DISCORD_TOKEN`             | Yes           | Bot token from the Developer Portal.                                                          |
+| `DB_FILE`                   | No            | SQLite path. A relative value resolves from the application root; default is `superior.db`.   |
+| `COMMAND_REGISTRATION_MODE` | No            | `global` for production or `guild` for development. Defaults to `global`.                     |
+| `DEV_GUILD_IDS`             | In guild mode | Comma-separated development guild IDs.                                                        |
+| `BOT_OPERATOR_IDS`          | No            | Comma-separated deployment-owner IDs allowed to use the visible `/operator` recovery command. |
 
 `SuperiorBot.exe --check` validates portable configuration and native SQLite without Discord login. Source check commands are documented in [Development](development.md).
 
@@ -52,6 +53,8 @@ Copy `.env.example` to `.env` in the application root. For a Windows portable bu
 Use global registration for production. Discord can take time to propagate global command changes. Use guild registration only for controlled development because updates appear faster. Never put a production guild ID into source code.
 
 Discord cannot vary slash-command visibility by a guild's delegated grants. `/panel`, `/ticket`, `/suggestion`, `/application`, `/moderation`, `/automod`, `/onboarding`, and `/rolemenu` therefore expose relevant command choices and enforce the exact permission at runtime. A visible command is not evidence that the member may use it. `/access` and `/restrictedping` are Administrator-restricted in Discord and also perform a fresh owner-or-Administrator check at runtime. Member verification and role-menu components repeat guild, member, resource, version, and binding checks on every use.
+
+`BOT_OPERATOR_IDS` is an explicit deployment setting, not a hidden backdoor. A configured ID must still be a current member of the guild and can use only `/operator status` plus `/operator state` with an exact guild-specific confirmation. That recovery command can suspend or resume Superior's response in the current guild; it does not grant Discord Administrator permissions, read private workflow data, mutate roles, or bypass ordinary guild authorization.
 
 ## Configured emoji reactions and replies
 

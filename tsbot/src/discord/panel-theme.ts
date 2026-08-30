@@ -15,7 +15,8 @@ import { PANEL_PRESETS, type PanelPreset } from "../types.js";
 export { PANEL_PRESETS };
 export type { PanelPreset };
 
-export const SUPERIOR_PANEL_COLOR = 0xd4af37;
+/** Discord's embed accent stripe for every Superior embed. */
+export const SUPERIOR_PANEL_COLOR = 0x000000;
 export const SUPERIOR_PANEL_FOOTER_TEXT = "Superior";
 export const DISCORD_CUSTOM_ID_LIMIT = 100;
 export const TICKET_OPEN_CUSTOM_ID_PREFIX = "superior:ticket:open:";
@@ -138,10 +139,12 @@ export interface SuperiorPanelPayload {
  * Starts a Superior-branded embed without exposing a caller-controlled color
  * or footer. Ticket lifecycle messages can use this as well as panel presets.
  */
-export function createSuperiorEmbed(): EmbedBuilder {
-  return new EmbedBuilder()
+export function createSuperiorEmbed(functionName?: string): EmbedBuilder {
+  const embed = new EmbedBuilder()
     .setColor(SUPERIOR_PANEL_COLOR)
     .setFooter({ text: SUPERIOR_PANEL_FOOTER_TEXT });
+  if (functionName) embed.setAuthor({ name: `${functionName} panel` });
+  return embed;
 }
 
 /**
@@ -268,7 +271,7 @@ function renderVerificationPanel(
   const acknowledgement = request.reacceptanceRequested
     ? "The rules have changed. Use the button below to acknowledge the current version. This acknowledgement is not a legal agreement."
     : "Use the button below to acknowledge the current server rules. This acknowledgement is not a legal agreement.";
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Verification")
     .setTitle(escapeMarkdown(request.rulesTitle).slice(0, 256))
     .setDescription(
       `${escapeMarkdown(request.rulesBody).slice(0, 3_700)}\n\n${acknowledgement}`,
@@ -318,7 +321,7 @@ function renderRoleMenuPanel(
         return builder;
       }),
     );
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Role menu")
     .setTitle(escapeMarkdown(request.title))
     .setDescription(escapeMarkdown(request.description))
     .addFields({
@@ -419,7 +422,7 @@ export function renderHelpPanel(
     "`/report` and `/appeal` - privately contact the server's safety reviewers.",
   ];
 
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Help")
     .setTitle("Superior Help")
     .setDescription(
       "Use these active services when you need information, assistance, or a quick server action.",
@@ -453,7 +456,7 @@ export function renderHelpPanel(
 
 /** A practical, user-focused guide for creating panels. */
 export function renderPanelHowToGuide(): SuperiorPanelPayload {
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Guide")
     .setTitle("Create a Server Panel")
     .setDescription(
       "Create panels in the channel where you run the command. Start with `/panel list`, choose a path below, fill in its settings, then check the result.",
@@ -526,7 +529,7 @@ export function renderServerInfoPanel(guild: Guild): SuperiorPanelPayload {
       Number.isFinite(guild.createdTimestamp) ? guild.createdTimestamp : 0,
     ),
   );
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Server info")
     .setTitle("Server Information")
     .setDescription(escapeMarkdown(guild.name).slice(0, 4_096))
     .addFields(
@@ -571,7 +574,7 @@ export function renderResourcesPanel(
   input: ResourcePanelInput,
 ): SuperiorPanelPayload {
   const resource = normalizeResourcePanelInput(input);
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Resources")
     .setTitle(resource.title)
     .setDescription(resource.body);
   setPanelInstructionFooter(
@@ -595,7 +598,7 @@ export function renderTicketLauncherPanel(
   panelToken: string,
 ): SuperiorPanelPayload {
   const customId = createTicketOpenCustomId(panelToken);
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Tickets")
     .setTitle("Support Tickets")
     .setDescription(
       "Open a private ticket to contact the server's support team. Share a clear subject and the details staff need to help.",
@@ -626,7 +629,7 @@ export function renderSuggestionLauncherPanel(
     panelToken,
     "Suggestion",
   );
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Suggestions")
     .setTitle("Suggestions")
     .setDescription(
       "Share a clear proposal with the server. Suggestions are attributed to their authors and can be reviewed by staff.",
@@ -657,7 +660,7 @@ export function renderApplicationLauncherPanel(
     panelToken,
     "Application",
   );
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Applications")
     .setTitle("Staff Applications")
     .setDescription(
       "Choose an available staff application. Your answers are sent only to the configured review channel.",
@@ -695,7 +698,7 @@ export function renderSafetyLauncherPanel(
     panelToken,
     "Appeal",
   );
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Safety")
     .setTitle("Safety Center")
     .setDescription(
       "Privately report a member to the server's safety team or appeal an eligible moderation case.",

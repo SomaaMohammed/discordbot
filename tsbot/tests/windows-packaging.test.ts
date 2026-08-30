@@ -27,6 +27,9 @@ describe("Windows portable packaging", () => {
           withFileTypes: true,
         })
         .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+        // The handoff guide is internal agent documentation, not a public
+        // release document and may describe private operator-only features.
+        .filter((entry) => entry.name !== "agent-guide.md")
         .map((entry) =>
           path.relative(repoRoot, path.join(entry.parentPath, entry.name)),
         ),
@@ -82,13 +85,42 @@ describe("Windows portable packaging", () => {
     );
   });
 
+  it("pins the bundled SQLite dependency without prebuild-install", () => {
+    const packageJson = JSON.parse(read("tsbot/package.json")) as {
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+    };
+    const packageLock = JSON.parse(read("tsbot/package-lock.json")) as {
+      packages: Record<
+        string,
+        { version?: string; dependencies?: Record<string, string> }
+      >;
+    };
+
+    expect(packageJson.dependencies["better-sqlite3"]).toBe("13.0.3");
+    expect(packageJson.devDependencies["@types/better-sqlite3"]).toBe("9.6.0");
+    expect(packageLock.packages["node_modules/better-sqlite3"]).toMatchObject({
+      version: "13.0.3",
+      dependencies: { "node-addon-api": "^8.0.0" },
+    });
+    expect(
+      packageLock.packages["node_modules/@types/better-sqlite3"],
+    ).toMatchObject({ version: "9.6.0" });
+    expect(
+      packageLock.packages["node_modules/prebuild-install"],
+    ).toBeUndefined();
+  });
+
   it("provides resumable version and release workflows", () => {
     const packageJson = JSON.parse(read("tsbot/package.json")) as {
       scripts: Record<string, string>;
     };
     const versionTool = read("scripts/version.mjs");
+    const powershellCheck = read("scripts/check-powershell.mjs");
     const releaseBuilder = read("windows/release-build.ps1");
     const releaseVerifier = read("windows/verify-release.ps1");
+    const packageAndRun = read("windows/package-and-run.ps1");
+    const packageAndRunWrapper = read("windows/package-and-run.cmd");
 
     expect(packageJson.scripts["version:verify"]).toContain(
       "version.mjs verify",
@@ -108,6 +140,24 @@ describe("Windows portable packaging", () => {
     expect(packageJson.scripts["release:patch"]).toContain("release:build");
     expect(packageJson.scripts["release:minor"]).toContain("release:build");
     expect(packageJson.scripts["release:major"]).toContain("release:build");
+    for (const scriptName of [
+      "package:win",
+      "package:win:verify",
+      "artifact:verify",
+      "release:build",
+    ]) {
+      expect(packageJson.scripts[scriptName]).toMatch(/^pwsh\b/);
+      expect(packageJson.scripts[scriptName]).not.toMatch(/^powershell\b/i);
+    }
+    expect(powershellCheck).toContain('["pwsh.exe"]');
+    expect(powershellCheck).not.toContain('"powershell.exe"');
+    for (const scriptName of fs
+      .readdirSync(path.join(repoRoot, "windows"))
+      .filter((entry) => entry.endsWith(".ps1"))) {
+      expect(read(path.join("windows", scriptName)), scriptName).toMatch(
+        /^#Requires -Version 7\.0/,
+      );
+    }
     expect(versionTool).toContain("packageJson.version = version");
     expect(releaseBuilder).toContain("format:check");
     expect(releaseBuilder).toContain("docs:links");
@@ -118,6 +168,13 @@ describe("Windows portable packaging", () => {
     expect(releaseBuilder).toContain("test-standalone.ps1");
     expect(releaseVerifier).toContain("sourceSha256");
     expect(releaseVerifier).toContain("--diagnostics");
+    expect(packageAndRun).toContain("npm.cmd");
+    expect(packageAndRun).toContain("--source");
+    expect(packageAndRunWrapper).toContain(
+      "%LOCALAPPDATA%\\Microsoft\\WindowsApps\\pwsh.exe",
+    );
+    expect(packageAndRunWrapper).toContain("package-and-run.ps1");
+    expect(packageAndRunWrapper).not.toMatch(/powershell\.exe/i);
   });
 
   it("builds only production source into a freshly cleaned dist directory", () => {
@@ -158,9 +215,9 @@ describe("Windows portable packaging", () => {
     const releaseVerifier = read("windows/verify-release.ps1");
     const hashUtilities = read("windows/hash-utils.ps1");
 
-    expect(builder).toContain('$NodeVersion = "22.12.0"');
+    expect(builder).toContain('$NodeVersion = "22.23.2"');
     expect(builder).toContain(
-      '$NodeArchiveSha256 = "2b8f2256382f97ad51e29ff71f702961af466c4616393f767455501e6aece9b8"',
+      '$NodeArchiveSha256 = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"',
     );
     expect(builder).toContain('$CompilerToolsetVersion = "4.12.0"');
     expect(builder).toContain(
@@ -171,20 +228,35 @@ describe("Windows portable packaging", () => {
       '$ReferenceAssembliesPackageSha256 = "8a7e348538e7eb91351696911689f49e3d4f63f8bab517432bbe159b8b1104a2"',
     );
     expect(builder).toContain(
-      '$BetterSqlite3BinarySha256 = "8c041ef57dd1bb55b0032306594310625b7a7a374bc48956e0858645f56919c4"',
+      '$BetterSqlite3BinarySha256 = "e21e5efd71fba66578e95b62554d9028064a80dafd7221bf8a8ef155de8d240a"',
     );
     expect(builder).toContain("Get-Sha256Hex");
     expect(hashUtilities).toContain(
       "[System.Security.Cryptography.SHA256]::Create()",
     );
     expect(builder).toContain('"--omit=dev"');
+    expect(builder).toContain('"--ignore-scripts"');
+    expect(builder).not.toContain('"--ignore-scripts=false"');
     expect(builder).toContain('"/platform:x64"');
     expect(builder).toContain('"/noconfig"');
     expect(builder).toContain('"/nostdlib+"');
     expect(builder).toContain('"/deterministic+"');
     expect(builder).toContain('"/pathmap:');
     expect(builder).not.toContain("$env:WINDIR");
-    expect(builder).toContain('"better_sqlite3.node"');
+    expect(builder).toContain('"win32-x64.node"');
+    for (const irrelevantPrebuild of [
+      "darwin-arm64.node",
+      "darwin-x64.node",
+      "linux-arm64.node",
+      "linux-x64.node",
+      "linuxmusl-arm64.node",
+      "linuxmusl-x64.node",
+      "win32-arm64.node",
+    ]) {
+      expect(builder).toContain(`"${irrelevantPrebuild}"`);
+    }
+    expect(builder).toContain("Remove-Item -LiteralPath");
+    expect(builder).not.toContain('"better_sqlite3.node"');
     expect(builder).toContain("write-deterministic-zip.mjs");
     expect(builder).toContain("MANIFEST.sha256");
     expect(builder).toContain("SuperiorBot.Payload.zip");
@@ -206,6 +278,7 @@ describe("Windows portable packaging", () => {
       expect(source).toContain("--version");
       expect(source).toContain("--check");
       expect(source).toContain("--diagnostics");
+      expect(source).toContain("SUPERIOR_AUTO_MIGRATE");
     }
     expect(fallback).toContain('"%~dp0SuperiorBot.exe" "%~1"');
     expect(fallback).toContain("--diagnostics");
@@ -217,7 +290,8 @@ describe("Windows portable packaging", () => {
     expect(diagnostics).toContain("completed without Discord login");
     expect(diagnostics).not.toContain("fileEnvironment.DISCORD_TOKEN");
     expect(smokeTest).toContain("no Discord login was attempted");
-    expect(smokeTest).toContain("better_sqlite3.node");
+    expect(smokeTest).toContain("prebuilds\\win32-x64.node");
+    expect(smokeTest).not.toContain("better_sqlite3.node");
     expect(smokeTest).toContain("MANIFEST.sha256");
     expect(smokeTest).toContain("undeclared executable payload file");
     for (const identityCheck of [
@@ -228,6 +302,17 @@ describe("Windows portable packaging", () => {
       expect(identityCheck).toContain("ProductVersion -ne");
       expect(identityCheck).not.toContain("ProductVersion.StartsWith");
     }
+    for (const environmentIsolationCheck of [
+      standaloneSmokeTest,
+      releaseVerifier,
+    ]) {
+      expect(environmentIsolationCheck).toContain(
+        'Remove-Item -LiteralPath "Env:$Name"',
+      );
+      expect(environmentIsolationCheck).not.toContain(
+        'SetEnvironmentVariable($Name, $null, "Process")',
+      );
+    }
     expect(standaloneLauncher).toContain("SUPERIOR_APPLICATION_ROOT");
     expect(standaloneLauncher).toContain("ExtractArchiveSafely");
     expect(standaloneLauncher).toContain("LocalApplicationData");
@@ -236,6 +321,10 @@ describe("Windows portable packaging", () => {
     );
     expect(standaloneSmokeTest).toContain("Another Superior Bot instance");
     expect(standaloneSmokeTest).toContain("JobSmokeHarness.cs");
+    expect(standaloneSmokeTest).toContain(
+      "Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
+    );
+    expect(standaloneSmokeTest).not.toContain("-OutputType ConsoleApplication");
     expect(standaloneSmokeTest).toContain(
       "Stop-Process -Id $JobParent.Id -Force",
     );

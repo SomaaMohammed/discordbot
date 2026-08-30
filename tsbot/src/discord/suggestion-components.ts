@@ -126,7 +126,7 @@ export function buildSuggestionPublicPayload(
 ): MessageCreateOptions & MessageEditOptions {
   const votingOpen =
     suggestion.state === "open" || suggestion.state === "under-review";
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Suggestion")
     .setTitle(
       `Suggestion #${suggestion.suggestionNumber}: ${safeDisplayText(suggestion.title, 200)}`,
     )

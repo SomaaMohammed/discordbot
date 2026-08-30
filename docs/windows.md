@@ -8,7 +8,8 @@ The repository-root `SuperiorBot.exe` is designed for a Windows x64 laptop or de
 2. In the Discord Developer Portal, enable Server Members Intent and Message Content Intent and install the application with the permissions described in [Configuration](configuration.md).
 3. Rename the copied `.env.example` to `.env` beside `SuperiorBot.exe`.
 4. Add `DISCORD_TOKEN` and leave `DB_FILE=superior.db` unless an absolute path is intentional.
-5. Open PowerShell in that folder and run:
+5. If you are the deployment owner, set `BOT_OPERATOR_IDS` to your Discord ID to enable the visible, audited `/operator` recovery controls.
+6. Open PowerShell 7 (`pwsh`) in that folder and run:
 
 ```powershell
 .\SuperiorBot.exe --version
@@ -38,7 +39,7 @@ By default these writable files sit beside the launcher:
 - `superior.db`: the active SQLite database created on first real startup.
 - SQLite sidecars such as `superior.db-wal` and `superior.db-shm` while running.
 
-A missing or empty database is initialized as schema v10 on the first real startup. Normal startup never upgrades an older database.
+A missing or empty database is initialized as schema v10 on the first real startup. The packaged executable automatically validates, backs up, dry-runs, and upgrades supported schema v2-v9 databases before Discord login. Schema v1, malformed, partial, and unknown databases are refused without modification.
 
 Schema-v10 data can include every existing Discord identifier and workflow record plus moderation case reasons/private notes, reporter/appellant identities and explanations, private review decisions, message-link identifiers, anti-spam metadata, administrator-authored rules and welcome/farewell templates, member acceptance/lifecycle timestamps, automatic/menu-role outcomes, and bounded delivery/audit records. It does not persist raw anti-spam message content, copy a report's referenced message, store member-message or direct-message contents for onboarding, or store full member profiles, IP/email/phone data, invite histories, or raw gateway payloads. Protect the database, backups, exports, PowerShell history, and host account accordingly. Do not synchronize a live database through a consumer cloud-drive folder.
 
@@ -50,23 +51,13 @@ The versioned portable ZIP is available from CI for offline database maintenance
 
 The portable release also includes `Update.exe`. It updates an installed `SuperiorBot.exe` from a newly built executable without moving `.env`, the active database, or their backups. The updater verifies the source version, refuses to replace a running bot, creates an executable backup, validates the replacement with `--version` and `--check`, and starts the new bot unless `--no-start` is supplied.
 
-For the normal schema-v9 upgrade from Superior 6.1.0, run:
+The packaged executable automatically handles schema upgrades. Close every old `SuperiorBot.exe`, bundled `node.exe`, SQLite browser, and other process that can write the selected database. Put the current `SuperiorBot.exe`, `.env`, and database in a writable folder and keep the original database untouched until the first launch succeeds.
 
-```powershell
-New-Item -ItemType Directory -Path .\backups -Force
-.\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 9
-.\runtime\node.exe .\app\dist\src\storage\backup-cli.js --db .\superior.db --out .\backups\pre-schema10-schema9.db --expect 9
-.\runtime\node.exe .\app\dist\src\storage\migrate-cli.js --db .\superior.db --dry-run
-.\runtime\node.exe .\app\dist\src\storage\migrate-cli.js --db .\superior.db
-.\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 10
-.\SuperiorBot.exe --check
-```
+When the database is exact schema v2-v9, launch `SuperiorBot.exe`. Before Discord login it validates the source, creates a timestamped SQLite-aware backup in `backups`, performs a complete dry-run, applies the migration to v10, validates the result, and then starts the bot. A failure stops startup, retains the backup, and leaves the source at its original schema. The migration preserves existing rows and external Discord IDs, adds empty/default-disabled Phase 4 tables, invents no history or bindings, and performs no Discord delivery or role mutation.
 
-Do not continue if classification, backup, dry-run, migration, or final validation fails. The migration is one transaction; failure leaves the working copy at v9. It preserves every v9 row and external Discord identifier, extends the delegated-capability and fixed-panel constraints without losing existing grants or panels, and adds empty/default-disabled Phase 4 tables. It never invents a join, rules version, acceptance, menu, delivery, or role outcome; sends no welcome message; and performs no Discord role mutation. Keep the validated v9 backup until the new executable and every guild's existing workflow has been reviewed.
+Schema v1 must first be upgraded to v2 with the final 4.0.0 source release. Unknown, malformed, and partial databases are refused without modification. The versioned portable ZIP still exposes the bundled tools for advanced offline maintenance, but ordinary Windows installation no longer requires running `runtime\node.exe` commands.
 
-Exact schema v8, schema v7, schema v6, schema v5, schema v4, schema v3, and the exact supported schema-v2 layout can migrate directly to v10 through the same CLI. Change the source checker and backup expectation to `--expect 8`, `7`, `6`, `5`, `4`, `3`, or `2`, use a generation-specific backup name, and keep the final checker at `--expect 10`. A failed transaction leaves the copy at its source generation. Historical conversion stages retain their documented behavior before the final v9-to-v10 step, all inside one outer transaction.
-
-A schema-v1 database must first be upgraded to v2 with the final 4.0.0 source release. Renaming a database file never upgrades its contents. Never test migration against the only copy or against a database still selected by a running process.
+Renaming a database file never upgrades its contents. Never test migration against the only copy or against a database still selected by a running process.
 
 ## Post-upgrade review
 
@@ -105,10 +96,10 @@ Before replacement, close the old console and confirm in Task Manager that neith
 - **Missing `.env`:** copy `.env.example` beside the launcher and provide the token.
 - **Configuration check fails:** read the single reported selector error; check guild registration mode and IDs without posting `.env` contents.
 - **Native SQLite check fails:** remove only the matching private payload directory under `%LOCALAPPDATA%\SuperiorBot\payloads` and rerun the trusted executable. Do not copy `node_modules` from another Node version or operating system.
-- **Startup refuses the database:** stop the executable, classify it with `check-cli.js`, and follow the explicit migration workflow. Never delete or rename it merely to make a fresh v10 database appear.
+- **Startup refuses the database:** keep the generated backup, read the single error, and stop. The executable refuses corrupt, unknown, partial, and schema-v1 files rather than overwriting them. Never delete or rename a database to make a fresh v10 database appear.
 - **Commands look stale:** global Discord commands can take time to propagate. Confirm version and registration mode before changing configuration.
 - **A prior database exists under another name:** set `DB_FILE` explicitly and follow the schema workflow. Do not let a fresh database hide the existing one.
 - **An onboarding or menu binding is stale:** inspect `/onboarding status`, `/rolemenu status`, and `/panel status`; replace deleted resources through configuration, then use the bounded member/menu recovery path. Imported automatic roles, verification, and menus stay disabled until current roles/channels/messages and permissions are verified. Do not paste an ID from another guild into the database.
-- **Window closes immediately:** run the executable from an already-open PowerShell or Command Prompt window so the error remains visible.
+- **Window closes immediately:** run the executable from an already-open PowerShell 7 or Command Prompt window so the error remains visible.
 - **Another instance is already using the application root or database:** stop the old `SuperiorBot.exe` and bundled `node.exe`; an abandoned lock is recovered automatically after a crash, so do not delete database sidecars to bypass this message.
 - **Build identity is unclear:** run `--version` and `--diagnostics`, inspect PE `FileVersion`/`ProductVersion` in file Properties, and compare `Get-FileHash .\SuperiorBot.exe -Algorithm SHA256` with the trusted release output.

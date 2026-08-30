@@ -57,6 +57,7 @@ describe("command guide", () => {
     const names = definitions.map(({ name }) => name);
     expect(names).toContain("config");
     expect(names).toContain("data");
+    expect(names).toContain("operator");
     expect(names).toContain("onboarding");
     expect(names).toContain("rolemenu");
     expect(names).not.toContain("setup");

@@ -1,3 +1,5 @@
+#Requires -Version 7.0
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Executable
@@ -29,7 +31,7 @@ $EnvironmentNames = @(
 $SavedEnvironment = @{}
 foreach ($Name in $EnvironmentNames) {
     $SavedEnvironment[$Name] = [System.Environment]::GetEnvironmentVariable($Name, "Process")
-    [System.Environment]::SetEnvironmentVariable($Name, $null, "Process")
+    Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
 }
 
 function Invoke-AndRequireSuccess {
@@ -105,7 +107,7 @@ DEV_GUILD_IDS=
         "executableVersion=$($Package.version)",
         "payloadVersion=$($Package.version)",
         "payloadCache=reused",
-        "nodeVersion=v22.12.0",
+        "nodeVersion=v22.23.2",
         "commandRegistrationMode=global",
         "completed without Discord login"
     )) {
@@ -212,13 +214,21 @@ DEV_GUILD_IDS=
     # it through a kill-on-close Job Object. Force-killing this synthetic parent
     # must terminate its child before a replacement can acquire the same locks.
     $JobHarness = Join-Path $TemporaryRoot "SuperiorJobSmoke.exe"
-    Add-Type `
-        -Path @(
-            (Join-Path $PSScriptRoot "launcher\LauncherSupport.cs"),
-            (Join-Path $PSScriptRoot "launcher\JobSmokeHarness.cs")
-        ) `
-        -OutputAssembly $JobHarness `
-        -OutputType ConsoleApplication
+    $FrameworkCompiler = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+    if (-not (Test-Path -LiteralPath $FrameworkCompiler -PathType Leaf)) {
+        throw "Cannot find the .NET Framework compiler required by the job-object smoke test."
+    }
+    $CompilerOutput = & $FrameworkCompiler `
+        "/nologo" `
+        "/optimize+" `
+        "/platform:x64" `
+        "/target:exe" `
+        "/out:$JobHarness" `
+        (Join-Path $PSScriptRoot "launcher\LauncherSupport.cs") `
+        (Join-Path $PSScriptRoot "launcher\JobSmokeHarness.cs") 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $JobHarness -PathType Leaf)) {
+        throw "Could not compile the job-object smoke harness:`n$CompilerOutput"
+    }
     $JobRoot = Join-Path $TemporaryRoot "job-root"
     $JobDatabase = Join-Path $JobRoot "synthetic.db"
     $JobChildPidFile = Join-Path $JobRoot "child.pid"
@@ -278,7 +288,12 @@ DEV_GUILD_IDS=
 }
 finally {
     foreach ($Name in $EnvironmentNames) {
-        [System.Environment]::SetEnvironmentVariable($Name, $SavedEnvironment[$Name], "Process")
+        if ($null -eq $SavedEnvironment[$Name]) {
+            Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
+        }
+        else {
+            [System.Environment]::SetEnvironmentVariable($Name, $SavedEnvironment[$Name], "Process")
+        }
     }
     $ResolvedTemporaryRoot = [System.IO.Path]::GetFullPath($TemporaryRoot)
     $ExpectedPrefix = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd("\") + "\"

@@ -61,12 +61,15 @@ function expectSafePayload(payload: SuperiorPanelPayload): void {
 }
 
 describe("Superior panel theme and presets", () => {
-  it("uses one fixed rich-gold theme and restrained footer", () => {
+  it("uses one fixed black stripe and restrained footer", () => {
     expect(createSuperiorEmbed().toJSON()).toMatchObject({
-      color: 0xd4af37,
+      color: 0x000000,
       footer: { text: "Superior" },
     });
-    expect(SUPERIOR_PANEL_COLOR).toBe(0xd4af37);
+    expect(createSuperiorEmbed("Voting").toJSON()).toMatchObject({
+      author: { name: "Voting panel" },
+    });
+    expect(SUPERIOR_PANEL_COLOR).toBe(0x000000);
     expect(SUPERIOR_PANEL_FOOTER_TEXT).toBe("Superior");
   });
 
@@ -119,10 +122,24 @@ describe("Superior panel theme and presets", () => {
     } as const;
 
     expect(Object.keys(requests)).toEqual(PANEL_PRESETS);
+    const functionNames = {
+      help: "Help",
+      "server-info": "Server info",
+      resources: "Resources",
+      tickets: "Tickets",
+      suggestions: "Suggestions",
+      applications: "Applications",
+      safety: "Safety",
+      verification: "Verification",
+      roles: "Role menu",
+    } as const;
     for (const preset of PANEL_PRESETS) {
       const payload = renderSuperiorPanel(requests[preset]);
       const embed = embedJson(payload);
       expect(embed).toMatchObject({ color: SUPERIOR_PANEL_COLOR });
+      expect(embed.author).toEqual({
+        name: `${functionNames[preset]} panel`,
+      });
       expect(embed.footer?.text).toMatch(/^How to use:/);
       expectSafePayload(payload);
       expect(isPanelPreset(preset)).toBe(true);

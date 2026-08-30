@@ -1,13 +1,15 @@
+#Requires -Version 7.0
+
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = "release",
-    [string]$NodeVersion = "22.12.0",
-    [string]$NodeArchiveSha256 = "2b8f2256382f97ad51e29ff71f702961af466c4616393f767455501e6aece9b8",
+    [string]$NodeVersion = "22.23.2",
+    [string]$NodeArchiveSha256 = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97",
     [string]$CompilerToolsetVersion = "4.12.0",
     [string]$CompilerToolsetPackageSha256 = "fe24ef31a6ffcb7c49383d2fd362763dee291ad9b9d98cc0c19ef80203b99ebc",
     [string]$ReferenceAssembliesVersion = "1.0.3",
     [string]$ReferenceAssembliesPackageSha256 = "8a7e348538e7eb91351696911689f49e3d4f63f8bab517432bbe159b8b1104a2",
-    [string]$BetterSqlite3BinarySha256 = "8c041ef57dd1bb55b0032306594310625b7a7a374bc48956e0858645f56919c4",
+    [string]$BetterSqlite3BinarySha256 = "e21e5efd71fba66578e95b62554d9028064a80dafd7221bf8a8ef155de8d240a",
     [string]$StandaloneOutput = "",
     [string]$UpdaterOutput = "Update.exe",
     [switch]$KeepStaging
@@ -263,11 +265,13 @@ try {
     Write-Host "Building clean production JavaScript..."
     # Run the authoritative build steps directly. Invoking `npm run build`
     # recursively from an npm-owned Windows process can leave package-lock.json
-    # unavailable to the nested npm process on some hosts.
+    # unavailable to the nested npm process on some hosts. Version generation
+    # already happened in the release build; verification keeps package:win
+    # safe to invoke through npm without reopening package-lock.json for write.
     $BuildNode = (Get-Command node.exe -ErrorAction Stop).Source
     Invoke-NativeChecked -Executable $BuildNode -Arguments @(
         (Join-Path $RepositoryRoot "scripts\version.mjs"),
-        "generate"
+        "verify"
     ) -WorkingDirectory $TsbotRoot
     Invoke-NativeChecked -Executable $BuildNode -Arguments @(
         (Join-Path $WindowsDirectory "clean-dist.mjs")
@@ -317,7 +321,7 @@ try {
             $NpmCli,
             "ci",
             "--omit=dev",
-            "--ignore-scripts=false",
+            "--ignore-scripts",
             "--no-audit",
             "--no-fund"
         ) -WorkingDirectory $AppRoot
@@ -335,6 +339,55 @@ try {
     if ($UnexpectedDevelopmentPackages.Count -gt 0) {
         throw "Development-only packages were installed in the portable artifact: $($UnexpectedDevelopmentPackages -join ', ')"
     }
+
+    $BetterSqlite3Root = Join-Path $AppRoot "node_modules\better-sqlite3"
+    $BetterSqlite3PrebuildsRoot = Join-Path $BetterSqlite3Root "prebuilds"
+    $TargetBetterSqlite3Prebuild = "win32-x64.node"
+    $IrrelevantBetterSqlite3Prebuilds = @(
+        "darwin-arm64.node",
+        "darwin-x64.node",
+        "linux-arm64.node",
+        "linux-x64.node",
+        "linuxmusl-arm64.node",
+        "linuxmusl-x64.node",
+        "win32-arm64.node"
+    )
+    $ExpectedBetterSqlite3Prebuilds = @(
+        $TargetBetterSqlite3Prebuild
+        $IrrelevantBetterSqlite3Prebuilds
+    ) | Sort-Object
+    $ActualBetterSqlite3Prebuilds = @(
+        Get-ChildItem -LiteralPath $BetterSqlite3PrebuildsRoot -Filter "*.node" -File |
+            Select-Object -ExpandProperty Name |
+            Sort-Object
+    )
+    $BetterSqlite3PrebuildDifference = @(
+        Compare-Object `
+            -ReferenceObject $ExpectedBetterSqlite3Prebuilds `
+            -DifferenceObject $ActualBetterSqlite3Prebuilds
+    )
+    if ($BetterSqlite3PrebuildDifference.Count -gt 0) {
+        throw "Unexpected better-sqlite3 prebuild set: $($ActualBetterSqlite3Prebuilds -join ', ')"
+    }
+    foreach ($PrebuildName in $IrrelevantBetterSqlite3Prebuilds) {
+        Remove-Item -LiteralPath (Join-Path $BetterSqlite3PrebuildsRoot $PrebuildName) -Force
+    }
+
+    $NativeAddonPath = Join-Path $BetterSqlite3PrebuildsRoot $TargetBetterSqlite3Prebuild
+    $RemainingBetterSqlite3Addons = @(
+        Get-ChildItem -LiteralPath $BetterSqlite3Root -Filter "*.node" -Recurse -File
+    )
+    if (
+        $RemainingBetterSqlite3Addons.Count -ne 1 -or
+        $RemainingBetterSqlite3Addons[0].FullName -ne $NativeAddonPath
+    ) {
+        throw "Expected only prebuilds/win32-x64.node in packaged better-sqlite3."
+    }
+    $NativeAddonHash = Get-Sha256Hex -LiteralPath $NativeAddonPath
+    if ($NativeAddonHash -ne $BetterSqlite3BinarySha256.ToLowerInvariant()) {
+        throw "Packaged better-sqlite3 binary SHA-256 mismatch. Expected $BetterSqlite3BinarySha256; got $NativeAddonHash"
+    }
+
     Invoke-NativeChecked -Executable $BundledNode -Arguments @(
         "-e",
         "const Database=require('better-sqlite3');const db=new Database(':memory:');db.prepare('SELECT 1').get();db.close();"
@@ -470,15 +523,6 @@ internal static class BuildIdentity
         $CanonicalLauncherSupportSource,
         $BuildIdentitySource
     ) -WorkingDirectory $RepositoryRoot
-
-    $NativeAddon = Get-ChildItem -LiteralPath (Join-Path $AppRoot "node_modules\better-sqlite3") -Filter "better_sqlite3.node" -Recurse -File
-    if (@($NativeAddon).Count -ne 1) {
-        throw "Expected exactly one packaged better-sqlite3 native binary; found $(@($NativeAddon).Count)."
-    }
-    $NativeAddonHash = Get-Sha256Hex -LiteralPath $NativeAddon[0].FullName
-    if ($NativeAddonHash -ne $BetterSqlite3BinarySha256.ToLowerInvariant()) {
-        throw "Packaged better-sqlite3 binary SHA-256 mismatch. Expected $BetterSqlite3BinarySha256; got $NativeAddonHash"
-    }
 
     $Forbidden = Get-ChildItem -LiteralPath $StageRoot -Recurse -Force | Where-Object {
         $Relative = Get-RelativeFileName -BaseDirectory $StageRoot -FileName $_.FullName

@@ -165,7 +165,7 @@ export function buildRoleMenuPanelPayload(
           return builder;
         }),
     );
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Role menu")
     .setTitle(escapeMarkdown(menu.title))
     .setDescription(escapeMarkdown(menu.description))
     .addFields({

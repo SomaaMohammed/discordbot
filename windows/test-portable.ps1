@@ -1,3 +1,5 @@
+#Requires -Version 7.0
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Artifact
@@ -97,11 +99,13 @@ try {
         }
     }
 
-    $NativeAddons = @(Get-ChildItem -LiteralPath (Join-Path $PortableRoot "app\node_modules\better-sqlite3") -Filter "better_sqlite3.node" -Recurse -File)
-    if ($NativeAddons.Count -ne 1) {
-        throw "Expected exactly one better-sqlite3 native binary; found $($NativeAddons.Count)."
+    $BetterSqlite3Root = Join-Path $PortableRoot "app\node_modules\better-sqlite3"
+    $NativeAddonPath = Join-Path $BetterSqlite3Root "prebuilds\win32-x64.node"
+    $NativeAddons = @(Get-ChildItem -LiteralPath $BetterSqlite3Root -Filter "*.node" -Recurse -File)
+    if ($NativeAddons.Count -ne 1 -or $NativeAddons[0].FullName -ne $NativeAddonPath) {
+        throw "Expected only prebuilds/win32-x64.node in packaged better-sqlite3."
     }
-    $NativeAddonHash = Get-Sha256Hex -LiteralPath $NativeAddons[0].FullName
+    $NativeAddonHash = Get-Sha256Hex -LiteralPath $NativeAddonPath
 
     $Forbidden = Get-ChildItem -LiteralPath $PortableRoot -Recurse -Force | Where-Object {
         $Relative = $_.FullName.Substring($PortableRoot.Length).TrimStart("\").Replace("\", "/")
@@ -173,15 +177,15 @@ try {
         $BuildInfo.PACKAGE_NAME -ne "superior-discord-bot" -or
         $BuildInfo.PACKAGE_VERSION -ne $Version -or
         $BuildInfo.TARGET -ne "win-x64" -or
-        $BuildInfo.NODE_VERSION -ne "22.12.0" -or
-        $BuildInfo.NODE_ARCHIVE_SHA256 -ne "2b8f2256382f97ad51e29ff71f702961af466c4616393f767455501e6aece9b8" -or
+        $BuildInfo.NODE_VERSION -ne "22.23.2" -or
+        $BuildInfo.NODE_ARCHIVE_SHA256 -ne "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97" -or
         $BuildInfo.CSHARP_COMPILER_PACKAGE -ne "Microsoft.Net.Compilers.Toolset" -or
         $BuildInfo.CSHARP_COMPILER_VERSION -ne "4.12.0" -or
         $BuildInfo.CSHARP_COMPILER_PACKAGE_SHA256 -ne "fe24ef31a6ffcb7c49383d2fd362763dee291ad9b9d98cc0c19ef80203b99ebc" -or
         $BuildInfo.REFERENCE_ASSEMBLIES_PACKAGE -ne "Microsoft.NETFramework.ReferenceAssemblies.net48" -or
         $BuildInfo.REFERENCE_ASSEMBLIES_VERSION -ne "1.0.3" -or
         $BuildInfo.REFERENCE_ASSEMBLIES_PACKAGE_SHA256 -ne "8a7e348538e7eb91351696911689f49e3d4f63f8bab517432bbe159b8b1104a2" -or
-        $BuildInfo.BETTER_SQLITE3_BINARY_SHA256 -ne "8c041ef57dd1bb55b0032306594310625b7a7a374bc48956e0858645f56919c4" -or
+        $BuildInfo.BETTER_SQLITE3_BINARY_SHA256 -ne "e21e5efd71fba66578e95b62554d9028064a80dafd7221bf8a8ef155de8d240a" -or
         $BuildInfo.BETTER_SQLITE3_BINARY_SHA256 -ne $NativeAddonHash -or
         $BuildInfo.SOURCE_SHA256 -notmatch "^[a-f0-9]{64}$"
     ) {
@@ -200,7 +204,7 @@ try {
     $Launcher = Join-Path $PortableRoot "SuperiorBot.exe"
     $Updater = Join-Path $PortableRoot "Update.exe"
     $BatchLauncher = Join-Path $PortableRoot "Start Superior Bot.cmd"
-    Invoke-AndRequireSuccess -Executable (Join-Path $PortableRoot "runtime\node.exe") -Arguments @("--version") -ExpectedText "v22.12.0"
+    Invoke-AndRequireSuccess -Executable (Join-Path $PortableRoot "runtime\node.exe") -Arguments @("--version") -ExpectedText "v22.23.2"
     Invoke-AndRequireSuccess -Executable $Launcher -Arguments @("--version") -ExpectedText "Superior Bot $Version"
     Invoke-AndRequireSuccess -Executable $Updater -Arguments @("--version") -ExpectedText "Superior Bot updater $Version"
     Invoke-AndRequireSuccess -Executable $BatchLauncher -Arguments @("--version") -ExpectedText "Superior Bot $Version"
@@ -262,7 +266,7 @@ DEV_GUILD_IDS=
         "executableVersion=$Version",
         "payloadVersion=$Version",
         "sourceSha256=$CurrentSourceIdentity",
-        "nodeVersion=v22.12.0",
+        "nodeVersion=v22.23.2",
         "commandRegistrationMode=global",
         "completed without Discord login"
     )) {

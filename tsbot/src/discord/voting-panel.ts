@@ -6,6 +6,7 @@ import {
   escapeMarkdown,
   type MessageMentionOptions,
 } from "discord.js";
+import { SUPERIOR_PANEL_COLOR } from "./panel-theme.js";
 
 /** Prefix shared by every persistent voting-panel component. */
 export const VOTING_PANEL_COMPONENT_PREFIX = "superior:vote:";
@@ -20,6 +21,14 @@ export const VOTING_PANEL_LIMITS = Object.freeze({
   maxDurationMinutes: 20_160,
   maxCustomIdLength: 100,
 });
+
+const VOTING_PANEL_STATUS_COLORS = Object.freeze({
+  active: SUPERIOR_PANEL_COLOR,
+  completed: SUPERIOR_PANEL_COLOR,
+  cancelled: SUPERIOR_PANEL_COLOR,
+});
+const VOTE_BAR_WIDTH = 8;
+const DISCORD_USER_ID_PATTERN = /^\d{17,20}$/u;
 
 export type VotingPollType = "yes-no" | "custom";
 export type VotingPanelStatus = "active" | "completed" | "cancelled";
@@ -82,8 +91,17 @@ export type ParsedVotingPanelComponent =
       readonly optionId: string;
     }
   | { readonly kind: "view-voters"; readonly voteId: string }
-  | { readonly kind: "close"; readonly voteId: string }
-  | { readonly kind: "cancel"; readonly voteId: string };
+  | { readonly kind: "panel-options"; readonly voteId: string }
+  | {
+      readonly kind: "close";
+      readonly voteId: string;
+      readonly panelMessageId?: string;
+    }
+  | {
+      readonly kind: "cancel";
+      readonly voteId: string;
+      readonly panelMessageId?: string;
+    };
 
 const SAFE_ALLOWED_MENTIONS: Readonly<MessageMentionOptions> = Object.freeze({
   parse: Object.freeze([]),
@@ -212,15 +230,27 @@ export function createVotingViewVotersCustomId(voteId: string): string {
   );
 }
 
-export function createVotingCloseCustomId(voteId: string): string {
+export function createVotingPanelOptionsCustomId(voteId: string): string {
   return checkedCustomId(
-    `${VOTING_PANEL_COMPONENT_PREFIX}${checkedOpaqueId(voteId, "vote")}:close`,
+    `${VOTING_PANEL_COMPONENT_PREFIX}${checkedOpaqueId(voteId, "vote")}:options`,
   );
 }
 
-export function createVotingCancelCustomId(voteId: string): string {
+export function createVotingCloseCustomId(
+  voteId: string,
+  panelMessageId?: string,
+): string {
   return checkedCustomId(
-    `${VOTING_PANEL_COMPONENT_PREFIX}${checkedOpaqueId(voteId, "vote")}:cancel`,
+    `${VOTING_PANEL_COMPONENT_PREFIX}${checkedOpaqueId(voteId, "vote")}:close${panelMessageId ? `:${checkedOpaqueId(panelMessageId, "panel message")}` : ""}`,
+  );
+}
+
+export function createVotingCancelCustomId(
+  voteId: string,
+  panelMessageId?: string,
+): string {
+  return checkedCustomId(
+    `${VOTING_PANEL_COMPONENT_PREFIX}${checkedOpaqueId(voteId, "vote")}:cancel${panelMessageId ? `:${checkedOpaqueId(panelMessageId, "panel message")}` : ""}`,
   );
 }
 
@@ -239,10 +269,24 @@ export function parseVotingPanelComponentId(
   ) {
     return { kind: "option", voteId, optionId };
   }
+  if (action === "options" && parts.length === 2) {
+    return { kind: "panel-options", voteId };
+  }
+  if (
+    (action === "close" || action === "cancel") &&
+    (parts.length === 2 ||
+      (parts.length === 3 &&
+        optionId !== undefined &&
+        OPAQUE_ID_PATTERN.test(optionId)))
+  ) {
+    return {
+      kind: action,
+      voteId,
+      ...(parts.length === 3 ? { panelMessageId: optionId } : {}),
+    };
+  }
   if (parts.length !== 2) return null;
   if (action === "view") return { kind: "view-voters", voteId };
-  if (action === "close") return { kind: "close", voteId };
-  if (action === "cancel") return { kind: "cancel", voteId };
   return null;
 }
 
@@ -276,84 +320,101 @@ export function buildVotingPanelPayload(
 export function buildVotingPanelEmbed(panel: VotingPanelView): EmbedBuilder {
   validateVotingPanelView(panel);
   const displayTitle = panel.title ?? panel.question;
-  const description = [
-    panel.title
-      ? `**Question:** ${safeEmbedText(panel.question, 1_000)}`
-      : null,
-    panel.description ? safeEmbedText(panel.description, 3_000) : null,
-  ]
-    .filter((value): value is string => Boolean(value))
-    .join("\n\n");
+  const metadata = [
+    formatStatus(panel.status),
+    panel.multiSelect ? "Choose multiple" : "Choose one",
+    panel.status === "active"
+      ? panel.deadlineAt
+        ? `Ends <t:${toUnixSeconds(panel.deadlineAt)}:R>`
+        : "No deadline"
+      : endedMetadata(panel),
+  ].join("  •  ");
   const embed = new EmbedBuilder()
-    .setColor(0xd4af37)
+    .setColor(VOTING_PANEL_STATUS_COLORS[panel.status])
+    .setAuthor({ name: "Voting panel" })
     .setTitle(safeEmbedText(displayTitle, 256))
-    .setDescription(description || null)
-    .addFields(
-      {
-        name: "Status",
-        value: `**${formatStatus(panel.status)}**`,
-        inline: true,
-      },
-      {
-        name: "Poll type",
-        value: panel.pollType === "yes-no" ? "Yes / No" : "Custom",
-        inline: true,
-      },
-      {
-        name: "Selection",
-        value: panel.multiSelect ? "Multiple options" : "One option",
-        inline: true,
-      },
-      {
-        name: "Votes",
-        value: optionVoteLines(panel.options),
-      },
-      {
-        name: "Total voters",
-        value: `**${safeCount(panel.totalVoters)}**`,
-        inline: true,
-      },
-      {
-        name: "Deadline",
-        value: panel.deadlineAt
-          ? `<t:${toUnixSeconds(panel.deadlineAt)}:F> (<t:${toUnixSeconds(panel.deadlineAt)}:R>)`
-          : "Manual close",
-        inline: true,
-      },
-      {
-        name: "Creator",
-        value: `\`${safeCodeText(panel.creatorId)}\``,
-        inline: true,
-      },
-      {
-        name: "Created",
-        value: `<t:${toUnixSeconds(panel.createdAt)}:F>`,
-        inline: true,
-      },
+    .setDescription(
+      [
+        panel.title ? `> ${safeEmbedText(panel.question, 1_000)}` : null,
+        metadata,
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join("\n\n"),
     )
+    .addFields({
+      name: `Results  •  ${safeCount(panel.totalVoters)} voter${panel.totalVoters === 1 ? "" : "s"}`,
+      value: optionVoteLines(panel.options),
+    })
     .setFooter({ text: votingFooter(panel) });
   const outcome = completionOutcome(panel);
   if (outcome) embed.addFields({ name: "Result", value: outcome });
   if (panel.status === "completed" && panel.completedAt) {
     embed.addFields({
       name: "Completed",
-      value: completionMetadata(panel.completedAt, panel.completedBy),
+      value: completionMetadata(panel.completedAt, panel.creatorId),
       inline: true,
     });
   }
   if (panel.status === "cancelled" && panel.cancelledAt) {
     embed.addFields({
       name: "Cancelled",
-      value: completionMetadata(panel.cancelledAt, panel.cancelledBy),
+      value: completionMetadata(panel.cancelledAt, panel.creatorId),
       inline: true,
     });
   }
   return embed;
 }
 
+/** Builds the private administrator menu opened by the public Panel options button. */
+export function buildVotingPanelOptionsPayload(
+  panel: VotingPanelView,
+): VotingPanelPayload {
+  validateVotingPanelView(panel);
+  if (!panel.messageId) {
+    throw new TypeError("Voting panel options require a posted panel message.");
+  }
+  const embed = new EmbedBuilder()
+    .setColor(SUPERIOR_PANEL_COLOR)
+    .setTitle("Panel options")
+    .setDescription(
+      "Administrator controls for this vote. These actions update the public panel.",
+    )
+    .addFields(
+      {
+        name: "Close vote",
+        value: "End voting and publish the final result.",
+        inline: true,
+      },
+      {
+        name: "Cancel vote",
+        value: "End voting without publishing a winner.",
+        inline: true,
+      },
+    )
+    .setFooter({ text: "Only server Administrators can use these controls." });
+  return {
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(createVotingCloseCustomId(panel.voteId, panel.messageId))
+          .setLabel("Close vote")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(
+            createVotingCancelCustomId(panel.voteId, panel.messageId),
+          )
+          .setLabel("Cancel vote")
+          .setStyle(ButtonStyle.Danger),
+      ),
+    ],
+    allowedMentions: SAFE_ALLOWED_MENTIONS,
+  };
+}
+
 /**
- * Ten option buttons occupy at most two rows, with the three management
- * controls in the final row. This stays below Discord's five-row maximum.
+ * Ten option buttons occupy at most two rows, with the two panel controls in
+ * the final row. This stays below Discord's five-row maximum.
  */
 export function buildVotingPanelComponents(
   panel: VotingPanelView,
@@ -372,31 +433,36 @@ export function buildVotingPanelComponents(
             createVotingOptionCustomId(panel.voteId, option.optionId),
           )
           .setLabel(optionButtonLabel(option))
-          .setStyle(ButtonStyle.Primary)
+          .setStyle(optionButtonStyle(panel, option))
           .setDisabled(votingDisabled),
       ),
     );
     rows.push(row);
   }
-  rows.push(
-    new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(createVotingViewVotersCustomId(panel.voteId))
-        .setLabel("View voters")
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(viewVotersDisabled),
-      new ButtonBuilder()
-        .setCustomId(createVotingCloseCustomId(panel.voteId))
-        .setLabel("Close vote")
-        .setStyle(ButtonStyle.Success)
-        .setDisabled(votingDisabled),
-      new ButtonBuilder()
-        .setCustomId(createVotingCancelCustomId(panel.voteId))
-        .setLabel("Cancel vote")
-        .setStyle(ButtonStyle.Danger)
-        .setDisabled(votingDisabled),
-    ),
-  );
+  const utilityButtons = [
+    new ButtonBuilder()
+      .setCustomId(createVotingViewVotersCustomId(panel.voteId))
+      .setLabel("View voters")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(viewVotersDisabled),
+    new ButtonBuilder()
+      .setCustomId(createVotingPanelOptionsCustomId(panel.voteId))
+      .setLabel("Panel options")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(votingDisabled),
+  ];
+
+  // Discord action rows are horizontal flex-like groups with a five-component
+  // limit. Keep the common two-choice layout in one compact row and spill the
+  // utility controls into their own row only when a custom vote needs it.
+  const lastRow = rows.at(-1);
+  if (lastRow && panel.options.length + utilityButtons.length <= 5) {
+    lastRow.addComponents(utilityButtons);
+  } else {
+    rows.push(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(utilityButtons),
+    );
+  }
   return rows;
 }
 
@@ -485,28 +551,46 @@ function safeEmbedText(value: string, maximum: number): string {
   ).slice(0, maximum);
 }
 
-function safeCodeText(value: string): string {
-  return value.replace(/[`\\]/gu, "\\$&").slice(0, 100);
-}
-
 function safeCount(value: number): number {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 function optionButtonLabel(option: VotingOptionView): string {
-  const suffix = ` · ${safeCount(option.voteCount)}`;
-  const available = Math.max(
-    1,
-    VOTING_PANEL_LIMITS.optionLabel - suffix.length,
-  );
-  return `${safeEmbedText(option.label, available)}${suffix}`;
+  return safeEmbedText(option.label, VOTING_PANEL_LIMITS.optionLabel);
+}
+
+function optionButtonStyle(
+  panel: VotingPanelView,
+  option: VotingOptionView,
+): ButtonStyle {
+  if (panel.pollType !== "yes-no") return ButtonStyle.Primary;
+  const label = option.label
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase("en-US");
+  if (label === "yes") return ButtonStyle.Success;
+  if (label === "no") return ButtonStyle.Danger;
+  return ButtonStyle.Primary;
 }
 
 function optionVoteLines(options: readonly VotingOptionView[]): string {
-  const lines = options.map(
-    (option, index) =>
-      `${index + 1}. ${safeEmbedText(option.label, 900)} — **${safeCount(option.voteCount)}**`,
+  const totalSelections = options.reduce(
+    (total, option) => total + safeCount(option.voteCount),
+    0,
   );
+  const lines = options.map((option, index) => {
+    const voteCount = safeCount(option.voteCount);
+    const percentage =
+      totalSelections === 0
+        ? 0
+        : Math.round((voteCount / totalSelections) * 100);
+    const filled =
+      voteCount === 0
+        ? 0
+        : Math.max(1, Math.round((percentage / 100) * VOTE_BAR_WIDTH));
+    const bar = `${"▰".repeat(filled)}${"▱".repeat(VOTE_BAR_WIDTH - filled)}`;
+    return `${index + 1}. **${safeEmbedText(option.label, 72)}** \`${bar} ${percentage}%\` · ${voteCount}`;
+  });
   return lines.join("\n").slice(0, 1_024) || "No options available.";
 }
 
@@ -521,13 +605,18 @@ function formatStatus(status: VotingPanelStatus): string {
   }
 }
 
+function endedMetadata(panel: VotingPanelView): string {
+  const endedAt = panel.completedAt ?? panel.cancelledAt;
+  return endedAt ? `Ended <t:${toUnixSeconds(endedAt)}:R>` : "Ended";
+}
+
 function votingFooter(panel: VotingPanelView): string {
   if (panel.status !== "active") {
-    return "How to use: this vote is closed; review the final results above.";
+    return "How to use: this vote is closed; review the results above.";
   }
   return panel.multiSelect
-    ? "How to use: click an option to toggle it, then use View voters to inspect selections."
-    : "How to use: click an option to cast or change your vote, then use View voters to inspect selections.";
+    ? "How to use: select one or more options, then use View voters to inspect selections."
+    : "How to use: select an option, then use View voters to inspect selections.";
 }
 
 function completionOutcome(panel: VotingPanelView): string | null {
@@ -550,7 +639,8 @@ function completionOutcome(panel: VotingPanelView): string | null {
 }
 
 function completionMetadata(timestamp: string, actorId: string | null): string {
-  const actor = actorId ? ` by \`${safeCodeText(actorId)}\`` : "";
+  const actor =
+    actorId && DISCORD_USER_ID_PATTERN.test(actorId) ? ` by <@${actorId}>` : "";
   return `<t:${toUnixSeconds(timestamp)}:F>${actor}`;
 }
 

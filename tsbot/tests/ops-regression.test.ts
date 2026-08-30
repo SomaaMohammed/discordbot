@@ -71,7 +71,7 @@ describe("operations safeguards", () => {
     expect(gitIgnore).toContain("*.env");
     expect(gitIgnore).toContain("*.db");
     expect(gitIgnore).toContain("*.sqlite3");
-    expect(packageJson.engines?.node).toBe(">=22.12.0");
+    expect(packageJson.engines?.node).toBe(">=22.14.0");
   });
 
   it.skipIf(!bashAvailable)("passes Bash syntax validation", () => {
@@ -88,11 +88,11 @@ describe("operations safeguards", () => {
       source "$OPS_PATH"
       rejection_log="$(mktemp)"
       trap 'rm -f -- "$rejection_log"' EXIT
-      if (node() { printf '%s' '22.11.9'; }; require_supported_node) 2>"$rejection_log"; then
+      if (node() { printf '%s' '22.13.1'; }; require_supported_node) 2>"$rejection_log"; then
         exit 91
       fi
-      grep -q 'Node.js 22.12.0 or newer is required; found 22.11.9' "$rejection_log"
-      (node() { printf '%s' '22.12.0'; }; require_supported_node)
+      grep -q 'Node.js 22.14.0 or newer is required; found 22.13.1' "$rejection_log"
+      (node() { printf '%s' '22.14.0'; }; require_supported_node)
       (node() { printf '%s' '23.0.0'; }; require_supported_node)
     `);
     expect(result.stderr).toBe("");

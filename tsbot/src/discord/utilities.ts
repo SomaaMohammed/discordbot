@@ -12,6 +12,7 @@ import {
 } from "discord.js";
 import { DateTime } from "luxon";
 import type { GuildRuntime } from "../runtime.js";
+import { SUPERIOR_PANEL_COLOR } from "./panel-theme.js";
 
 const UTILITY_COMMAND_NAME = "utility";
 const DISCORD_EPOCH_MS = 1_420_070_400_000n;
@@ -187,6 +188,7 @@ async function handlePing(
       : "Unavailable";
   const version = runtime.botVersion.trim() || "Unknown";
   const embed = new EmbedBuilder()
+    .setColor(SUPERIOR_PANEL_COLOR)
     .setTitle("Bot Status")
     .setDescription("Superior is online and responsive.")
     .addFields(
@@ -231,6 +233,7 @@ async function handleAvatar(
     `[Global avatar](${globalAvatarUrl})`,
   ].filter((link): link is string => link !== null);
   const embed = new EmbedBuilder()
+    .setColor(SUPERIOR_PANEL_COLOR)
     .setTitle(`${displayName}'s Avatar`)
     .setDescription(avatarLinks.join(" | "))
     .setImage(serverAvatarUrl ?? globalAvatarUrl)
@@ -263,6 +266,7 @@ async function handleUserInfo(
   }
   const roleCount = Math.max(member.roles.cache.size - 1, 0);
   const embed = new EmbedBuilder()
+    .setColor(SUPERIOR_PANEL_COLOR)
     .setTitle("User Information")
     .setThumbnail(member.displayAvatarURL({ extension: "png", size: 512 }))
     .addFields(
@@ -307,6 +311,7 @@ async function handleServerInfo(
   const boostCount = guild.premiumSubscriptionCount ?? 0;
   const boostTier = Number(guild.premiumTier);
   const embed = new EmbedBuilder()
+    .setColor(SUPERIOR_PANEL_COLOR)
     .setTitle("Server Information")
     .setDescription(escapeMarkdown(guild.name))
     .addFields(
@@ -355,22 +360,22 @@ async function handleRoleInfo(
     });
     return;
   }
-  const embed = new EmbedBuilder().setTitle("Role Information").addFields(
-    { name: "Name", value: escapeMarkdown(role.name), inline: true },
-    { name: "Role ID", value: `\`${role.id}\``, inline: true },
-    { name: "Members", value: `\`${role.members.size}\``, inline: true },
-    { name: "Position", value: `\`${role.position}\``, inline: true },
-    {
-      name: "Mentionable",
-      value: role.mentionable ? "Yes" : "No",
-      inline: true,
-    },
-    { name: "Managed", value: role.managed ? "Yes" : "No", inline: true },
-    { name: "Created", value: formatDiscordDate(role.createdTimestamp) },
-  );
-  if (role.hexColor !== "#000000") {
-    embed.setColor(role.color);
-  }
+  const embed = new EmbedBuilder()
+    .setColor(SUPERIOR_PANEL_COLOR)
+    .setTitle("Role Information")
+    .addFields(
+      { name: "Name", value: escapeMarkdown(role.name), inline: true },
+      { name: "Role ID", value: `\`${role.id}\``, inline: true },
+      { name: "Members", value: `\`${role.members.size}\``, inline: true },
+      { name: "Position", value: `\`${role.position}\``, inline: true },
+      {
+        name: "Mentionable",
+        value: role.mentionable ? "Yes" : "No",
+        inline: true,
+      },
+      { name: "Managed", value: role.managed ? "Yes" : "No", inline: true },
+      { name: "Created", value: formatDiscordDate(role.createdTimestamp) },
+    );
   await replyWithMetric(interaction, runtime, "utility.roleinfo", {
     embeds: [embed],
   });
@@ -391,19 +396,22 @@ async function handleChannelInfo(
   const parentName = channel.parent?.name
     ? escapeMarkdown(channel.parent.name)
     : "None";
-  const embed = new EmbedBuilder().setTitle("Channel Information").addFields(
-    { name: "Name", value: escapeMarkdown(channel.name), inline: true },
-    { name: "Channel ID", value: `\`${channel.id}\``, inline: true },
-    { name: "Type", value: channelTypeLabel(channel.type), inline: true },
-    { name: "Category", value: parentName, inline: true },
-    {
-      name: "Created",
-      value:
-        channel.createdTimestamp === null
-          ? "Unavailable"
-          : formatDiscordDate(channel.createdTimestamp),
-    },
-  );
+  const embed = new EmbedBuilder()
+    .setColor(SUPERIOR_PANEL_COLOR)
+    .setTitle("Channel Information")
+    .addFields(
+      { name: "Name", value: escapeMarkdown(channel.name), inline: true },
+      { name: "Channel ID", value: `\`${channel.id}\``, inline: true },
+      { name: "Type", value: channelTypeLabel(channel.type), inline: true },
+      { name: "Category", value: parentName, inline: true },
+      {
+        name: "Created",
+        value:
+          channel.createdTimestamp === null
+            ? "Unavailable"
+            : formatDiscordDate(channel.createdTimestamp),
+      },
+    );
   await replyWithMetric(interaction, runtime, "utility.channelinfo", {
     embeds: [embed],
   });

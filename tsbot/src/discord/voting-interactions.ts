@@ -13,6 +13,7 @@ import {
   type MessageCreateOptions,
   type MessageEditOptions,
 } from "discord.js";
+import { SUPERIOR_PANEL_COLOR } from "./panel-theme.js";
 import type { GuildRuntime } from "../runtime.js";
 import type {
   VotingPanel,
@@ -25,6 +26,7 @@ import { fetchVerifiedGuildMember } from "./authorization.js";
 import {
   VOTING_PANEL_LIMITS,
   buildVotingPanelPayload,
+  buildVotingPanelOptionsPayload,
   normalizeVotingDescription,
   normalizeVotingPollType,
   normalizeVotingQuestion,
@@ -244,6 +246,15 @@ export async function handleVotingPanelButton(
     await handleViewVotersButton(interaction, runtime, storage, parsed.voteId);
     return true;
   }
+  if (parsed.kind === "panel-options") {
+    await handlePanelOptionsButton(
+      interaction,
+      runtime,
+      storage,
+      parsed.voteId,
+    );
+    return true;
+  }
   await handleManagementButton(interaction, runtime, storage, parsed);
   return true;
 }
@@ -455,13 +466,55 @@ async function handleViewVotersButton(
   await replyPrivateEmbed(interaction, buildVoterListEmbed(panel, voters));
 }
 
+async function handlePanelOptionsButton(
+  interaction: ButtonInteraction,
+  runtime: GuildRuntime,
+  storage: VotingPanelStorage,
+  voteId: string,
+): Promise<void> {
+  await deferPrivate(interaction);
+  const panel = getBoundActivePanel(interaction, runtime, storage, voteId);
+  if (!panel) {
+    await replyPrivate(
+      interaction,
+      "This voting panel is stale, closed, or does not belong to this panel.",
+    );
+    return;
+  }
+  if (!interaction.guild) {
+    await replyPrivate(
+      interaction,
+      "This voting panel is no longer available.",
+    );
+    return;
+  }
+  if (
+    !(await fetchVotingAdministrator(interaction.guild, interaction.user.id))
+  ) {
+    await replyPrivate(
+      interaction,
+      "You need Discord's Administrator permission to open panel options.",
+    );
+    return;
+  }
+  await replyPrivatePayload(interaction, buildVotingPanelOptionsPayload(panel));
+}
+
 async function handleManagementButton(
   interaction: ButtonInteraction,
   runtime: GuildRuntime,
   storage: VotingPanelStorage,
   parsed:
-    | { readonly kind: "close"; readonly voteId: string }
-    | { readonly kind: "cancel"; readonly voteId: string },
+    | {
+        readonly kind: "close";
+        readonly voteId: string;
+        readonly panelMessageId?: string;
+      }
+    | {
+        readonly kind: "cancel";
+        readonly voteId: string;
+        readonly panelMessageId?: string;
+      },
 ): Promise<void> {
   const guild = interaction.guild;
   if (!guild || guild.id !== runtime.guildId || !runtime.isCurrent()) {
@@ -482,18 +535,32 @@ async function handleManagementButton(
     );
     return;
   }
-  await deferPublic(interaction);
+  const sourceMessage = await resolveVotingManagementMessage(
+    interaction,
+    parsed.panelMessageId,
+  );
+  const fromPanelOptions = Boolean(parsed.panelMessageId);
+  if (!sourceMessage) {
+    await replyPrivate(
+      interaction,
+      "This voting panel is stale, closed, or does not belong to this panel.",
+    );
+    return;
+  }
+  if (fromPanelOptions) await deferPrivate(interaction);
+  else await deferPublic(interaction);
   const panel = getBoundActivePanel(
     interaction,
     runtime,
     storage,
     parsed.voteId,
+    sourceMessage,
   );
   if (!panel) {
-    await replyPublic(
-      interaction,
-      "This voting panel is stale, closed, or does not belong to this message.",
-    );
+    const message =
+      "This voting panel is stale, closed, or does not belong to this message.";
+    if (fromPanelOptions) await replyPrivate(interaction, message);
+    else await replyPublic(interaction, message);
     return;
   }
   const transition = storage.transitionVotingPanel(
@@ -503,7 +570,17 @@ async function handleManagementButton(
     new Date().toISOString(),
   );
   if (transition.status === "not-found" || !transition.panel) {
-    await replyPublic(interaction, "This voting panel is no longer available.");
+    if (fromPanelOptions) {
+      await replyPrivate(
+        interaction,
+        "This voting panel is no longer available.",
+      );
+    } else {
+      await replyPublic(
+        interaction,
+        "This voting panel is no longer available.",
+      );
+    }
     return;
   }
 
@@ -518,22 +595,39 @@ async function handleManagementButton(
       ?.permissionsFor(botMember)
       ?.has(PermissionFlagsBits.MentionEveryone),
   );
-  await deliverVotingPanelCompletion(interaction.message, transition.panel, {
+  await deliverVotingPanelCompletion(sourceMessage, transition.panel, {
     allowEveryoneMention: allowCompletionMention,
   }).catch(() => undefined);
-  const action = transition.panel.status === "completed" ? "completed" : "cancelled";
+  const action =
+    transition.panel.status === "completed" ? "completed" : "cancelled";
   if (transition.status === "transitioned") {
     recordVotingMetric(
       runtime,
       action === "completed" ? "panel.vote.close" : "panel.vote.cancel",
     );
   }
-  await replyPublic(
-    interaction,
+  const response =
     transition.status === "transitioned"
       ? `Vote ${action}.`
-      : `This vote was already ${action}.`,
-  );
+      : `This vote was already ${action}.`;
+  if (fromPanelOptions) await replyPrivate(interaction, response);
+  else await replyPublic(interaction, response);
+}
+
+async function resolveVotingManagementMessage(
+  interaction: ButtonInteraction,
+  panelMessageId: string | undefined,
+): Promise<Message | null> {
+  if (!panelMessageId || panelMessageId === interaction.message.id) {
+    return interaction.message;
+  }
+  const channel = getInteractionVotingChannel(interaction);
+  if (!channel) return null;
+  try {
+    return await channel.messages.fetch(panelMessageId);
+  } catch {
+    return null;
+  }
 }
 
 function getBoundActivePanel(
@@ -541,8 +635,15 @@ function getBoundActivePanel(
   runtime: GuildRuntime,
   storage: VotingPanelStorage,
   voteId: string,
+  sourceMessage: Message = interaction.message,
 ): VotingPanel | null {
-  const panel = getBoundVotingPanel(interaction, runtime, storage, voteId);
+  const panel = getBoundVotingPanel(
+    interaction,
+    runtime,
+    storage,
+    voteId,
+    sourceMessage,
+  );
   if (!panel || panel.status !== "active") {
     return null;
   }
@@ -564,6 +665,7 @@ function getBoundVotingPanel(
   runtime: GuildRuntime,
   storage: VotingPanelStorage,
   voteId: string,
+  sourceMessage: Message = interaction.message,
 ): VotingPanel | null {
   const panel = storage.getVotingPanel(voteId);
   if (
@@ -573,8 +675,8 @@ function getBoundVotingPanel(
     interaction.guild?.id !== runtime.guildId ||
     interaction.guildId !== runtime.guildId ||
     panel.channelId !== interaction.channelId ||
-    panel.messageId !== interaction.message.id ||
-    interaction.message.author?.id !== interaction.client.user?.id
+    panel.messageId !== sourceMessage.id ||
+    sourceMessage.author?.id !== interaction.client.user?.id
   ) {
     return null;
   }
@@ -729,7 +831,7 @@ function buildVoterListEmbed(
     }
   }
   const embed = new EmbedBuilder()
-    .setColor(0xd4af37)
+    .setColor(SUPERIOR_PANEL_COLOR)
     .setTitle("Voting panel voters")
     .setDescription(
       `Current selections for **${escapeMarkdown(panel.title ?? panel.question)
@@ -809,10 +911,16 @@ async function replyPrivateEmbed(
   interaction: ButtonInteraction,
   embed: EmbedBuilder,
 ): Promise<void> {
-  const payload: MessageEditOptions & MessageCreateOptions = {
+  await replyPrivatePayload(interaction, {
     embeds: [embed],
     allowedMentions: SAFE_ALLOWED_MENTIONS,
-  };
+  });
+}
+
+async function replyPrivatePayload(
+  interaction: ButtonInteraction,
+  payload: MessageEditOptions & MessageCreateOptions,
+): Promise<void> {
   if (interaction.deferred && !interaction.replied) {
     await interaction.editReply(payload);
     return;

@@ -1,3 +1,5 @@
+#Requires -Version 7.0
+
 [CmdletBinding()]
 param(
     [string]$Executable = "SuperiorBot.exe",
@@ -92,7 +94,7 @@ $EnvironmentNames = @(
 $SavedEnvironment = @{}
 foreach ($Name in $EnvironmentNames) {
     $SavedEnvironment[$Name] = [System.Environment]::GetEnvironmentVariable($Name, "Process")
-    [System.Environment]::SetEnvironmentVariable($Name, $null, "Process")
+    Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
 }
 
 try {
@@ -118,7 +120,12 @@ try {
 }
 finally {
     foreach ($Name in $EnvironmentNames) {
-        [System.Environment]::SetEnvironmentVariable($Name, $SavedEnvironment[$Name], "Process")
+        if ($null -eq $SavedEnvironment[$Name]) {
+            Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
+        }
+        else {
+            [System.Environment]::SetEnvironmentVariable($Name, $SavedEnvironment[$Name], "Process")
+        }
     }
     $ResolvedTemporaryRoot = [System.IO.Path]::GetFullPath($TemporaryRoot)
     $TemporaryPrefix = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd("\") + "\"

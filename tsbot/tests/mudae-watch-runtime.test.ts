@@ -39,6 +39,7 @@ function startRuntime(root: string): BotRuntime {
       dbFile: path.join(root, "superior.db"),
       commandRegistrationMode: "global",
       devGuildIds: [],
+      operatorIds: [],
     },
     root,
   );

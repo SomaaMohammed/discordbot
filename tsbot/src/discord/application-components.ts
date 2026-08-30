@@ -138,7 +138,7 @@ export function buildApplicationReviewPayload(
   form: Pick<ApplicationFormDisplay, "displayName" | "description">,
   responses: readonly FormResponse[],
 ): MessageCreateOptions & MessageEditOptions {
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Application")
     .setTitle(
       `${safeDisplayText(form.displayName, 160)} · Application #${application.applicationNumber}`,
     )

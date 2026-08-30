@@ -1,3 +1,5 @@
+#Requires -Version 7.0
+
 function Get-Sha256Hex {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$LiteralPath)

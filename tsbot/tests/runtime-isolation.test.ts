@@ -26,6 +26,7 @@ function createTestRuntime(): BotRuntime {
     dbFile: path.join(root, "superior.db"),
     commandRegistrationMode: "global",
     devGuildIds: [],
+    operatorIds: [],
   });
   runtimes.push(runtime);
   return runtime;

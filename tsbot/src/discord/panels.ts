@@ -2,7 +2,6 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  EmbedBuilder,
   MessageFlags,
   ModalBuilder,
   PermissionFlagsBits,
@@ -19,6 +18,7 @@ import {
 import { classifyError } from "../errors.js";
 import type { GuildRuntime } from "../runtime.js";
 import { logDomainOutcome } from "./domain-outcomes.js";
+import { createSuperiorEmbed } from "./panel-theme.js";
 
 export const ROLE_BUTTON_PREFIX = "superior:role:";
 export const DM_BUTTON_PREFIX = "superior:dm:";
@@ -357,7 +357,7 @@ async function handleDmPanel(
     "Send private message",
     80,
   );
-  const embed = new EmbedBuilder()
+  const embed = createSuperiorEmbed("Private message")
     .setTitle(escapeMarkdown(title).slice(0, 256))
     .setDescription(escapeMarkdown(description).slice(0, 4_096))
     .setFooter({
@@ -460,7 +460,7 @@ async function handleRolePanel(
       .setStyle(index % 2 === 0 ? ButtonStyle.Primary : ButtonStyle.Secondary),
   );
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(components);
-  const embed = new EmbedBuilder()
+  const embed = createSuperiorEmbed("Role")
     .setTitle(escapeMarkdown(title).slice(0, 256))
     .setDescription(escapeMarkdown(description).slice(0, 4_096))
     .setFooter({

@@ -6,6 +6,7 @@ import {
 } from "discord.js";
 import { DISCORD_SNOWFLAKE_PATTERN } from "./guild-settings.js";
 import type { ParsedMudaeRoll } from "./mudae-roll-parser.js";
+import { SUPERIOR_PANEL_COLOR } from "./discord/panel-theme.js";
 
 export const PRIVATE_MUDAE_SAFE_ALLOWED_MENTIONS: MessageMentionOptions =
   Object.freeze({
@@ -159,6 +160,7 @@ function buildSafeFallbackEmbed(
   jumpUrl: string,
 ): EmbedBuilder {
   const embed = new EmbedBuilder()
+    .setColor(SUPERIOR_PANEL_COLOR)
     .setTitle(truncateCodePoints(`Mudae roll: ${roll.characterName}`, 256))
     .setDescription(`Series: ${roll.seriesName}`)
     .setURL(jumpUrl)

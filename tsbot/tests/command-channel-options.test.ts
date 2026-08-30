@@ -58,6 +58,7 @@ describe("public command surface", () => {
     expect(commandNames).toEqual([
       "config",
       "data",
+      "operator",
       "help",
       "channel",
       "timeout",

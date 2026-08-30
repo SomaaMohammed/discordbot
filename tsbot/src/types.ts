@@ -6,6 +6,7 @@ export interface ProcessConfig {
   dbFile: string;
   commandRegistrationMode: CommandRegistrationMode;
   devGuildIds: string[];
+  operatorIds: string[];
 }
 
 export interface GuildGreetingProfile {

@@ -17,6 +17,7 @@ import type {
   RestrictedPingRoleConfiguration,
 } from "../types.js";
 import { authorizeOwnerOrAdministrator } from "./authorization.js";
+import { SUPERIOR_PANEL_COLOR } from "./panel-theme.js";
 import { RESTRICTED_PING_LIST_PAGE_SIZE } from "./restricted-ping-command.js";
 import {
   executeRestrictedPing,
@@ -364,6 +365,7 @@ async function listConfigurations(
     return;
   }
   const embed = new EmbedBuilder()
+    .setColor(SUPERIOR_PANEL_COLOR)
     .setTitle("Restricted Role Pings")
     .setDescription(
       `Configured roles: **${total}** - page **${page}** of **${Math.max(1, Math.ceil(total / RESTRICTED_PING_LIST_PAGE_SIZE))}**`,
@@ -442,6 +444,7 @@ async function showConfiguration(
     return;
   }
   const embed = new EmbedBuilder()
+    .setColor(SUPERIOR_PANEL_COLOR)
     .setTitle("Restricted Role Ping Information")
     .setDescription(role ? `@${escapeMarkdown(role.name)}` : "Deleted role")
     .addFields(

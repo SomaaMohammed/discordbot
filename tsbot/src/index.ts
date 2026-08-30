@@ -11,6 +11,7 @@ import {
   loginWithShutdown,
   type ShutdownCoordinator,
 } from "./shutdown.js";
+import { ensureDatabaseCurrent } from "./storage/startup-migration.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFile);
@@ -28,6 +29,16 @@ async function main(): Promise<void> {
     applicationRoot: repoRoot,
   });
   const config = loadProcessConfig(repoRoot);
+  if (process.env.SUPERIOR_AUTO_MIGRATE === "1") {
+    const migration = await ensureDatabaseCurrent({ dbFile: config.dbFile });
+    if (migration.status === "migrated") {
+      logInfo("storage-upgrade", "Database upgraded automatically", {
+        fromSchema: migration.fromSchema,
+        toSchema: migration.schema,
+        backupFile: migration.backupFile,
+      });
+    }
+  }
   logInfo("bootstrap", "Process configuration validated", {
     tokenConfigured: Boolean(config.discordToken),
     databaseMode: config.dbFile === ":memory:" ? "memory" : "file",

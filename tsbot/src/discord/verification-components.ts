@@ -86,7 +86,7 @@ export function buildVerificationPanelPayload(
   const acknowledgement = request.reacceptanceRequested
     ? CHANGED_RULES_ACKNOWLEDGEMENT
     : CURRENT_RULES_ACKNOWLEDGEMENT;
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Verification")
     .setTitle(escapeMarkdown(title))
     .setDescription(`${escapeMarkdown(body)}\n\n${acknowledgement}`)
     .addFields({

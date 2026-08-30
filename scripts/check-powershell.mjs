@@ -9,10 +9,7 @@ const parserCheck = path.resolve(
   "windows",
   "check-powershell-syntax.ps1",
 );
-const candidates =
-  process.platform === "win32"
-    ? ["powershell.exe", "pwsh.exe"]
-    : ["pwsh", "powershell"];
+const candidates = process.platform === "win32" ? ["pwsh.exe"] : ["pwsh"];
 
 for (const executable of candidates) {
   const arguments_ = ["-NoLogo", "-NoProfile"];
@@ -33,5 +30,5 @@ for (const executable of candidates) {
 }
 
 throw new Error(
-  "PowerShell is required to parse the Windows release scripts (tried pwsh and powershell).",
+  "PowerShell 7 (pwsh) is required to parse the Windows release scripts.",
 );

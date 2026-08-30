@@ -9,6 +9,8 @@ FIRST RUN
    Content Intent for the bot.
 2. Copy .env.example to a new file named .env in this folder.
 3. Open .env in Notepad, set DISCORD_TOKEN, save, and close it.
+   Optionally set BOT_OPERATOR_IDS to the deployment owner's Discord ID for
+   the visible, audited /operator recovery controls.
 4. Run SuperiorBot.exe --check. This checks configuration and native SQLite in
    memory without connecting to Discord or creating a database.
 5. Double-click SuperiorBot.exe to start the bot.
@@ -30,8 +32,10 @@ LAUNCHER COMMANDS
 DATA AND BACKUPS
 - superior.db is created beside the launcher unless DB_FILE selects another
   path. SQLite sidecars can appear while the bot is running.
-- A missing or empty database is initialized as schema v10. Startup does not
-  upgrade an older schema automatically.
+- A missing or empty database is initialized as schema v10. On normal launch,
+  the packaged executable automatically backs up and upgrades supported schema
+  v2-v9 databases before Discord login. It never modifies schema v1, unknown,
+  malformed, or partial databases.
 - Never share .env, a database, a sidecar, export, or backup. Schema-v10 files
   can contain the existing workflow data plus private moderation/review fields,
   rules and welcome/farewell templates, member acceptance/lifecycle timestamps,
@@ -53,33 +57,24 @@ DATA AND BACKUPS
   package-lock hash, and deterministic source identity used for this build.
 
 SCHEMA UPGRADE
-Version 6.5.1 will not start against schema v9, v8, v7, v6, v5, v4, v3, or v2.
-Close every old bot, bundled node.exe, and SQLite editor; keep the original
-database untouched; and copy it into this folder as superior.db. For the normal
-schema-v9 upgrade from Superior 6.1.0, run these commands in PowerShell:
+Version 7.2.4 will not start against schema v1, unknown, malformed, or partial
+databases. It automatically upgrades exact schema v2-v9 databases when you run
+SuperiorBot.exe. Close every old bot, bundled node.exe, and SQLite editor first;
+keep the original database untouched; and copy the working database into this
+folder as superior.db.
 
-  New-Item -ItemType Directory -Path .\backups -Force
-  .\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 9
-  .\runtime\node.exe .\app\dist\src\storage\backup-cli.js --db .\superior.db --out .\backups\pre-schema10-schema9.db --expect 9
-  .\runtime\node.exe .\app\dist\src\storage\migrate-cli.js --db .\superior.db --dry-run
-  .\runtime\node.exe .\app\dist\src\storage\migrate-cli.js --db .\superior.db
-  .\runtime\node.exe .\app\dist\src\storage\check-cli.js --db .\superior.db --expect 10
-  .\SuperiorBot.exe --check
+On launch, the executable validates the source, creates a timestamped
+SQLite-aware backup under .\backups, performs a complete dry-run, applies the
+transactional migration to v10, validates the result, and only then logs in to
+Discord. If any step fails, the bot does not start and the backup is retained.
+The source remains unchanged if the migration fails. The migration preserves
+existing rows and external Discord IDs, adds empty/default-disabled Phase 4
+storage, never invents joins, rules, acceptances, menus, deliveries, or role
+outcomes, and performs no Discord messages or role changes.
 
-Stop if any command fails. Migration runs in one transaction and a failure
-leaves the copied source at v9. It preserves every v9 row and external Discord
-ID, extends delegated-capability and panel-preset constraints without losing
-existing grants/panels, and adds empty/default-disabled Phase 4 storage. It
-never invents joins, rules, acceptances, menus, deliveries, or role outcomes,
-sends welcome messages, or changes Discord roles. Keep the validated v9 backup
-until the migrated copy and workflows have been reviewed.
-
-Exact schema v8, v7, v6, v5, v4, v3, and the exact supported schema-v2 layout
-can migrate directly to v10. Use the same commands with --expect 8, 7, 6, 5, 4,
-3, or 2 for the source check and backup, a matching backup name, and --expect 10
-for the final check. All frozen historical stages and v9-to-v10 run in one outer
-transaction. Schema v1 must first be upgraded to v2 with the final 4.0.0 source
-release. Renaming a file does not change its schema.
+Schema v1 must first be upgraded to v2 with the final 4.0.0 source release.
+Unknown, malformed, or partial databases stop with an error rather than being
+overwritten. Renaming a file does not change its schema.
 
 After migration, review /config status, /access list, /panel status, existing
 panel buttons, ticket department health/recovery, suggestion configuration,

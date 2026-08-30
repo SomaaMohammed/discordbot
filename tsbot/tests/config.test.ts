@@ -12,6 +12,7 @@ import { PACKAGE_VERSION } from "../src/constants.js";
 
 const ENV_KEYS = [
   "BOT_VERSION",
+  "BOT_OPERATOR_IDS",
   "COMMAND_REGISTRATION_MODE",
   "DB_FILE",
   "DEV_GUILD_IDS",
@@ -88,6 +89,7 @@ describe("configuration", () => {
         "DISCORD_TOKEN=synthetic-token",
         "COMMAND_REGISTRATION_MODE=guild",
         "DEV_GUILD_IDS=111111111111111111,222222222222222222",
+        "BOT_OPERATOR_IDS=333333333333333333,333333333333333333",
         "DB_FILE=synthetic.db",
       ].join("\n"),
     );
@@ -96,6 +98,7 @@ describe("configuration", () => {
       discordToken: "synthetic-token",
       commandRegistrationMode: "guild",
       devGuildIds: ["111111111111111111", "222222222222222222"],
+      operatorIds: ["333333333333333333"],
       dbFile: path.join(root, "synthetic.db"),
     });
     expect(config).not.toHaveProperty("schedulerConcurrency");

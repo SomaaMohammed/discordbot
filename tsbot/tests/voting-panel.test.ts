@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   VOTING_PANEL_COMPONENT_PREFIX,
+  buildVotingPanelOptionsPayload,
   buildVotingPanelPayload,
   createVotingCancelCustomId,
   createVotingCloseCustomId,
   createVotingOptionCustomId,
+  createVotingPanelOptionsCustomId,
   createVotingViewVotersCustomId,
   parseVotingPanelComponentId,
   parseVotingPanelOptions,
@@ -79,9 +81,90 @@ describe("voting panel rendering and validation", () => {
     expect(payload.components.map((row) => row.components)).toHaveLength(3);
     expect(payload.components[0]?.components).toHaveLength(5);
     expect(payload.components[1]?.components).toHaveLength(5);
-    expect(payload.components[2]?.components).toHaveLength(3);
+    expect(payload.components[2]?.components).toHaveLength(2);
     expect(payload.embeds[0].data.footer?.text).toMatch(/^How to use:/);
     expect(payload.allowedMentions.parse).toEqual([]);
+  });
+
+  it("keeps the public vote focused and moves administrator controls into a private menu", () => {
+    const panel = panelView({
+      deadlineAt: "2026-01-01T02:00:00.000Z",
+      options: [
+        { optionId: "option_yes", label: "Yes", voteCount: 3 },
+        { optionId: "option_no", label: "No", voteCount: 1 },
+      ],
+      totalVoters: 4,
+    });
+    const publicEmbed = buildVotingPanelPayload(panel).embeds[0].toJSON();
+    const publicText = JSON.stringify(publicEmbed);
+    const publicControls = buildVotingPanelPayload(panel).components.at(-1);
+
+    expect(publicText).not.toContain("Creator");
+    expect(publicText).not.toContain("Poll type");
+    expect(publicText).not.toContain("Choose the answer you support");
+    expect(publicText).toContain("Ends");
+    expect(publicEmbed.author).toEqual({ name: "Voting panel" });
+    expect(publicEmbed.description).not.toMatch(/[🟡🟢🔴]/u);
+    expect(publicEmbed.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Results  •  4 voters" }),
+      ]),
+    );
+    expect(publicControls?.components).toHaveLength(4);
+    expect(publicControls?.components[0]?.data).toMatchObject({
+      label: "Yes",
+    });
+    expect(publicControls?.components[1]?.data).toMatchObject({
+      label: "No",
+    });
+    expect(publicControls?.components[2]?.data).toMatchObject({
+      label: "View voters",
+    });
+    expect(publicControls?.components[3]?.data).toMatchObject({
+      label: "Panel options",
+    });
+
+    const privateOptions = buildVotingPanelOptionsPayload(panel);
+    expect(privateOptions.components[0]?.components).toHaveLength(2);
+    expect(privateOptions.components[0]?.components[0]?.data).toMatchObject({
+      label: "Close vote",
+    });
+    expect(privateOptions.components[0]?.components[1]?.data).toMatchObject({
+      label: "Cancel vote",
+    });
+
+    const completedEmbed = buildVotingPanelPayload(
+      panelView({
+        status: "completed",
+        completedAt: "2026-01-01T03:00:00.000Z",
+        completedBy: "555555555555555555",
+      }),
+    ).embeds[0].toJSON();
+    expect(JSON.stringify(completedEmbed)).toContain(
+      "by <@444444444444444444>",
+    );
+    expect(JSON.stringify(completedEmbed)).not.toContain(
+      "by <@555555555555555555>",
+    );
+    expect(JSON.stringify(completedEmbed)).toContain("Ended");
+    expect(JSON.stringify(completedEmbed)).not.toContain("Ends");
+  });
+
+  it("parses the public options control and source-bound management controls", () => {
+    expect(
+      parseVotingPanelComponentId(
+        createVotingPanelOptionsCustomId("vote_panel"),
+      ),
+    ).toEqual({ kind: "panel-options", voteId: "vote_panel" });
+    expect(
+      parseVotingPanelComponentId(
+        createVotingCloseCustomId("vote_panel", "333333333333333333"),
+      ),
+    ).toEqual({
+      kind: "close",
+      voteId: "vote_panel",
+      panelMessageId: "333333333333333333",
+    });
   });
 
   it("reports ties plainly and only permits explicit authorized @everyone content", () => {
@@ -150,8 +233,7 @@ describe("voting panel rendering and validation", () => {
     );
     const controls = completed.components.flatMap((row) => row.components);
     expect(controls[0]?.data.disabled).toBe(true);
-    expect(controls.at(-3)?.data.disabled).toBe(false);
-    expect(controls.at(-2)?.data.disabled).toBe(true);
+    expect(controls.at(-2)?.data.disabled).toBe(false);
     expect(controls.at(-1)?.data.disabled).toBe(true);
 
     const cancelled = buildVotingPanelPayload(

@@ -103,6 +103,7 @@ export function loadProcessConfig(repoRoot: string): ProcessConfig {
   }
   const commandRegistrationMode: CommandRegistrationMode = registrationRaw;
   const devGuildIds = envSnowflakeList("DEV_GUILD_IDS");
+  const operatorIds = envSnowflakeList("BOT_OPERATOR_IDS");
   if (commandRegistrationMode === "guild" && devGuildIds.length === 0) {
     throw new Error(
       "DEV_GUILD_IDS must contain at least one Discord snowflake when COMMAND_REGISTRATION_MODE=guild",
@@ -115,5 +116,6 @@ export function loadProcessConfig(repoRoot: string): ProcessConfig {
     dbFile: resolveDatabaseFile(repoRoot),
     commandRegistrationMode,
     devGuildIds,
+    operatorIds,
   };
 }

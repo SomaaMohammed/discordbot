@@ -54,7 +54,8 @@ internal static class Program
                     payloadHash,
                     sourceIdentity,
                     "portable-directory",
-                    true
+                    true,
+                    false
                 );
             }
 
@@ -79,6 +80,7 @@ internal static class Program
                     payloadHash,
                     sourceIdentity,
                     "portable-directory",
+                    false,
                     false
                 );
             }
@@ -104,7 +106,8 @@ internal static class Program
                     payloadHash,
                     sourceIdentity,
                     "portable-directory",
-                    false
+                    false,
+                    true
                 );
                 LauncherSupport.Log(
                     exitCode == 0 ? "INFO" : "ERROR",
@@ -128,7 +131,8 @@ internal static class Program
         string payloadHash,
         string sourceIdentity,
         string cacheStatus,
-        bool diagnostics
+        bool diagnostics,
+        bool autoMigrate
     )
     {
         string node = Path.Combine(root, "runtime", "node.exe");
@@ -160,6 +164,10 @@ internal static class Program
         start.EnvironmentVariables["SUPERIOR_PAYLOAD_SHA256"] = payloadHash;
         start.EnvironmentVariables["SUPERIOR_SOURCE_SHA256"] = sourceIdentity;
         start.EnvironmentVariables["SUPERIOR_PAYLOAD_CACHE"] = cacheStatus;
+        if (autoMigrate)
+        {
+            start.EnvironmentVariables["SUPERIOR_AUTO_MIGRATE"] = "1";
+        }
         if (!diagnostics)
         {
             start.EnvironmentVariables["SUPERIOR_PORTABLE_EXPECT_ROOT"] = root;

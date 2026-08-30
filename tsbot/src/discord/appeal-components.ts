@@ -117,7 +117,7 @@ export function buildAppealReviewPayload(
   appeal: CaseAppeal,
   moderationCase: ModerationCase,
 ): MessageCreateOptions & MessageEditOptions {
-  const embed = createSuperiorEmbed()
+  const embed = createSuperiorEmbed("Appeal")
     .setTitle(`Case Appeal #${appeal.appealNumber}`)
     .setDescription(escapeMarkdown(safeDisplayText(appeal.explanation, 2_000)))
     .addFields(

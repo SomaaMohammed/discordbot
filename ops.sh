@@ -108,8 +108,8 @@ require_supported_node() {
   version="$(node -p 'process.versions.node')"
   local major minor
   IFS=. read -r major minor _ <<<"$version"
-  if (( major < 22 || (major == 22 && minor < 12) )); then
-    die "Node.js 22.12.0 or newer is required; found $version"
+  if (( major < 22 || (major == 22 && minor < 14) )); then
+    die "Node.js 22.14.0 or newer is required; found $version"
   fi
 }
 
