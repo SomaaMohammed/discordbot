@@ -159,7 +159,7 @@ rollback_release() {
     systemctl start "$SERVICE_NAME" || true
     die "Rollback failed; the prior active link was restored"
   fi
-  if ! "$SCRIPT_DIR/validate-service.sh" --health-only \
+  if ! bash "$SCRIPT_DIR/validate-service.sh" --health-only \
     --install-root "$INSTALL_ROOT" --data-root "$DATA_ROOT" \
     --backup-root "$BACKUP_ROOT" --env-file "$ENV_FILE" \
     --service-name "$SERVICE_NAME" --bun "$BUN_PATH"; then
@@ -238,7 +238,7 @@ if ! systemctl restart "$SERVICE_NAME"; then
   if [[ -n "$old_target" ]]; then atomic_link "$old_target" "$INSTALL_ROOT/current"; fi
   die "Service restart failed; active link was restored when possible"
 fi
-if ! "$SCRIPT_DIR/validate-service.sh" --health-only \
+if ! bash "$SCRIPT_DIR/validate-service.sh" --health-only \
   --install-root "$INSTALL_ROOT" --data-root "$DATA_ROOT" \
   --backup-root "$BACKUP_ROOT" --env-file "$ENV_FILE" \
   --service-name "$SERVICE_NAME" --bun "$BUN_PATH"; then
