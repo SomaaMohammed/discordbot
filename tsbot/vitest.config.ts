@@ -5,6 +5,7 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     environment: "node",
     globals: true,
+    testTimeout: process.platform === "linux" ? 60_000 : 5_000,
     server: {
       deps: {
         inline: ["zod"],

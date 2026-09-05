@@ -111,7 +111,9 @@ async function performBackupDatabase(
   let snapshotDurationMs = 0;
   let concurrentWritesObserved = false;
   let backupBytes = 0;
-  let walBytes = safeRegularFileSize(`${source}-wal`);
+  const initialWalBytes = safeRegularFileSize(`${source}-wal`);
+  const initialWalModifiedAt = safeRegularFileMtime(`${source}-wal`);
+  let walBytes = initialWalBytes;
   const ownedArtifacts = new Map<string, FileIdentity>();
   const temporaryArtifacts = [
     temporary,
@@ -140,7 +142,12 @@ async function performBackupDatabase(
         inspectRegularFile(temporary, "SQLite backup output"),
       );
       snapshotDurationMs = performance.now() - startedAt;
-      concurrentWritesObserved = readDataVersion(db) !== dataVersionBefore;
+      const currentWalBytes = safeRegularFileSize(`${source}-wal`);
+      const currentWalModifiedAt = safeRegularFileMtime(`${source}-wal`);
+      concurrentWritesObserved =
+        readDataVersion(db) !== dataVersionBefore ||
+        currentWalBytes !== initialWalBytes ||
+        currentWalModifiedAt !== initialWalModifiedAt;
     } finally {
       db.close();
     }
@@ -324,6 +331,17 @@ function safeRegularFileSize(fileName: string): number {
   try {
     const metadata = fs.lstatSync(fileName);
     return metadata.isFile() && !metadata.isSymbolicLink() ? metadata.size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function safeRegularFileMtime(fileName: string): number {
+  try {
+    const metadata = fs.lstatSync(fileName);
+    return metadata.isFile() && !metadata.isSymbolicLink()
+      ? metadata.mtimeMs
+      : 0;
   } catch {
     return 0;
   }
