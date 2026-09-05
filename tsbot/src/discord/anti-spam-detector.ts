@@ -291,5 +291,7 @@ function fingerprintContent(value: string): string | null {
     .replace(/\s+/gu, " ")
     .trim();
   if (!normalized) return null;
-  return createHash("sha256").update(normalized.slice(0, 4_000)).digest("hex");
+  return Buffer.from(
+    createHash("sha256").update(normalized.slice(0, 4_000)).digest(),
+  ).toString("hex");
 }

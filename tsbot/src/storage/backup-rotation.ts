@@ -578,7 +578,7 @@ async function hashFile(fileName: string): Promise<string> {
   for await (const chunk of fs.createReadStream(fileName)) {
     hash.update(chunk);
   }
-  return hash.digest("hex");
+  return Buffer.from(hash.digest()).toString("hex");
 }
 
 function buildBackupName(createdAt: Date, backupId: string): string {

@@ -242,7 +242,7 @@ function computeReleaseIdentity(): string | null {
     hash.update(fs.readFileSync(fileName));
     hash.update("\\0");
   }
-  return hash.digest("hex");
+  return Buffer.from(hash.digest()).toString("hex");
 }
 
 function inferPackageRoot(): string {
