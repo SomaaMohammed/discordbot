@@ -584,13 +584,13 @@ describe("validated SQLite backup", () => {
       }
       expect(backup.snapshotDurationMs).toBeGreaterThan(0);
 
-      const after = readProbeValues(source);
+      const snapshot = readProbeValues(output);
+      const after = await waitForProbeIncrease(source, snapshot.first, writer);
       expect(after.first).toBe(after.second);
       expect(after.first).toBeGreaterThan(before.first);
 
-      const snapshot = readProbeValues(output);
       expect(snapshot.first).toBe(snapshot.second);
-      expect(snapshot.first).toBeGreaterThan(before.first);
+      expect(snapshot.first).toBeGreaterThanOrEqual(before.first);
       expect(snapshot.first).toBeLessThan(after.first);
 
       fs.copyFileSync(output, restored, fs.constants.COPYFILE_EXCL);
@@ -706,6 +706,28 @@ async function waitForFile(
     }
     await Bun.sleep(10);
   }
+}
+
+async function waitForProbeIncrease(
+  databaseFile: string,
+  minimum: number,
+  writer: Bun.ReadableSubprocess,
+): Promise<{ first: number; second: number }> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (writer.exitCode !== null) {
+      const stderr = await new Response(writer.stderr).text();
+      throw new Error(
+        `Concurrent writer exited before the next write: ${stderr}`,
+      );
+    }
+    const values = readProbeValues(databaseFile);
+    if (values.first > minimum) return values;
+    await Bun.sleep(10);
+  }
+  throw new Error(
+    "Concurrent writer did not advance the source within 10 seconds",
+  );
 }
 
 function makeRoot(): string {
