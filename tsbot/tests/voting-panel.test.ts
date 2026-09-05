@@ -150,6 +150,15 @@ describe("voting panel rendering and validation", () => {
     expect(JSON.stringify(completedEmbed)).not.toContain("Ends");
   });
 
+  it("renders yes/no panels as single-select even if input is inconsistent", () => {
+    const payload = buildVotingPanelPayload(panelView({ multiSelect: true }));
+    const embed = payload.embeds[0].toJSON();
+
+    expect(embed.description).toContain("Choose one");
+    expect(embed.description).not.toContain("Choose multiple");
+    expect(embed.footer?.text).toContain("select an option");
+  });
+
   it("parses the public options control and source-bound management controls", () => {
     expect(
       parseVotingPanelComponentId(

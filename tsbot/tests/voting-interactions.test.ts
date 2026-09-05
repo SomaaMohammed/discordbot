@@ -85,6 +85,30 @@ describe("voting-panel Discord interactions", () => {
     expect(harness.message.edit).not.toHaveBeenCalled();
   });
 
+  it("forces yes/no commands to remain single-select", async () => {
+    const harness = createCommandHarness({ multiSelect: true });
+
+    await handleVotingPanelCommand(
+      harness.interaction as never,
+      harness.runtime,
+    );
+
+    expect(harness.storage.createVotingPanel).toHaveBeenCalledWith(
+      expect.objectContaining({ multiSelect: false }),
+    );
+    expect(harness.channel.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        embeds: [
+          expect.objectContaining({
+            data: expect.objectContaining({
+              description: expect.stringContaining("Choose one"),
+            }),
+          }),
+        ],
+      }),
+    );
+  });
+
   it("keeps vote confirmations and voter lists ephemeral", async () => {
     const harness = createButtonHarness();
     harness.storage.listVotingPanelVoters.mockReturnValue([
@@ -129,6 +153,22 @@ describe("voting-panel Discord interactions", () => {
         allowedMentions: { parse: [] },
       }),
     );
+  });
+
+  it("never toggles between both answers for a yes/no panel", async () => {
+    const harness = createButtonHarness({ multiSelect: true });
+
+    await handleVotingPanelButton(
+      harness.optionInteraction as never,
+      harness.runtime,
+    );
+
+    expect(harness.storage.selectVotingPanelOption).toHaveBeenCalledWith(
+      "vote_panel",
+      VOTER_ID,
+      "option-1",
+    );
+    expect(harness.storage.toggleVotingPanelOption).not.toHaveBeenCalled();
   });
 
   it("rolls back the posted message when persistence fails", async () => {
@@ -229,6 +269,7 @@ function createCommandHarness(
     ownerId?: string;
     mentionEveryoneOnCreation?: boolean;
     allowEveryoneMention?: boolean;
+    multiSelect?: boolean;
   } = {},
 ) {
   const administrator = options.administrator ?? true;
@@ -289,7 +330,9 @@ function createCommandHarness(
       getBoolean: vi.fn((name: string) =>
         name === "mention_everyone_on_creation"
           ? (options.mentionEveryoneOnCreation ?? false)
-          : false,
+          : name === "multi_select"
+            ? (options.multiSelect ?? false)
+            : false,
       ),
     },
     reply: vi.fn(async () => undefined),
@@ -311,7 +354,9 @@ function createCommandHarness(
   };
 }
 
-function createButtonHarness(options: { administrator?: boolean } = {}) {
+function createButtonHarness(
+  options: { administrator?: boolean; multiSelect?: boolean } = {},
+) {
   const guild: Record<string, any> = {
     id: GUILD_ID,
     ownerId: "777777777777777777",
@@ -336,7 +381,7 @@ function createButtonHarness(options: { administrator?: boolean } = {}) {
     creatorId: ADMIN_ID,
     question: "Should the council approve this?",
     pollType: "yes-no",
-    multiSelect: false,
+    multiSelect: options.multiSelect ?? false,
     options: [
       { optionId: "option-1", label: "Yes" },
       { optionId: "option-2", label: "No" },

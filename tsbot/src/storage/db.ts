@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { isDeepStrictEqual } from "node:util";
-import Database from "better-sqlite3";
+import { z } from "zod";
+import Database, { type DatabaseConnection } from "./database.js";
 import {
   assertDiscordSnowflake,
   createDefaultGuildSettings,
@@ -116,6 +117,7 @@ import { RestrictedPingRepository } from "./restricted-ping-repository.js";
 import { ModerationCaseRepository } from "./moderation-case-repository.js";
 import { AntiSpamRepository } from "./anti-spam-repository.js";
 import { GuildVotingRepository } from "./voting-repository.js";
+import { decodeOptionalRow, decodeRows } from "./row-decoder.js";
 import {
   CaseAppealRepository,
   MemberReportRepository,
@@ -293,6 +295,47 @@ interface MetricRow {
   updated_at: string;
 }
 
+const guildRowSchema = z
+  .object({
+    guild_id: z.string().min(1).max(20),
+    enabled: z.number().int().min(0).max(1),
+    name: z.string().nullable(),
+    joined_at: z.string().nullable(),
+    left_at: z.string().nullable(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .strict();
+
+const guildSettingsRowSchema = z
+  .object({
+    settings_version: z.number().int().positive(),
+    settings_json: z.string(),
+  })
+  .strict();
+
+const guildEnabledRowSchema = z
+  .object({ enabled: z.number().int().min(0).max(1) })
+  .strict();
+
+const guildEnableExpectationRowSchema = guildSettingsRowSchema.extend({
+  enabled: z.number().int().min(0).max(1),
+  joined_at: z.string().nullable(),
+});
+
+const guildCurrentRowSchema = guildSettingsRowSchema.extend({
+  enabled: z.number().int().min(0).max(1),
+  left_at: z.string().nullable(),
+});
+
+const metricRowSchema = z
+  .object({
+    metric_key: z.string().min(1).max(200),
+    metric_value: z.number().int().nonnegative(),
+    updated_at: z.string(),
+  })
+  .strict();
+
 const HISTORY_ACTIVITY_METRICS = [
   "messages_sent",
   "reactions_sent",
@@ -317,7 +360,7 @@ export interface UserMetricReplacement {
 }
 
 export class BotStorage {
-  private db: Database.Database | null = null;
+  private db: DatabaseConnection | null = null;
   private nonessentialScheduler:
     ((task: () => void | Promise<void>) => void) | null = null;
 
@@ -367,47 +410,47 @@ export class BotStorage {
     }
     if (schema === "legacy-v2") {
       throw new Error(
-        `Database schema v2 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
+        `Database schema v2 requires an explicit migration. Stop the bot, create an offline backup, then run bun run migrate -- --db ${dbFile}`,
       );
     }
     if (schema === "legacy-v3") {
       throw new Error(
-        `Database schema v3 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
+        `Database schema v3 requires an explicit migration. Stop the bot, create an offline backup, then run bun run migrate -- --db ${dbFile}`,
       );
     }
     if (schema === "legacy-v4") {
       throw new Error(
-        `Database schema v4 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
+        `Database schema v4 requires an explicit migration. Stop the bot, create an offline backup, then run bun run migrate -- --db ${dbFile}`,
       );
     }
     if (schema === "legacy-v5") {
       throw new Error(
-        `Database schema v5 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
+        `Database schema v5 requires an explicit migration. Stop the bot, create an offline backup, then run bun run migrate -- --db ${dbFile}`,
       );
     }
     if (schema === "legacy-v6") {
       throw new Error(
-        `Database schema v6 requires an explicit migration. Stop the bot, create an offline backup, then run npm run migrate -- --db ${dbFile}`,
+        `Database schema v6 requires an explicit migration. Stop the bot, create an offline backup, then run bun run migrate -- --db ${dbFile}`,
       );
     }
     if (schema === "legacy-v7") {
       throw new Error(
-        `Database schema v7 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+        `Database schema v7 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run bun run migrate -- --db ${dbFile}.`,
       );
     }
     if (schema === "legacy-v8") {
       throw new Error(
-        `Database schema v8 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+        `Database schema v8 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run bun run migrate -- --db ${dbFile}.`,
       );
     }
     if (schema === "legacy-v9") {
       throw new Error(
-        `Database schema v9 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+        `Database schema v9 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run bun run migrate -- --db ${dbFile}.`,
       );
     }
     if (schema === "legacy-v10") {
       throw new Error(
-        `Database schema v10 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run npm run migrate -- --db ${dbFile}.`,
+        `Database schema v10 requires an explicit migration to v11. Stop every older Superior executable, create an offline backup, then run bun run migrate -- --db ${dbFile}.`,
       );
     }
     if (schema === "unknown") {
@@ -566,9 +609,11 @@ export class BotStorage {
   public getGuild(guildId: string): GuildRecord | null {
     const db = this.requireDatabase();
     const normalized = assertDiscordSnowflake(guildId);
-    const row = db
-      .prepare("SELECT * FROM guilds WHERE guild_id = ?")
-      .get(normalized) as GuildRow | undefined;
+    const row = decodeOptionalRow(
+      guildRowSchema,
+      db.prepare("SELECT * FROM guilds WHERE guild_id = ?").get(normalized),
+      "guilds by guild_id",
+    );
     return row ? parseGuildRow(row) : null;
   }
 
@@ -585,11 +630,15 @@ export class BotStorage {
   public getGuildSettings(guildId: string): GuildSettings | null {
     const db = this.requireDatabase();
     const normalized = assertDiscordSnowflake(guildId);
-    const row = db
-      .prepare(
-        "SELECT settings_version, settings_json FROM guild_settings WHERE guild_id = ?",
-      )
-      .get(normalized) as GuildSettingsRow | undefined;
+    const row = decodeOptionalRow(
+      guildSettingsRowSchema,
+      db
+        .prepare(
+          "SELECT settings_version, settings_json FROM guild_settings WHERE guild_id = ?",
+        )
+        .get(normalized),
+      "guild_settings by guild_id",
+    );
     if (!row) {
       return null;
     }
@@ -597,9 +646,13 @@ export class BotStorage {
     if (row.settings_version !== settings.version) {
       throw new Error(`Guild ${normalized} settings version is inconsistent`);
     }
-    const guild = db
-      .prepare("SELECT enabled FROM guilds WHERE guild_id = ?")
-      .get(normalized) as { enabled: number } | undefined;
+    const guild = decodeOptionalRow(
+      guildEnabledRowSchema,
+      db
+        .prepare("SELECT enabled FROM guilds WHERE guild_id = ?")
+        .get(normalized),
+      "guilds enabled by guild_id",
+    );
     if (!guild || settings.enabled !== Boolean(guild.enabled)) {
       throw new Error(`Guild ${normalized} enabled state is inconsistent`);
     }
@@ -611,22 +664,19 @@ export class BotStorage {
   ): GuildEnableExpectation | null {
     const db = this.requireDatabase();
     const normalized = assertDiscordSnowflake(guildId);
-    const row = db
-      .prepare(
-        `SELECT guilds.enabled, guilds.joined_at,
-                guild_settings.settings_version, guild_settings.settings_json
-         FROM guilds
-         JOIN guild_settings ON guild_settings.guild_id = guilds.guild_id
-         WHERE guilds.guild_id = ?`,
-      )
-      .get(normalized) as
-      | {
-          enabled: number;
-          joined_at: string | null;
-          settings_version: number;
-          settings_json: string;
-        }
-      | undefined;
+    const row = decodeOptionalRow(
+      guildEnableExpectationRowSchema,
+      db
+        .prepare(
+          `SELECT guilds.enabled, guilds.joined_at,
+                  guild_settings.settings_version, guild_settings.settings_json
+           FROM guilds
+           JOIN guild_settings ON guild_settings.guild_id = guilds.guild_id
+           WHERE guilds.guild_id = ?`,
+        )
+        .get(normalized),
+      "guild enable expectation",
+    );
     if (!row) return null;
     const settings = parseGuildSettingsJson(row.settings_json);
     if (
@@ -641,22 +691,19 @@ export class BotStorage {
   public isGuildCurrent(guildId: string): boolean {
     const db = this.requireDatabase();
     const normalized = assertDiscordSnowflake(guildId);
-    const row = db
-      .prepare(
-        `SELECT guilds.enabled, guilds.left_at,
-                guild_settings.settings_version, guild_settings.settings_json
-         FROM guilds
-         JOIN guild_settings ON guild_settings.guild_id = guilds.guild_id
-         WHERE guilds.guild_id = ?`,
-      )
-      .get(normalized) as
-      | {
-          enabled: number;
-          left_at: string | null;
-          settings_version: number;
-          settings_json: string;
-        }
-      | undefined;
+    const row = decodeOptionalRow(
+      guildCurrentRowSchema,
+      db
+        .prepare(
+          `SELECT guilds.enabled, guilds.left_at,
+                  guild_settings.settings_version, guild_settings.settings_json
+           FROM guilds
+           JOIN guild_settings ON guild_settings.guild_id = guilds.guild_id
+           WHERE guilds.guild_id = ?`,
+        )
+        .get(normalized),
+      "guild current state",
+    );
     if (!row) return false;
     const settings = parseGuildSettingsJson(row.settings_json);
     if (row.settings_version !== settings.version) {
@@ -994,12 +1041,16 @@ export class BotStorage {
       if (!settings) {
         throw new Error(`Guild ${normalized} has no settings`);
       }
-      const rows = db
-        .prepare(
-          `SELECT metric_key, metric_value, updated_at
-           FROM metrics WHERE guild_id = ? ORDER BY metric_key`,
-        )
-        .all(normalized) as MetricRow[];
+      const rows = decodeRows(
+        metricRowSchema,
+        db
+          .prepare(
+            `SELECT metric_key, metric_value, updated_at
+             FROM metrics WHERE guild_id = ? ORDER BY metric_key`,
+          )
+          .all(normalized),
+        "metrics for guild export",
+      );
       return {
         formatVersion: 8,
         guildId: normalized,
@@ -1133,9 +1184,11 @@ export class BotStorage {
   }
 
   private listGuilds(suffix: string): GuildRecord[] {
-    const rows = this.requireDatabase()
-      .prepare(`SELECT * FROM guilds ${suffix}`)
-      .all() as GuildRow[];
+    const rows = decodeRows(
+      guildRowSchema,
+      this.requireDatabase().prepare(`SELECT * FROM guilds ${suffix}`).all(),
+      "guilds list",
+    );
     return rows.map(parseGuildRow);
   }
 
@@ -1147,7 +1200,7 @@ export class BotStorage {
     return guild;
   }
 
-  private requireDatabase(): Database.Database {
+  private requireDatabase(): DatabaseConnection {
     if (!this.db?.open) {
       throw new Error("BotStorage.initStorage() must be called first");
     }
@@ -1411,7 +1464,7 @@ export class GuildStorage {
   private readonly roleMenus: RoleMenuRepository;
 
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     private readonly root: BotStorage,
     public readonly guildId: string,
   ) {

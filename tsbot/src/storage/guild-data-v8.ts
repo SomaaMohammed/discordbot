@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { z } from "zod";
 import { normalizeOnboardingTemplatePair } from "../discord/onboarding-template.js";
 import {
@@ -763,7 +763,7 @@ export function parsePhase4GuildData(
 
 /** Reads portable lifecycle state. Claims are retained only as recoverable checkpoints. */
 export function readPhase4GuildData(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
 ): Phase4GuildData {
   type CollectionKey = Exclude<
@@ -878,7 +878,7 @@ export function readPhase4GuildData(
 
 /** Inserts validated format-8 history, then makes every Discord binding dormant. */
 export function insertPhase4GuildData(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   imported: Phase4GuildData,
 ): void {
@@ -934,7 +934,7 @@ export function insertPhase4GuildData(
 }
 
 export function deactivatePhase4Bindings(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
 ): void {
   db.prepare(
@@ -1500,7 +1500,7 @@ function mapRoleMenuOperationItem(
 }
 
 function insertConfiguration(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   row: OnboardingConfiguration,
 ): void {
@@ -1566,7 +1566,7 @@ function insertConfiguration(
 }
 
 function insertMemberStates(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly MemberOnboardingState[],
 ): void {
@@ -1592,7 +1592,7 @@ function insertMemberStates(
     );
 }
 function insertAcceptances(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly MemberRuleAcceptance[],
 ): void {
@@ -1609,7 +1609,7 @@ function insertAcceptances(
     );
 }
 function insertDeliveries(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly OnboardingDeliveryRecord[],
 ): void {
@@ -1638,7 +1638,7 @@ function insertDeliveries(
     );
 }
 function insertOnboardingRoleOperations(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly OnboardingRoleOperation[],
 ): void {
@@ -1680,7 +1680,7 @@ function insertOnboardingRoleOperations(
   }
 }
 function insertAudits(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly OnboardingAuditEvent[],
 ): void {
@@ -1703,7 +1703,7 @@ function insertAudits(
     );
 }
 function insertMenus(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly RoleMenu[],
 ): void {
@@ -1734,7 +1734,7 @@ function insertMenus(
     );
 }
 function insertMenuOptions(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly RoleMenuOption[],
 ): void {
@@ -1759,7 +1759,7 @@ function insertMenuOptions(
     );
 }
 function insertMenuPosts(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly RoleMenuPost[],
 ): void {
@@ -1782,7 +1782,7 @@ function insertMenuPosts(
     );
 }
 function insertMenuOperations(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly RoleMenuOperation[],
 ): void {
@@ -1822,7 +1822,7 @@ function insertMenuOperations(
 }
 
 function deactivateImportedPanelBindings(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
 ): void {
   const rows = db

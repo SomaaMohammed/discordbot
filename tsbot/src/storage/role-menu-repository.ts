@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import type {
   RoleMenu,
@@ -135,7 +135,7 @@ export interface RoleMenuOperationListOptions {
 /** Tenant-bound storage for persistent self-service role menus. */
 export class RoleMenuRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 
@@ -1040,7 +1040,7 @@ export class RoleMenuRepository {
       .prepare(
         `SELECT * FROM role_menu_operations
          WHERE ${clauses.join(" AND ")}
-         ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`,
+         ORDER BY created_at DESC, operation_id DESC LIMIT ? OFFSET ?`,
       )
       .all(...parameters) as RoleMenuOperationRow[];
     return rows.map((row) => this.parseRoleMenuOperation(row));

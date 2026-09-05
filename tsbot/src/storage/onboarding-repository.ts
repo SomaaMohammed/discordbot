@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import { normalizeOnboardingTemplatePair } from "../discord/onboarding-template.js";
 import {
@@ -201,7 +201,7 @@ export class OnboardingStorageRepository implements OnboardingRepositoryContract
   private readonly operational: GuildOperationalRepository;
 
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {
     this.operational = new GuildOperationalRepository(db, guildId);

@@ -1,6 +1,6 @@
 # Operations
 
-This runbook covers source deployments on Linux and the schema-v10 data lifecycle. Windows portable operation is covered in the [Windows guide](windows.md).
+This runbook covers Bun source deployments on Linux and the schema-v11 data lifecycle. Windows portable operation is covered in the [Windows guide](windows.md).
 
 ## Invariants
 
@@ -45,13 +45,33 @@ Run from the repository root:
 ./ops.sh rollout
 ```
 
-`rollout` refuses a non-v10 database. It fast-forwards the selected branch, installs dependencies, runs formatting, typecheck, tests, and a clean build, validates and backs up an existing v10 database, then restarts the service. The default dirty-tree policy refuses tracked changes; `DIRTY_POLICY=stash` stashes tracked changes only and does not move ignored operator data.
+`rollout` refuses a non-v11 database. It fast-forwards the selected branch, installs the final `bun.lock` with `--frozen-lockfile`, runs formatting, typecheck, tests, and a clean build under Bun, validates and backs up an existing v11 database, then restarts the service. The default dirty-tree policy refuses tracked changes; `DIRTY_POLICY=stash` stashes tracked changes only and does not move ignored operator data.
 
 An external checkout-directory or service rename is not performed by this repository. Update `APP_DIR`, `SERVICE_NAME`, the systemd unit, working directory, and environment paths together during a separately planned maintenance window.
 
+## Offline diagnostics and maintenance
+
+Run the operator commands from `tsbot`. None of them connects to Discord:
+
+```bash
+bun run doctor -- --db /absolute/path/to/superior.db --backup-dir /absolute/path/to/backups
+bun run doctor -- --db /absolute/path/to/superior.db --backup-dir /absolute/path/to/backups --json
+bun run doctor -- --db /absolute/path/to/superior.db --backup-dir /absolute/path/to/backups --write-probes
+bun run db:checkpoint -- --db /absolute/path/to/superior.db --mode passive --json
+bun run db:rotate -- --db /absolute/path/to/superior.db --backup-dir /absolute/path/to/backups --retention 7 --json
+```
+
+`doctor` reports package, Bun, SQLite, path, configuration-file discovery, database permission/schema/integrity/foreign-key/WAL settings, readonly access, lock availability, backup confinement/free space, release layout, and reparse-point status. Human output is the default; `--json` emits report format 1 for monitoring. A failed check returns 1 and a malformed command returns 2. A `degraded` report returns 0 so an intentionally absent optional resource can be distinguished from a safety failure. The default command is read-only. `--write-probes` is explicit and creates then identity-checks and removes confined temporary files only in the trusted backup directory.
+
+The checkpoint command defaults to `passive`, which avoids waiting for active readers and reports a busy result with exit code 2 when it cannot finish. `full`, `restart`, and especially `truncate` can wait on or disrupt concurrent work; use them only during a controlled maintenance window after stopping or draining the writer. Superior does not run aggressive checkpoints automatically.
+
+`db:rotate` creates a production backup, restores it to a unique confined temporary file, validates schema/integrity/foreign keys and a representative guild read, publishes explicit bounded metadata, and then retains the newest configured count. `--dry-run` creates no backup and deletes nothing; it only validates the directory/source and reports the metadata-based retention plan. Unknown files and extensions are never rotation candidates. Run the JSON command from an external scheduler appropriate to the host and alert on a nonzero exit. This repository deliberately does not install a scheduled task.
+
+SQLite operational logs use the fixed `sqlite-telemetry` scope for contention code/operation, transaction mode/outcome/duration, migration outcome/duration, backup snapshot/total duration/concurrent-write observation/size/WAL size, checkpoint result, shutdown-drain result, and close failure. These bounded fields contain no SQL, parameters, guild IDs, database paths, configuration values, or workflow content. Telemetry is best effort and cannot change transaction behavior.
+
 ## Fresh database
 
-With no file at `DB_FILE`, startup creates schema v10 transactionally. An empty existing file is also eligible. If another database exists under an earlier default name while `DB_FILE` is unset, startup and operations refuse to create a second database; select the intended file explicitly and follow the upgrade workflow.
+With no file at `DB_FILE`, startup creates schema v11 transactionally. An empty existing file is also eligible. If another database exists under an earlier default name while `DB_FILE` is unset, startup and operations refuse to create a second database; select the intended file explicitly and follow the upgrade workflow.
 
 After first startup, run:
 
@@ -61,40 +81,40 @@ After first startup, run:
 
 Joined guilds work immediately with safe core defaults. Phase 4 onboarding, verification, automatic roles, and role menus start disabled. Configure only external-resource workflows whose current Discord channels, roles, messages, hierarchy, and permissions have been verified.
 
-## Required offline migration from schema v9
+## Required offline migration from supported schema v2-v10
 
-Schema v9 is the normal source for a 6.1.0 deployment. Build the current schema-v10 release first, but do not start it against v9. Confirm that all processes and maintenance sessions that can write the selected file will be stopped. A dry run performs exact schema classification and the complete conversion in a transaction that is deliberately rolled back:
+Build the current schema-v11 release first, but do not start it against an operator database until the dry run passes. Confirm that all processes and maintenance sessions that can write the selected file will be stopped for the actual migration. This example uses an exact v10 source; substitute its actual supported generation. A dry run performs exact schema classification and the complete conversion in a transaction that is deliberately rolled back:
 
 ```bash
 cd tsbot
-npm ci
-npm run build
-node dist/src/storage/check-cli.js --db /absolute/path/to/superior.db --expect 9
-node dist/src/storage/migrate-cli.js --db /absolute/path/to/superior.db --dry-run
+bun install --frozen-lockfile
+bun run build
+bun --no-env-file dist/src/storage/check-cli.js --db /absolute/path/to/superior.db --expect 10
+bun --no-env-file dist/src/storage/migrate-cli.js --db /absolute/path/to/superior.db --dry-run
 cd ..
 ```
 
 Run the guarded workflow from the repository root:
 
 ```bash
-DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v9
+DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v10
 ```
 
-The workflow validates exact v9, stops the service if active, creates and validates a private schema-v9 backup, runs one immediate transaction, validates exact v10 plus integrity and foreign keys, restricts file permissions, and restarts only if the service was previously active. A migration error rolls back the transaction, retains the validated v9 backup, and leaves the service stopped.
+The workflow validates the selected exact source generation, stops the service if active, creates and validates a private pre-migration backup, runs one immediate transaction, validates exact v11 plus integrity and foreign keys, restricts file permissions, and restarts only if the service was previously active. A migration error rolls back the transaction, retains the validated backup, and leaves the service stopped.
 
-The v9-to-v10 step preserves every existing table row, setting, metric, grant, panel, workflow, delivery checkpoint, audit record, and external Discord identifier. It extends the delegated-capability constraint for `onboarding.configure` and `roles.configure` and the panel-preset constraint for `verification` and `roles` without losing existing grants or panels. It adds empty/default-disabled Phase 4 storage and does not invent joins, rules versions, acceptance history, menus, deliveries, or role outcomes. Migration sends no welcome message and performs no Discord role mutation. After migration, start only a schema-v10-capable build and inspect startup/database-check logs. Never run a pre-v10 executable against the migrated database.
+The frozen v9-to-v10 step preserves every existing table row, setting, metric, grant, panel, workflow, delivery checkpoint, audit record, and external Discord identifier. It adds empty/default-disabled Phase 4 storage without inventing joins, rules versions, acceptance history, menus, deliveries, or role outcomes. The isolated v10-to-v11 stage adds persistent-voting storage. Migration sends no Discord message and performs no Discord role mutation. After migration, start only a schema-v11-capable build and inspect startup/database-check logs. Never run a pre-v11 executable against the migrated database.
 
-## Supported legacy v8, v7, v6, v5, v4, v3, and v2 paths
+## Supported legacy v9, v8, v7, v6, v5, v4, v3, and v2 paths
 
-The v10 migration CLI also accepts exact schema v8, schema v7, schema v6, schema v5, schema v4, schema v3, and the exact supported schema-v2 layout. These paths run the applicable frozen historical conversions followed by v9-to-v10 inside one outer transaction. Dry-run executes and rolls back the whole chain; any failure leaves the source generation unchanged.
+The v11 migration CLI also accepts exact schema v9 through v2. These paths run the applicable frozen historical conversions through v10 followed by v10-to-v11 inside one outer transaction. Dry-run executes and rolls back the whole chain; any failure leaves the source generation unchanged.
 
-For v8, validate with `--expect 8`, retain a schema-v8 backup, and run `DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v8`. For v7, use `migrate-v7`; for v6, use `migrate-v6`; and for v5, use `migrate-v5`. Every compatibility command names its source generation and reaches current v10 in one transaction.
+For v9, validate with `--expect 9`, retain a schema-v9 backup, and run `DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v9`. The equivalent commands exist for v8 through v2. Every compatibility command names its source generation and reaches current v11 in one transaction.
 
 For v4:
 
 ```bash
-node tsbot/dist/src/storage/check-cli.js --db /absolute/path/to/superior.db --expect 4
-node tsbot/dist/src/storage/migrate-cli.js --db /absolute/path/to/superior.db --dry-run
+bun --no-env-file tsbot/dist/src/storage/check-cli.js --db /absolute/path/to/superior.db --expect 4
+bun --no-env-file tsbot/dist/src/storage/migrate-cli.js --db /absolute/path/to/superior.db --dry-run
 DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v4
 ```
 
@@ -103,8 +123,8 @@ For each guild with Phase 1 ticket configuration or history, the historical v4-t
 For v3:
 
 ```bash
-node tsbot/dist/src/storage/check-cli.js --db /absolute/path/to/superior.db --expect 3
-node tsbot/dist/src/storage/migrate-cli.js --db /absolute/path/to/superior.db --dry-run
+bun --no-env-file tsbot/dist/src/storage/check-cli.js --db /absolute/path/to/superior.db --expect 3
+bun --no-env-file tsbot/dist/src/storage/migrate-cli.js --db /absolute/path/to/superior.db --dry-run
 DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v3
 ```
 
@@ -113,14 +133,14 @@ The v3 path preserves guilds, validated settings, and metrics, then adds empty l
 For supported v2:
 
 ```bash
-node tsbot/dist/src/storage/check-cli.js --db /absolute/path/to/superior.db --expect 2
-node tsbot/dist/src/storage/migrate-cli.js --db /absolute/path/to/superior.db --dry-run
+bun --no-env-file tsbot/dist/src/storage/check-cli.js --db /absolute/path/to/superior.db --expect 2
+bun --no-env-file tsbot/dist/src/storage/migrate-cli.js --db /absolute/path/to/superior.db --dry-run
 DB_FILE=/absolute/path/to/superior.db ./ops.sh migrate-v2
 ```
 
 The v2 path preserves active guild metadata, safely convertible settings, greeting text without fixed member IDs, and supported metrics. Data with no active consumer is removed. Unsafe or malformed values are replaced with bounded neutral settings; invocation branding is reset or sanitized; unresolved moderation-recovery metadata blocks migration. A failed migration from any supported source generation leaves that source unchanged and keeps its validated backup.
 
-Schema v1 is not accepted. Before any migration to v10, convert a separate stopped copy with the final 4.0.0 source release until it validates as schema v2, stop that process, retain its backup, and then follow the v2-to-v10 procedure. Renaming a database file never upgrades its contents. Once the working database reaches v10, never open it with a pre-v10 executable.
+Schema v1 is not accepted. Before any migration to v11, convert a separate stopped copy with the final 4.0.0 source release until it validates as schema v2, stop that process, retain its backup, and then follow the v2-to-v11 procedure. Renaming a database file never upgrades its contents. Once the working database reaches v11, never open it with a pre-v11 executable.
 
 ## Post-migration review
 
@@ -157,17 +177,17 @@ Create a current backup with:
 ./ops.sh backup
 ```
 
-The backup CLI uses SQLite's online backup API, refuses an existing destination, validates exact schema v10, integrity, and foreign keys, and writes a private timestamped file. It is safe for a running single process; do not copy a live `.db` plus sidecars with ordinary filesystem tools.
+The Bun backup CLI opens a separate readonly connection and uses bound `VACUUM INTO` to capture a consistent transaction boundary while another WAL connection is writing. It validates the source and candidate schema, every `integrity_check` row, and foreign keys; flushes the candidate file; and publishes it with an atomic no-clobber hard link before validating the published path again. The destination directory must be a trusted local, non-reparse path on a filesystem that supports hard links (for example NTFS or ext4). FAT/exFAT and some network shares fail closed. Windows flushes the file, but its API does not provide the same directory-entry fsync guarantee available on Unix, so retain multiple generations and test off-host restore. Never copy a live `.db` plus sidecars with ordinary filesystem tools.
 
-Restore a v10 backup into a schema-v10-capable deployment with:
+Restore a v11 backup into a schema-v11-capable deployment with:
 
 ```bash
-./ops.sh restore backups/superior-schema10-YYYYMMDDTHHMMSSZ.db
+./ops.sh restore backups/superior-schema11-YYYYMMDDTHHMMSSZ.db
 ```
 
-Restore refuses the live database as its source. It makes a consistent private candidate through SQLite's backup API and validates it before stopping the service. It keeps the rollback directory on the database filesystem, moves the current database and sidecars there, installs the candidate atomically, validates again, restores the prior files on installation failure, and restarts only when appropriate. Keep the rollback directory until the application and guild checks pass.
+Restore refuses the live database as its source. It makes a consistent private candidate through the Bun backup path and validates it before stopping the service. It keeps the rollback directory on the database filesystem, moves the current database and sidecars there, installs the candidate atomically, validates again, restores the prior files on installation failure, and restarts only when appropriate. Keep the rollback directory until the application and guild checks pass.
 
-Backups are not expired automatically. Define and test retention, encryption, off-host storage, access control, restore drills, and verified deletion appropriate to the deployment. A schema-v10 backup can contain delegated actor/role IDs, persistent panel bindings/content, ticket questions/answers/transcript metadata, suggestion and application content, restricted-ping use, case reasons/private notes, reporter/appellant identities and explanations, staff decisions, message-link identifiers, anti-spam enforcement metadata, administrator-authored rules/templates, member acceptance and lifecycle timestamps, account-age metadata, automatic/menu-role outcomes, and bounded delivery/audit identifiers. Treat every private workflow, onboarding, and moderation field as potentially sensitive.
+Backups are not expired by startup. Use the explicit `db:rotate` command above from an external scheduler only after its dry run and restore drill pass. Define and test encryption, off-host storage, access control, monitoring, and verified deletion appropriate to the deployment. A schema-v11 backup can contain delegated actor/role IDs, persistent panel bindings/content, ticket questions/answers/transcript metadata, suggestion, application, and voting content, restricted-ping use, case reasons/private notes, reporter/appellant identities and explanations, staff decisions, message-link identifiers, anti-spam enforcement metadata, administrator-authored rules/templates, member acceptance and lifecycle timestamps, account-age metadata, automatic/menu-role outcomes, and bounded delivery/audit identifiers. Treat every private workflow, onboarding, and moderation field as potentially sensitive.
 
 ## Guild export, import, and purge
 
@@ -183,7 +203,7 @@ The guild owner and Administrators can create a bounded same-guild JSON export w
 
 Parsing validates every collection limit, audit-history cap, tenant identity, unique identity, selection bound, and cross-record reference before replacement. Format 8 replacement is one transaction. Every successful import leaves the core guild bot active. Inserted grants are inactive; external service/form/department/restricted-ping/moderation/report/appeal/resource/onboarding/panel/menu bindings are disabled or unverified until administrators inspect current Discord resources and explicitly reconfigure or enable them. Anti-spam and automatic roles remain disabled; verification and role menus require explicit enablement after current-resource validation. Imported acceptance history remains readable to authorized staff but never triggers a role assignment. Imported sanctions are never replayed, and import performs no Discord role mutation.
 
-Guild purge deletes the `guilds` row and schema-v10 tenant data through foreign-key cascades, including all Phase 3 and Phase 4 rows. A Discord `guildDelete` departure instead marks the tenant inactive and retains its rows, panel bindings, and workflow history for a possible rejoin; rejoin restores immediate core availability. Import and purge affect only the live database. They do not remove downloaded exports, backups, SQLite free pages, Discord verification/role-menu panels, suggestion/application/report/appeal messages, moderation or lifecycle logs, ticket channels/transcripts/logs, prior sanctions or role assignments/notifications, direct messages, host logs, or vendor copies. Apply separate retention and verified-deletion procedures to each copy.
+Guild purge deletes the `guilds` row and schema-v11 tenant data through foreign-key cascades, including Phase 3, Phase 4, and voting rows. A Discord `guildDelete` departure instead marks the tenant inactive and retains its rows, panel bindings, and workflow history for a possible rejoin; rejoin restores immediate core availability. Import and purge affect only the live database. They do not remove downloaded exports, backups, SQLite free pages, Discord verification/role-menu panels, suggestion/application/report/appeal messages, moderation or lifecycle logs, ticket channels/transcripts/logs, prior sanctions or role assignments/notifications, direct messages, host logs, or vendor copies. Apply separate retention and verified-deletion procedures to each copy.
 
 ## Workflow recovery
 
@@ -204,18 +224,18 @@ Recovery actions are designed to be repeatable, but Discord deletion, delivery, 
 
 Application and schema generations must match:
 
-- To recover a current deployment while retaining schema v10, deploy only a known-good schema-v10-capable build and restore a validated v10 backup if data restoration is necessary.
-- After any database has migrated to v10, do not start, deploy, test, or recommend 6.1.0 or another pre-v10 executable for that installation. Keep pre-migration backups only as protected recovery evidence; use current-version restore tooling, a known-good current build, or a forward fix.
-- If a current release regression prevents safe startup, keep the bot stopped, preserve the v10 database, and repair or replace the current build. Do not convert the incident into an application/schema downgrade.
+- To recover a current deployment while retaining schema v11, deploy only a known-good schema-v11-capable build and restore a validated v11 backup if data restoration is necessary.
+- After any database has migrated to v11, do not start, deploy, test, or recommend a pre-v11 executable for that installation. Keep pre-migration backups only as protected recovery evidence; use current-version restore tooling, a known-good current build, or a forward fix.
+- If a current release regression prevents safe startup, keep the bot stopped, preserve the v11 database, and repair or replace the current build. Do not convert the incident into an application/schema downgrade.
 
-The current `restore` command intentionally accepts only v10. `./ops.sh restore` cannot downgrade a schema or authorize an older executable. A schema-v9 pre-migration backup is evidence and a source for a separately planned forward migration, not a candidate for installation under the active v10 service.
+The current `restore` command intentionally accepts only v11. `./ops.sh restore` cannot downgrade a schema or authorize an older executable. A legacy pre-migration backup is evidence and a source for a separately planned forward migration, not a candidate for installation under the active v11 service.
 
 ## Verification checklist
 
 - The service account owns `.env`, database, sidecars, backup directory, and lock with restrictive permissions.
 - Exactly one bot process is configured to write the database; it is on a local reliable filesystem.
-- `./ops.sh status` reports schema 10 and integrity `ok`; foreign-key check is empty.
-- The exact schema-v10 tables/indexes exist and no unexpected application views/triggers exist. See [Development](development.md#schema-v10).
+- `./ops.sh status` reports schema 11 and integrity `ok`; foreign-key check is empty.
+- The exact schema-v11 tables/indexes exist and no unexpected application views/triggers exist. See [Development](development.md#schema-v10-and-v11).
 - Every expected joined guild appears active; intentionally disabled or departed guilds remain inactive.
 - `/config status`, `/access list`, `/panel status`, `/restrictedping list`, ticket department health, a private utility, and deliberate addressed chat work in a test guild.
 - Existing legacy role, ticket, suggestion, application, resource, help, private-message, and safety panel controls route without exposing a private record; current verification and role-menu controls reject copied, cross-guild, imported-unverified, or stale bindings.

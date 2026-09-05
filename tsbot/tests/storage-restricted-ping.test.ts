@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
+import Database from "../src/storage/database.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BotStorage } from "../src/storage/db.js";
 import { MAX_RESTRICTED_PING_SUCCESS_EVENTS_PER_GUILD } from "../src/storage/restricted-ping-repository.js";

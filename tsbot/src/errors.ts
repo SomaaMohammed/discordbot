@@ -198,7 +198,8 @@ export function classifyError(error: unknown): ClassifiedError {
   }
   if (
     (typeof code === "string" &&
-      (code.toUpperCase().includes("SCHEMA") ||
+      (code.toUpperCase() === "SQLITE_ROW_DECODE" ||
+        code.toUpperCase().includes("SCHEMA") ||
         code.toUpperCase().includes("MIGRATION"))) ||
     looksLikeSchemaOrMigrationError(message)
   ) {
@@ -235,7 +236,7 @@ export function classifyError(error: unknown): ClassifiedError {
       "native-runtime",
       name,
       code,
-      "Superior could not load a required Node.js or native runtime module.",
+      "Superior could not load a required Bun or native runtime module.",
       false,
       true,
       "Use the complete matching release payload; do not mix runtime or native module files between releases.",

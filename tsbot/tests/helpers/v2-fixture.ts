@@ -1,6 +1,6 @@
-import Database from "better-sqlite3";
+import Database from "../../src/storage/database.js";
 
-export function createV2FixtureDatabase(dbFile: string): Database.Database {
+export function createV2FixtureDatabase(dbFile: string): Database {
   const db = new Database(dbFile);
   db.pragma("foreign_keys = ON");
   db.exec(`
@@ -158,7 +158,7 @@ export function createV2Settings(): Record<string, unknown> {
 }
 
 export function insertV2Guild(
-  db: Database.Database,
+  db: Database,
   options: {
     guildId: string;
     enabled?: boolean;

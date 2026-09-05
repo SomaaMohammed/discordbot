@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import { createOpaqueStorageId } from "./operational-repository.js";
 import { MAX_MUDAE_WATCH_DELIVERIES_PER_GUILD } from "./schema.js";
@@ -46,7 +46,7 @@ interface DeliveryRow {
 }
 
 /** Applies age and per-guild caps even when no new matching message arrives. */
-export function pruneAllMudaeWatchDeliveries(db: Database.Database): number {
+export function pruneAllMudaeWatchDeliveries(db: DatabaseConnection): number {
   let deleted = 0;
   const prune = db.transaction(() => {
     const cutoff = retentionCutoff(utcNow());
@@ -56,12 +56,12 @@ export function pruneAllMudaeWatchDeliveries(db: Database.Database): number {
     deleted += db
       .prepare(
         `DELETE FROM mudae_watch_deliveries
-         WHERE rowid IN (
-           SELECT rowid FROM (
-             SELECT rowid,
+         WHERE (guild_id, message_id) IN (
+           SELECT guild_id, message_id FROM (
+             SELECT guild_id, message_id,
                     ROW_NUMBER() OVER (
                       PARTITION BY guild_id
-                      ORDER BY updated_at DESC, rowid DESC
+                      ORDER BY updated_at DESC, message_id DESC
                     ) AS record_rank
              FROM mudae_watch_deliveries
            )
@@ -77,7 +77,7 @@ export function pruneAllMudaeWatchDeliveries(db: Database.Database): number {
 /** Guild-bound, bounded at-most-once reservations for private roll delivery. */
 export class MudaeWatchDeliveryRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 
@@ -252,10 +252,10 @@ export class MudaeWatchDeliveryRepository {
     return this.db
       .prepare(
         `DELETE FROM mudae_watch_deliveries
-         WHERE rowid IN (
-           SELECT rowid FROM mudae_watch_deliveries
+         WHERE (guild_id, message_id) IN (
+           SELECT guild_id, message_id FROM mudae_watch_deliveries
            WHERE guild_id = ?
-           ORDER BY updated_at DESC, rowid DESC
+           ORDER BY updated_at DESC, message_id DESC
            LIMIT -1 OFFSET ?
          )`,
       )

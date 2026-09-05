@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   RESTRICTED_PING_EVENT_TYPES,
@@ -90,7 +90,7 @@ const MAX_EVENT_DETAILS_BYTES = 4_000;
 /** Guild-bound configuration, reservation, cooldown, and audit persistence. */
 export class RestrictedPingRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 

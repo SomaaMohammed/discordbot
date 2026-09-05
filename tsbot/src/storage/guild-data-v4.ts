@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   APPLICATION_EVENT_TYPES,
@@ -92,7 +92,7 @@ export const PHASE2_GUILD_TABLES = [
 
 /** Leaves preserved or inserted workflow rows dormant after every import. */
 export function deactivatePhase2OperationalBindings(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
 ): void {
   db.prepare(
@@ -253,7 +253,7 @@ export function upgradeLegacyV3OperationalData(input: {
 }
 
 export function readPhase2OperationalData(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
 ): Phase2OperationalData {
   const all = <T>(sql: string): T[] => db.prepare(sql).all(guildId) as T[];
@@ -445,7 +445,7 @@ export function parsePhase2OperationalData(
 
 /** Inserts a fully parsed snapshot with every authority/resource binding dormant. */
 export function insertPhase2OperationalData(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   imported: Phase2OperationalData,
 ): void {
@@ -577,7 +577,7 @@ export function insertPhase2OperationalData(
 }
 
 function insertTicketResponses(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   responses: readonly TicketFormResponse[],
 ): void {
@@ -603,7 +603,7 @@ function insertTicketResponses(
 }
 
 function insertTicketEvents(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   events: readonly TicketEvent[],
 ): void {
@@ -636,7 +636,7 @@ function insertTicketEvents(
 }
 
 function insertSuggestions(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   imported: Phase2OperationalData,
 ): void {
@@ -731,7 +731,7 @@ function insertSuggestions(
 }
 
 function insertApplications(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   imported: Phase2OperationalData,
 ): void {

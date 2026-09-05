@@ -30,7 +30,8 @@ function trackedFiles() {
   ])
     .split("\0")
     .filter(Boolean)
-    .map((fileName) => fileName.replaceAll("\\", "/"));
+    .map((fileName) => fileName.replaceAll("\\", "/"))
+    .filter((fileName) => fs.existsSync(path.join(repositoryRoot, fileName)));
 }
 
 const textExtensions = new Set([

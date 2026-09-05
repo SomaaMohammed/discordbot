@@ -15,16 +15,16 @@ implementation has evolved.
 | Item                   | Current value                                                            |
 | ---------------------- | ------------------------------------------------------------------------ |
 | Product                | Superior                                                                 |
-| Version                | 7.2.4                                                                    |
-| Runtime                | Node.js 22.14.0 or newer, strict TypeScript, Discord.js 14               |
+| Version                | 8.0.0                                                                    |
+| Runtime                | Bun 1.4.0 or newer, strict TypeScript, Discord.js 14                     |
 | Deployment             | One process and one local SQLite database                                |
 | SQLite schema          | v11                                                                      |
 | Guild export           | Format 8                                                                 |
 | Supported imports      | Formats 2 through 8                                                      |
 | Primary platform       | Discord; no required dashboard or domain                                 |
 | Windows artifact       | Repository-root `SuperiorBot.exe`, Windows x64                           |
-| Current feature commit | See the current `git log`; this checkout contains the 7.2.4 release work |
-| Baseline date          | 2026-08-30                                                               |
+| Current feature commit | See the current `git log`; this checkout contains the 8.0.0 release work |
+| Baseline date          | 2026-08-31                                                               |
 
 Always verify these values from the current checkout before relying on them:
 
@@ -91,7 +91,8 @@ phases.
 | Secure defaults and automated releases | 6.0.0, schema v8, export 6  | `cf164dc`     | Immediate safe guild defaults, config/data commands, persistent-panel compatibility, centralized interaction lifecycle, logging, security gates, and authoritative release tooling. |
 | Phase 3: moderation and safety         | 6.1.0, schema v9, export 7  | `53e111e`     | Persistent moderation cases, confidential reports, appeals, anti-spam, safety panels, recovery, and separated authorities.                                                          |
 | Phase 4: member lifecycle              | 6.2.0, schema v10, export 8 | `b1b9f12`     | Welcome/farewell delivery, rules verification, safe autoroles, Membership Screening support, persistent role menus, and recovery.                                                   |
-| Current 7.2.4 release work             | 7.2.4, schema v11, export 8 | this checkout | Persistent voting panels, deployment-owner recovery controls, packaged v2-v10 startup migration, black panel branding, and refreshed Windows packaging/runtime inputs.              |
+| Voting and recovery release work       | 7.2.4, schema v11, export 8 | this checkout | Persistent voting panels, deployment-owner recovery controls, packaged v2-v10 startup migration, black panel branding, and refreshed Windows packaging/runtime inputs.              |
+| Bun runtime and SQLite migration       | 8.0.0, schema v11, export 8 | this checkout | Bun-only execution, direct `bun:sqlite` storage, safe live backups, and a compiled Bun Windows payload inside the existing hardened launcher/updater.                               |
 
 Use `git log --oneline --reverse` for the complete granular history. The table
 captures the architectural milestones future work is expected to preserve.
@@ -663,29 +664,31 @@ Use PowerShell 7 (`pwsh`) for every Windows command below. For a normal source c
 
 ```powershell
 cd tsbot
-npm ci
-npm run format:check
-npm run typecheck
-npm test
-npm run build
+$BunExe = (Get-Command bun.exe -CommandType Application -ErrorAction Stop).Source
+& $BunExe install --frozen-lockfile
+& $BunExe run format:check
+& $BunExe run typecheck
+& $BunExe run test
+& $BunExe run build
 ```
 
-The combined non-release gate is `npm run check`. Additional release checks:
+The combined non-release gate is `& $BunExe run check`. Additional release
+checks:
 
 ```powershell
-npm run version:verify
-npm run docs:links
-npm run powershell:check
-npm run security:check
-npm run package:win:verify
-npm run artifact:verify
+& $BunExe run version:verify
+& $BunExe run docs:links
+& $BunExe run powershell:check
+& $BunExe run security:check
+& $BunExe run package:win:verify
+& $BunExe run artifact:verify
 ```
 
-Also check every built `dist/src/**/*.js` with `node --check`, run portable and
+Also run `& $BunExe run syntax:check`, run portable and
 standalone/native-SQLite smoke tests, run `bash -n ops.sh`, run ShellCheck when
 available, and run repository-root `git diff --check`.
 
-Do not use `npm run dev` or `npm start` as a smoke test. Both may log in to
+Do not use `& $BunExe run dev` or `& $BunExe run start` as a smoke test. Both may log in to
 Discord and open the configured database.
 
 For a docs-only guide update, no version bump is normally required. Run at least
@@ -694,22 +697,21 @@ a targeted Prettier check and local documentation-link check. Follow
 
 ## Versioning, packaging, and release
 
-`tsbot/package.json` is the only hand-edited semantic version authority.
-`package-lock.json`, `src/generated-version.ts`, portable metadata, C# assembly
-metadata, source identity, artifact names, and the tracked executable are
-generated or verified from it. Do not hand-edit generated version or executable
-metadata.
+`tsbot/package.json` and `tsbot/src/constants.ts` are the synchronized semantic
+version authorities. `bun.lock`, portable metadata, C# assembly metadata, source
+identity, artifact names, and release executables are generated or verified from
+them. Do not hand-edit generated executable metadata.
 
 From `tsbot/`:
 
 ```powershell
-npm run release:patch # compatible fix
-npm run release:minor # backward-compatible feature
-npm run release:major # breaking release
+& $BunExe run release:patch # compatible fix
+& $BunExe run release:minor # backward-compatible feature
+& $BunExe run release:major # breaking release
 ```
 
 Each wrapper bumps exactly once and runs the full release build. If validation
-fails after the bump, fix the issue and run `npm run release:build`; never run the
+fails after the bump, fix the issue and run `& $BunExe run release:build`; never run the
 bumping wrapper a second time. CI rebuilds the Windows artifacts twice and fails
 if the committed executable is stale or not reproducible.
 

@@ -15,7 +15,7 @@
     "skipLibCheck": true,
     "rootDir": ".",
     "outDir": "dist",
-    "types": ["node", "vitest/globals"]
+    "types": ["bun", "vitest/globals"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
   "exclude": ["dist", "node_modules"]

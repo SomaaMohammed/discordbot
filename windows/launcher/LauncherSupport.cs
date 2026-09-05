@@ -6,16 +6,34 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 internal static class LauncherSupport
 {
     public static string NormalizeRoot(string root)
     {
-        return Path.GetFullPath(root).TrimEnd(
+        string resolved = Path.GetFullPath(root);
+        string pathRoot = Path.GetPathRoot(resolved);
+        string normalized = resolved.TrimEnd(
             Path.DirectorySeparatorChar,
             Path.AltDirectorySeparatorChar
         );
+        if (
+            !string.IsNullOrEmpty(pathRoot)
+            && string.Equals(
+                normalized,
+                pathRoot.TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar
+                ),
+                StringComparison.OrdinalIgnoreCase
+            )
+        )
+        {
+            return pathRoot;
+        }
+        return normalized;
     }
 
     public static bool EqualsOption(string value, string expected)
@@ -72,8 +90,21 @@ internal static class LauncherSupport
         {
             throw new InvalidDataException("The application payload manifest is missing.");
         }
-        RefuseReparsePoint(normalizedRoot, "The portable application root");
-        RefuseReparsePoint(manifest, "The application payload manifest");
+        RefuseReparsePath(normalizedRoot, "The portable application root");
+        RefuseReparsePath(manifest, "The application payload manifest");
+        HashSet<string> allowed = new HashSet<string>(
+            new string[] {
+                ".env.example",
+                "BUILD-INFO.txt",
+                "README-WINDOWS.txt",
+                "Start Superior Bot.cmd",
+                "SuperiorBot.exe",
+                "Update.exe",
+                "VERSION",
+                Path.Combine("app", "SuperiorBot.Runtime.exe")
+            },
+            StringComparer.OrdinalIgnoreCase
+        );
         Dictionary<string, string> expected = new Dictionary<string, string>(
             StringComparer.OrdinalIgnoreCase
         );
@@ -99,7 +130,14 @@ internal static class LauncherSupport
             {
                 throw new InvalidDataException("The application payload manifest contains a duplicate path.");
             }
-            RefuseReparsePoint(fileName, "A declared application payload file");
+            if (!allowed.Contains(canonicalRelative))
+            {
+                throw new InvalidDataException(
+                    "The application payload manifest declares an unsupported file: "
+                        + canonicalRelative
+                );
+            }
+            RefuseReparsePath(fileName, "A declared application payload file");
             if (!File.Exists(fileName) || ComputeSha256(fileName) != hash)
             {
                 throw new InvalidDataException(
@@ -108,13 +146,28 @@ internal static class LauncherSupport
             }
             expected.Add(canonicalRelative, hash);
         }
+        if (expected.Count != allowed.Count)
+        {
+            throw new InvalidDataException(
+                "The application payload manifest does not declare the complete release inventory."
+            );
+        }
+        foreach (string required in allowed)
+        {
+            if (!expected.ContainsKey(required))
+            {
+                throw new InvalidDataException(
+                    "The application payload manifest is missing a required file: " + required
+                );
+            }
+        }
 
         // The portable root is also the documented writable application root,
         // so operator-owned .env, SQLite, backup, and diagnostic files are
         // intentionally outside the immutable manifest boundary. Keep the
         // executable payload directories closed to undeclared files.
         List<string> actual = new List<string>();
-        foreach (string directoryName in new string[] { "app", "runtime", "tools" })
+        foreach (string directoryName in new string[] { "app" })
         {
             string directory = Path.Combine(normalizedRoot, directoryName);
             if (!Directory.Exists(directory))
@@ -137,6 +190,50 @@ internal static class LauncherSupport
         }
     }
 
+    public static void VerifyReleaseSignatures(
+        string payloadRoot,
+        string executablePath
+    )
+    {
+        string normalizedRoot = NormalizeRoot(payloadRoot);
+        string launcher = Path.GetFullPath(executablePath);
+        string portableLauncher = Path.Combine(normalizedRoot, "SuperiorBot.exe");
+        string runtime = Path.Combine(
+            normalizedRoot,
+            "app",
+            "SuperiorBot.Runtime.exe"
+        );
+        string updater = Path.Combine(normalizedRoot, "Update.exe");
+
+        foreach (string fileName in new string[] {
+            launcher,
+            portableLauncher,
+            runtime,
+            updater
+        })
+        {
+            RefuseReparsePath(fileName, "A signed release executable");
+        }
+        AuthenticodeSupport.VerifyFile(launcher, "The active launcher");
+        if (!string.Equals(launcher, portableLauncher, StringComparison.OrdinalIgnoreCase))
+        {
+            AuthenticodeSupport.VerifyFile(
+                portableLauncher,
+                "The embedded portable launcher"
+            );
+        }
+        AuthenticodeSupport.VerifyFile(runtime, "The compiled Bun runtime");
+        AuthenticodeSupport.VerifyFile(updater, "The bundled updater");
+
+        if (!BuildIdentity.SigningRequired)
+        {
+            Log(
+                "WARN",
+                "This executable is an explicitly unsigned development build; do not distribute it as a production release."
+            );
+        }
+    }
+
     public static string ComputeSha256(string fileName)
     {
         using (SHA256 sha256 = SHA256.Create())
@@ -150,30 +247,53 @@ internal static class LauncherSupport
     public static string ResolveEnvironmentFile(string applicationRoot)
     {
         string configured = Environment.GetEnvironmentVariable("ENV_FILE");
+        string resolved;
         if (string.IsNullOrWhiteSpace(configured))
         {
-            return Path.Combine(applicationRoot, ".env");
+            resolved = Path.Combine(applicationRoot, ".env");
         }
-        return Path.IsPathRooted(configured)
-            ? Path.GetFullPath(configured)
-            : Path.GetFullPath(Path.Combine(applicationRoot, configured));
+        else
+        {
+            resolved = Path.IsPathRooted(configured)
+                ? Path.GetFullPath(configured)
+                : Path.GetFullPath(Path.Combine(applicationRoot, configured));
+        }
+        RefuseReparsePath(resolved, "The selected environment file");
+        return resolved;
     }
 
     public static string ResolveDatabaseFile(string applicationRoot, string environmentFile)
     {
         string configured = Environment.GetEnvironmentVariable("DB_FILE");
-        if (string.IsNullOrWhiteSpace(configured) && File.Exists(environmentFile))
+        // dotenv does not override an inherited variable, even when its value is
+        // empty. Preserve that precedence so the mutex and runtime cannot diverge.
+        if (configured == null && File.Exists(environmentFile))
         {
+            RefuseReparsePath(environmentFile, "The selected environment file");
             configured = ReadDotEnvValue(environmentFile, "DB_FILE");
         }
         if (string.IsNullOrWhiteSpace(configured))
         {
+            string legacyDatabase = Path.GetFullPath(
+                Path.Combine(applicationRoot, "court.db")
+            );
+            RefuseReparsePath(legacyDatabase, "The legacy database file");
+            if (File.Exists(legacyDatabase) || Directory.Exists(legacyDatabase))
+            {
+                throw new InvalidDataException(
+                    "DB_FILE must be set explicitly because a legacy database exists at "
+                        + legacyDatabase
+                        + ". Do not rename it in place; follow the documented v4-to-v5 migration workflow."
+                );
+            }
             configured = "superior.db";
         }
         configured = configured.Trim();
-        return Path.IsPathRooted(configured)
+        string resolved = Path.IsPathRooted(configured)
             ? Path.GetFullPath(configured)
             : Path.GetFullPath(Path.Combine(applicationRoot, configured));
+        RefuseReparsePath(resolved, "The selected database file");
+        return resolved;
     }
 
     public static SuperiorInstanceGuard AcquireInstanceGuard(
@@ -182,6 +302,8 @@ internal static class LauncherSupport
     )
     {
         string normalizedRoot = NormalizeRoot(applicationRoot);
+        RefuseReparsePath(normalizedRoot, "The application root");
+        RefuseReparsePath(environmentFile, "The selected environment file");
         string databaseFile = ResolveDatabaseFile(normalizedRoot, environmentFile);
         return SuperiorInstanceGuard.Acquire(normalizedRoot, databaseFile);
     }
@@ -221,7 +343,30 @@ internal static class LauncherSupport
 
     public static string QuoteArgument(string value)
     {
-        return "\"" + value.Replace("\"", "\\\"") + "\"";
+        StringBuilder quoted = new StringBuilder(value.Length + 2);
+        quoted.Append('"');
+        int backslashes = 0;
+        foreach (char character in value)
+        {
+            if (character == '\\')
+            {
+                backslashes += 1;
+                continue;
+            }
+            if (character == '"')
+            {
+                quoted.Append('\\', backslashes * 2 + 1);
+                quoted.Append('"');
+                backslashes = 0;
+                continue;
+            }
+            quoted.Append('\\', backslashes);
+            backslashes = 0;
+            quoted.Append(character);
+        }
+        quoted.Append('\\', backslashes * 2);
+        quoted.Append('"');
+        return quoted.ToString();
     }
 
     public static int RunChild(ProcessStartInfo start)
@@ -231,7 +376,7 @@ internal static class LauncherSupport
         {
             if (process == null)
             {
-                throw new InvalidOperationException("Unable to start the bundled Node runtime.");
+                throw new InvalidOperationException("Unable to start the compiled Bun runtime.");
             }
 
             try
@@ -264,7 +409,7 @@ internal static class LauncherSupport
                     eventArguments.Cancel = true;
                     Log(
                         "INFO",
-                        "Shutdown signal received; waiting for the bundled Node process to drain. Press Ctrl+C again to force termination."
+                        "Shutdown signal received; waiting for the bundled Bun process to drain. Press Ctrl+C again to force termination."
                     );
                     return;
                 }
@@ -272,7 +417,7 @@ internal static class LauncherSupport
                 eventArguments.Cancel = false;
                 Log(
                     "WARN",
-                    "A second shutdown signal will force launcher exit; the child job will terminate the bundled Node process."
+                    "A second shutdown signal will force launcher exit; the child job will terminate the bundled Bun process."
                 );
             };
             Console.CancelKeyPress += cancellationHandler;
@@ -288,6 +433,35 @@ internal static class LauncherSupport
         }
     }
 
+    public static void SanitizeBunRuntimeEnvironment(ProcessStartInfo start)
+    {
+        List<string> namesToRemove = new List<string>();
+        foreach (string name in start.EnvironmentVariables.Keys)
+        {
+            if (
+                name.StartsWith("BUN_", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "NODE_OPTIONS", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(
+                    name,
+                    "SUPERIOR_DATABASE_LOCK_HELD",
+                    StringComparison.OrdinalIgnoreCase
+                )
+                || string.Equals(
+                    name,
+                    "SUPERIOR_DATABASE_LOCK_PATH",
+                    StringComparison.OrdinalIgnoreCase
+                )
+            )
+            {
+                namesToRemove.Add(name);
+            }
+        }
+        foreach (string name in namesToRemove)
+        {
+            start.EnvironmentVariables.Remove(name);
+        }
+    }
+
     public static void RefuseReparsePoint(string path, string description)
     {
         if (
@@ -300,6 +474,26 @@ internal static class LauncherSupport
             {
                 throw new InvalidDataException(description + " must not be a reparse point.");
             }
+        }
+    }
+
+    public static void RefuseReparsePath(string path, string description)
+    {
+        string resolved = Path.GetFullPath(path);
+        string root = Path.GetPathRoot(resolved);
+        if (string.IsNullOrEmpty(root))
+        {
+            throw new InvalidDataException(description + " has no canonical root.");
+        }
+        string current = root;
+        string relative = resolved.Substring(root.Length);
+        foreach (string component in relative.Split(new[] {
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar
+        }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, component);
+            RefuseReparsePoint(current, description);
         }
     }
 
@@ -361,42 +555,40 @@ internal static class LauncherSupport
                 "The selected environment file is too large to inspect safely."
             );
         }
-        foreach (string rawLine in File.ReadAllLines(environmentFile))
+        string contents = File.ReadAllText(environmentFile)
+            .Replace("\r\n", "\n")
+            .Replace("\r", "\n");
+        Regex linePattern = new Regex(
+            "^\\s*(?:export\\s+)?([\\w.-]+)(?:\\s*=\\s*?|:\\s+?)(\\s*'(?:\\\\'|[^'])*'|\\s*\"(?:\\\\\"|[^\"])*\"|\\s*`(?:\\\\`|[^`])*`|[^#\\r\\n]+)?\\s*(?:#.*)?$",
+            RegexOptions.Multiline
+        );
+        string result = null;
+        foreach (Match match in linePattern.Matches(contents))
         {
-            string line = rawLine.Trim();
-            if (line.StartsWith("export ", StringComparison.Ordinal))
-            {
-                line = line.Substring(7).TrimStart();
-            }
-            int separator = line.IndexOf('=');
-            if (separator <= 0)
+            if (!string.Equals(match.Groups[1].Value, key, StringComparison.Ordinal))
             {
                 continue;
             }
-            if (!string.Equals(line.Substring(0, separator).Trim(), key, StringComparison.Ordinal))
-            {
-                continue;
-            }
-            string value = line.Substring(separator + 1).Trim();
+            string value = match.Groups[2].Success
+                ? match.Groups[2].Value.Trim()
+                : "";
             if (
                 value.Length >= 2
                 && ((value[0] == '\"' && value[value.Length - 1] == '\"')
-                    || (value[0] == '\'' && value[value.Length - 1] == '\''))
+                    || (value[0] == '\'' && value[value.Length - 1] == '\'')
+                    || (value[0] == '`' && value[value.Length - 1] == '`'))
             )
             {
+                char quote = value[0];
                 value = value.Substring(1, value.Length - 2);
-            }
-            else
-            {
-                int comment = value.IndexOf(" #", StringComparison.Ordinal);
-                if (comment >= 0)
+                if (quote == '\"')
                 {
-                    value = value.Substring(0, comment).TrimEnd();
+                    value = value.Replace("\\n", "\n").Replace("\\r", "\r");
                 }
             }
-            return value;
+            result = value;
         }
-        return null;
+        return result;
     }
 }
 
@@ -451,7 +643,7 @@ internal sealed class SuperiorChildJob : IDisposable
         if (!AssignProcessToJobObject(handle, process.Handle))
         {
             throw NewWindowsError(
-                "Superior Bot could not attach the bundled Node process to its safety job"
+                "Superior Bot could not attach the bundled Bun process to its safety job"
             );
         }
     }
@@ -537,9 +729,12 @@ internal sealed class SuperiorInstanceGuard : IDisposable
     private readonly List<Mutex> mutexes;
     private bool disposed;
 
-    private SuperiorInstanceGuard(List<Mutex> mutexes)
+    public string DatabaseFile { get; private set; }
+
+    private SuperiorInstanceGuard(List<Mutex> mutexes, string databaseFile)
     {
         this.mutexes = mutexes;
+        DatabaseFile = Path.GetFullPath(databaseFile);
     }
 
     public static SuperiorInstanceGuard Acquire(string applicationRoot, string databaseFile)
@@ -599,7 +794,7 @@ internal sealed class SuperiorInstanceGuard : IDisposable
                 }
                 acquired.Add(mutex);
             }
-            return new SuperiorInstanceGuard(acquired);
+            return new SuperiorInstanceGuard(acquired, databaseFile);
         }
         catch
         {

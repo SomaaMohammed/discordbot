@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import Database from "better-sqlite3";
+import Database from "./database.js";
 import { backupDatabase } from "./backup.js";
 import { migrateDatabase, validateDatabaseFile } from "./migration.js";
 import {
+  databaseForeignKeyViolationCount,
   databaseIntegrityCheck,
   detectDatabaseSchema,
   type DatabaseSchemaKind,
@@ -140,8 +141,7 @@ function inspectExistingDatabase(dbFile: string): DatabaseSchemaKind {
     if (integrity.toLowerCase() !== "ok") {
       throw new Error(`Database integrity check failed: ${integrity}`);
     }
-    const foreignKeyViolations = (db.pragma("foreign_key_check") as unknown[])
-      .length;
+    const foreignKeyViolations = databaseForeignKeyViolationCount(db);
     if (foreignKeyViolations > 0) {
       throw new Error(
         `Database foreign-key check reported ${foreignKeyViolations} violation(s)`,

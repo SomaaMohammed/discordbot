@@ -24,11 +24,13 @@ if (path.basename(tsbotRoot) === "dist") {
 
 const repoRoot = resolveApplicationRoot(path.resolve(tsbotRoot, ".."));
 
-async function main(): Promise<void> {
+export async function runBot(
+  options: { requireLauncherLock?: boolean } = {},
+): Promise<void> {
   logInfo("bootstrap", "Selected Superior application root", {
     applicationRoot: repoRoot,
   });
-  const config = loadProcessConfig(repoRoot);
+  const config = loadProcessConfig(repoRoot, options);
   if (process.env.SUPERIOR_AUTO_MIGRATE === "1") {
     const migration = await ensureDatabaseCurrent({ dbFile: config.dbFile });
     if (migration.status === "migrated") {
@@ -80,12 +82,14 @@ async function main(): Promise<void> {
   );
 }
 
-try {
-  await main();
-} catch (error) {
-  logClassifiedError("bootstrap", error, {
-    stage: "startup",
-    outcome: "startup-failed",
-  });
-  process.exitCode = 1;
+if (import.meta.main) {
+  try {
+    await runBot();
+  } catch (error) {
+    logClassifiedError("bootstrap", error, {
+      stage: "startup",
+      outcome: "startup-failed",
+    });
+    process.exitCode = 1;
+  }
 }

@@ -38,6 +38,7 @@ describe("neutral source boundaries", () => {
       "tsbot/tests/config.test.ts",
       "tsbot/tests/ops-regression.test.ts",
       "tsbot/tests/storage-multitenancy.test.ts",
+      "tsbot/tests/windows-packaging.test.ts",
     ]);
     const inspectedFiles = [
       ...listFiles(path.join(tsbotRoot, "src")),

@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import {
   assertDiscordSnowflake,
   GUILD_SETTINGS_VERSION,
@@ -704,7 +704,7 @@ function parseImportedTicketEvents(
 }
 
 export function insertImportedOperationalData(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   imported: GuildDataExport,
 ): void {

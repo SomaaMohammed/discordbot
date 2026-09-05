@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   ANTI_SPAM_ACTIONS,
@@ -26,7 +26,7 @@ const MAX_EXEMPTIONS = 250;
 
 export class AntiSpamRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 

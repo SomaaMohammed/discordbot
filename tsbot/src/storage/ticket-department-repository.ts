@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   FORM_FIELD_TYPES,
@@ -54,7 +54,7 @@ export const MAX_TICKET_DEPARTMENT_FIELDS = 5;
 /** Tenant-bound configuration for ticket departments and modal fields. */
 export class TicketDepartmentRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 

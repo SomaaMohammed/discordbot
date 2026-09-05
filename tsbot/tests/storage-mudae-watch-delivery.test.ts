@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
+import Database from "../src/storage/database.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BotStorage } from "../src/storage/db.js";
 import { MUDAE_WATCH_DELIVERY_RETENTION_DAYS } from "../src/storage/mudae-watch-delivery-repository.js";

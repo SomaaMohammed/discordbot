@@ -13,11 +13,12 @@ $ErrorActionPreference = "Stop"
 $WindowsDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepositoryRoot = Split-Path -Parent $WindowsDirectory
 $TsbotRoot = Join-Path $RepositoryRoot "tsbot"
-$SourceExecutable = Join-Path $RepositoryRoot "SuperiorBot.exe"
-$SourceUpdater = Join-Path $RepositoryRoot "Update.exe"
+$DevelopmentArtifactRoot = Join-Path $WindowsDirectory ".artifacts\development"
+$SourceExecutable = Join-Path $DevelopmentArtifactRoot "SuperiorBot.exe"
+$SourceUpdater = Join-Path $DevelopmentArtifactRoot "Update.exe"
 $TargetExecutable = Join-Path $TargetDirectory "SuperiorBot.exe"
 $TargetUpdater = Join-Path $TargetDirectory "Update.exe"
-$Npm = (Get-Command npm.cmd -ErrorAction Stop).Source
+$Bun = (Get-Command bun.exe -CommandType Application -ErrorAction Stop).Source
 
 function Get-ProductVersion {
     param([Parameter(Mandatory = $true)][string]$LiteralPath)
@@ -33,14 +34,14 @@ function Get-ProductVersion {
 if (-not $SkipPackage) {
     Push-Location $TsbotRoot
     try {
-        & $Npm run package:win
+        & $Bun run package:win
         $PackageExitCode = $LASTEXITCODE
     }
     finally {
         Pop-Location
     }
     if ($PackageExitCode -ne 0) {
-        throw "npm run package:win failed with exit code $PackageExitCode."
+        throw "bun run package:win failed with exit code $PackageExitCode."
     }
 }
 

@@ -1,4 +1,5 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
+import { z } from "zod";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   GUILD_CAPABILITIES,
@@ -7,6 +8,7 @@ import {
   type GuildCapability,
   type RoleCapabilityGrant,
 } from "../types.js";
+import { decodeOptionalRow, decodeRows } from "./row-decoder.js";
 
 interface CapabilityGrantRow {
   guild_id: string;
@@ -19,6 +21,19 @@ interface CapabilityGrantRow {
   updated_at: string;
 }
 
+const capabilityGrantRowSchema = z
+  .object({
+    guild_id: z.string().min(1).max(20),
+    principal_type: z.string().min(1).max(20),
+    principal_id: z.string().min(1).max(20),
+    capability: z.string().min(1).max(80),
+    active: z.number().int().min(0).max(1),
+    granted_by: z.string().min(1).max(20),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .strict();
+
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 100;
 const MAX_ROLE_LOOKUP = 250;
@@ -26,7 +41,7 @@ const MAX_ROLE_LOOKUP = 250;
 /** Tenant-bound persistence for delegated role capabilities. */
 export class GuildAccessRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 
@@ -117,7 +132,8 @@ export class GuildAccessRepository {
   ): RoleCapabilityGrant[] {
     const boundedLimit = normalizeLimit(limit);
     const boundedOffset = normalizeOffset(offset);
-    return (
+    return decodeRows(
+      capabilityGrantRowSchema,
       this.db
         .prepare(
           `SELECT * FROM delegated_capability_grants
@@ -125,7 +141,8 @@ export class GuildAccessRepository {
            ORDER BY capability, principal_id
            LIMIT ? OFFSET ?`,
         )
-        .all(this.guildId, boundedLimit, boundedOffset) as CapabilityGrantRow[]
+        .all(this.guildId, boundedLimit, boundedOffset),
+      "delegated capability grants list",
     ).map(parseRoleGrant);
   }
 
@@ -137,7 +154,8 @@ export class GuildAccessRepository {
     const normalizedCapability = normalizeCapability(capability);
     const boundedLimit = normalizeLimit(limit);
     const boundedOffset = normalizeOffset(offset);
-    return (
+    return decodeRows(
+      capabilityGrantRowSchema,
       this.db
         .prepare(
           `SELECT * FROM delegated_capability_grants
@@ -146,12 +164,8 @@ export class GuildAccessRepository {
            ORDER BY principal_id
            LIMIT ? OFFSET ?`,
         )
-        .all(
-          this.guildId,
-          normalizedCapability,
-          boundedLimit,
-          boundedOffset,
-        ) as CapabilityGrantRow[]
+        .all(this.guildId, normalizedCapability, boundedLimit, boundedOffset),
+      "delegated capability grants by capability",
     ).map(parseRoleGrant);
   }
 
@@ -173,7 +187,8 @@ export class GuildAccessRepository {
       );
     }
     const placeholders = normalized.map(() => "?").join(", ");
-    return (
+    return decodeRows(
+      capabilityGrantRowSchema,
       this.db
         .prepare(
           `SELECT * FROM delegated_capability_grants
@@ -181,7 +196,8 @@ export class GuildAccessRepository {
              AND principal_id IN (${placeholders})
            ORDER BY capability, principal_id`,
         )
-        .all(this.guildId, ...normalized) as CapabilityGrantRow[]
+        .all(this.guildId, ...normalized),
+      "delegated capability grants by role",
     ).map(parseRoleGrant);
   }
 
@@ -199,14 +215,17 @@ export class GuildAccessRepository {
     principalId: string,
     capability: GuildCapability,
   ): RoleCapabilityGrant | null {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM delegated_capability_grants
-         WHERE guild_id = ? AND principal_type = 'role'
-           AND principal_id = ? AND capability = ?`,
-      )
-      .get(this.guildId, principalId, capability) as
-      CapabilityGrantRow | undefined;
+    const row = decodeOptionalRow(
+      capabilityGrantRowSchema,
+      this.db
+        .prepare(
+          `SELECT * FROM delegated_capability_grants
+           WHERE guild_id = ? AND principal_type = 'role'
+             AND principal_id = ? AND capability = ?`,
+        )
+        .get(this.guildId, principalId, capability),
+      "delegated capability grant by identity",
+    );
     return row ? parseRoleGrant(row) : null;
   }
 

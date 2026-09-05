@@ -1,4 +1,5 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
+import { z } from "zod";
 import {
   GUILD_SETTINGS_VERSION,
   isDiscordSnowflake,
@@ -26,6 +27,11 @@ import {
   validatePhase4PanelReferences,
   type Phase4PanelReferenceData,
 } from "./guild-data.js";
+import {
+  decodeRows,
+  integrityCheckRowSchema,
+  tableInfoRowSchema,
+} from "./row-decoder.js";
 
 export const CURRENT_SCHEMA_VERSION = 11 as const;
 export const LEGACY_V10_SCHEMA_VERSION = 10 as const;
@@ -2745,6 +2751,40 @@ interface MetricDataRow {
   updated_at: string;
 }
 
+const schemaObjectRowSchema = z
+  .object({
+    type: z.enum(["table", "index", "view", "trigger"]),
+    name: z.string().min(1).max(255),
+    tbl_name: z.string().min(1).max(255),
+    sql: z.string().nullable(),
+  })
+  .strict();
+
+const foreignKeyRowSchema = z
+  .object({
+    table: z.string().min(1).max(255),
+    from: z.string().min(1).max(255),
+    to: z.string().min(1).max(255),
+    on_delete: z.string().min(1).max(40),
+  })
+  .passthrough();
+
+const foreignKeyViolationRowSchema = z
+  .object({
+    table: z.string().min(1).max(255),
+    rowid: z.union([z.number().int(), z.bigint(), z.null()]),
+    parent: z.string().min(1).max(255),
+    fkid: z.number().int().nonnegative(),
+  })
+  .passthrough();
+
+const schemaMigrationRowSchema = z
+  .object({
+    version: z.number().int().positive(),
+    applied_at: z.string(),
+  })
+  .strict();
+
 interface TicketConfigurationDataRow {
   guild_id: string;
   enabled: number;
@@ -2800,7 +2840,7 @@ interface TicketEventDataRow {
   created_at: string;
 }
 
-export function createV3Objects(db: Database.Database): void {
+export function createV3Objects(db: DatabaseConnection): void {
   for (const table of V3_TABLE_NAMES) {
     db.exec(V3_TABLE_SQL[table]);
   }
@@ -2810,7 +2850,7 @@ export function createV3Objects(db: Database.Database): void {
 }
 
 /** Adds only the operational objects introduced by schema v4. */
-export function createV4OperationalObjects(db: Database.Database): void {
+export function createV4OperationalObjects(db: DatabaseConnection): void {
   for (const table of [
     "ticket_configurations",
     "posted_panels",
@@ -2826,13 +2866,13 @@ export function createV4OperationalObjects(db: Database.Database): void {
   }
 }
 
-export function createV4Objects(db: Database.Database): void {
+export function createV4Objects(db: DatabaseConnection): void {
   createV3Objects(db);
   createV4OperationalObjects(db);
 }
 
 /** Creates only the objects introduced by schema v5 on top of schema v3. */
-export function createV5OperationalObjects(db: Database.Database): void {
+export function createV5OperationalObjects(db: DatabaseConnection): void {
   for (const table of V5_TABLE_NAMES) {
     if (!(V3_TABLE_NAMES as readonly string[]).includes(table)) {
       db.exec(V5_TABLE_SQL[table]);
@@ -2845,13 +2885,13 @@ export function createV5OperationalObjects(db: Database.Database): void {
   }
 }
 
-export function createV5Objects(db: Database.Database): void {
+export function createV5Objects(db: DatabaseConnection): void {
   createV3Objects(db);
   createV5OperationalObjects(db);
 }
 
 /** Adds only the restricted-role-ping objects introduced by schema v6. */
-export function createV6OperationalObjects(db: Database.Database): void {
+export function createV6OperationalObjects(db: DatabaseConnection): void {
   for (const table of V6_TABLE_NAMES) {
     if (!(V5_TABLE_NAMES as readonly string[]).includes(table)) {
       db.exec(V6_TABLE_SQL[table]);
@@ -2864,13 +2904,13 @@ export function createV6OperationalObjects(db: Database.Database): void {
   }
 }
 
-export function createV6Objects(db: Database.Database): void {
+export function createV6Objects(db: DatabaseConnection): void {
   createV5Objects(db);
   createV6OperationalObjects(db);
 }
 
 /** Adds only the internal delivery-deduplication objects introduced by schema v7. */
-export function createV7OperationalObjects(db: Database.Database): void {
+export function createV7OperationalObjects(db: DatabaseConnection): void {
   for (const table of V7_TABLE_NAMES) {
     if (!(V6_TABLE_NAMES as readonly string[]).includes(table)) {
       db.exec(V7_TABLE_SQL[table]);
@@ -2883,13 +2923,13 @@ export function createV7OperationalObjects(db: Database.Database): void {
   }
 }
 
-export function createV7Objects(db: Database.Database): void {
+export function createV7Objects(db: DatabaseConnection): void {
   createV6Objects(db);
   createV7OperationalObjects(db);
 }
 
 /** Creates the frozen schema-v8 layout used by legacy migration tests. */
-export function createV8Objects(db: Database.Database): void {
+export function createV8Objects(db: DatabaseConnection): void {
   for (const table of V8_TABLE_NAMES) {
     db.exec(V8_TABLE_SQL[table]);
   }
@@ -2899,7 +2939,7 @@ export function createV8Objects(db: Database.Database): void {
 }
 
 /** Adds only schema-v9 objects after the two enum-bound v8 tables are rebuilt. */
-export function createV9OperationalObjects(db: Database.Database): void {
+export function createV9OperationalObjects(db: DatabaseConnection): void {
   for (const table of V9_TABLE_NAMES) {
     if (!(V8_TABLE_NAMES as readonly string[]).includes(table)) {
       db.exec(V9_TABLE_SQL[table]);
@@ -2913,7 +2953,7 @@ export function createV9OperationalObjects(db: Database.Database): void {
 }
 
 /** Recreates the two v8 enum-bound tables and their existing indexes for v9. */
-export function createV9ReplacementObjects(db: Database.Database): void {
+export function createV9ReplacementObjects(db: DatabaseConnection): void {
   db.exec(V9_DELEGATED_CAPABILITY_GRANTS_TABLE_SQL);
   db.exec(V9_POSTED_PANELS_TABLE_SQL);
   for (const index of [
@@ -2925,13 +2965,13 @@ export function createV9ReplacementObjects(db: Database.Database): void {
   }
 }
 
-export function createV9Objects(db: Database.Database): void {
+export function createV9Objects(db: DatabaseConnection): void {
   for (const table of V9_TABLE_NAMES) db.exec(V9_TABLE_SQL[table]);
   for (const index of V9_EXPLICIT_INDEX_NAMES) db.exec(V9_INDEX_SQL[index]);
 }
 
 /** Adds schema-v10 objects after the two enum-bound v9 tables are rebuilt. */
-export function createV10OperationalObjects(db: Database.Database): void {
+export function createV10OperationalObjects(db: DatabaseConnection): void {
   for (const table of V10_TABLE_NAMES) {
     if (!(V9_TABLE_NAMES as readonly string[]).includes(table)) {
       db.exec(V10_TABLE_SQL[table]);
@@ -2945,7 +2985,7 @@ export function createV10OperationalObjects(db: Database.Database): void {
 }
 
 /** Recreates the v9 enum-bound capability and panel tables for schema v10. */
-export function createV10ReplacementObjects(db: Database.Database): void {
+export function createV10ReplacementObjects(db: DatabaseConnection): void {
   db.exec(V10_DELEGATED_CAPABILITY_GRANTS_TABLE_SQL);
   db.exec(V10_POSTED_PANELS_TABLE_SQL);
   for (const index of [
@@ -2957,13 +2997,13 @@ export function createV10ReplacementObjects(db: Database.Database): void {
   }
 }
 
-export function createV10Objects(db: Database.Database): void {
+export function createV10Objects(db: DatabaseConnection): void {
   for (const table of V10_TABLE_NAMES) db.exec(V10_TABLE_SQL[table]);
   for (const index of V10_EXPLICIT_INDEX_NAMES) db.exec(V10_INDEX_SQL[index]);
 }
 
 /** Adds only schema-v11 voting objects without changing frozen v10 objects. */
-export function createV11OperationalObjects(db: Database.Database): void {
+export function createV11OperationalObjects(db: DatabaseConnection): void {
   for (const table of V11_TABLE_NAMES) {
     if (!(V10_TABLE_NAMES as readonly string[]).includes(table)) {
       db.exec(V11_TABLE_SQL[table]);
@@ -2976,18 +3016,18 @@ export function createV11OperationalObjects(db: Database.Database): void {
   }
 }
 
-export function createV11Objects(db: Database.Database): void {
+export function createV11Objects(db: DatabaseConnection): void {
   for (const table of V11_TABLE_NAMES) db.exec(V11_TABLE_SQL[table]);
   for (const index of V11_EXPLICIT_INDEX_NAMES) db.exec(V11_INDEX_SQL[index]);
 }
 
 /** Creates the v8 settings table after the frozen v7 table was renamed. */
-export function createV8GuildSettingsObject(db: Database.Database): void {
+export function createV8GuildSettingsObject(db: DatabaseConnection): void {
   db.exec(V8_GUILD_SETTINGS_TABLE_SQL);
 }
 
 export function recordV4SchemaVersion(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   db.prepare(
@@ -2996,7 +3036,7 @@ export function recordV4SchemaVersion(
 }
 
 export function recordV5SchemaVersion(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   db.prepare(
@@ -3005,7 +3045,7 @@ export function recordV5SchemaVersion(
 }
 
 export function recordV6SchemaVersion(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   db.prepare(
@@ -3014,7 +3054,7 @@ export function recordV6SchemaVersion(
 }
 
 export function recordV7SchemaVersion(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   db.prepare(
@@ -3023,7 +3063,7 @@ export function recordV7SchemaVersion(
 }
 
 export function recordCurrentSchemaVersion(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   db.prepare(
@@ -3032,7 +3072,7 @@ export function recordCurrentSchemaVersion(
 }
 
 export function recordV10SchemaVersion(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   db.prepare(
@@ -3041,7 +3081,7 @@ export function recordV10SchemaVersion(
 }
 
 export function recordV9SchemaVersion(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   db.prepare(
@@ -3050,7 +3090,7 @@ export function recordV9SchemaVersion(
 }
 
 export function recordV8SchemaVersion(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   db.prepare(
@@ -3059,7 +3099,7 @@ export function recordV8SchemaVersion(
 }
 
 export function initializeV3Schema(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   const initialize = db.transaction(() => {
@@ -3076,7 +3116,7 @@ export function initializeV3Schema(
 }
 
 export function initializeV4Schema(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   const initialize = db.transaction(() => {
@@ -3091,7 +3131,7 @@ export function initializeV4Schema(
 }
 
 export function initializeV5Schema(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   const initialize = db.transaction(() => {
@@ -3106,7 +3146,7 @@ export function initializeV5Schema(
 }
 
 export function initializeV6Schema(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   const initialize = db.transaction(() => {
@@ -3121,7 +3161,7 @@ export function initializeV6Schema(
 }
 
 export function initializeV7Schema(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   const initialize = db.transaction(() => {
@@ -3136,7 +3176,7 @@ export function initializeV7Schema(
 }
 
 export function initializeV8Schema(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   const initialize = db.transaction(() => {
@@ -3151,7 +3191,7 @@ export function initializeV8Schema(
 }
 
 export function initializeV9Schema(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   const initialize = db.transaction(() => {
@@ -3166,7 +3206,7 @@ export function initializeV9Schema(
 }
 
 export function initializeV10Schema(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   const initialize = db.transaction(() => {
@@ -3181,7 +3221,7 @@ export function initializeV10Schema(
 }
 
 export function initializeV11Schema(
-  db: Database.Database,
+  db: DatabaseConnection,
   appliedAt: string,
 ): void {
   const initialize = db.transaction(() => {
@@ -3195,7 +3235,7 @@ export function initializeV11Schema(
   initialize.immediate();
 }
 
-export function getUserTableNames(db: Database.Database): string[] {
+export function getUserTableNames(db: DatabaseConnection): string[] {
   return getSchemaObjects(db)
     .filter((row) => row.type === "table")
     .map((row) => row.name)
@@ -3203,7 +3243,7 @@ export function getUserTableNames(db: Database.Database): string[] {
 }
 
 export function detectDatabaseSchema(
-  db: Database.Database,
+  db: DatabaseConnection,
 ): DatabaseSchemaKind {
   const objects = getSchemaObjects(db);
   if (objects.length === 0) {
@@ -3251,7 +3291,7 @@ export function detectDatabaseSchema(
   return "unknown";
 }
 
-export function validateV3Schema(db: Database.Database): string[] {
+export function validateV3Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V3_TABLE_NAMES],
@@ -3295,11 +3335,7 @@ export function validateV3Schema(db: Database.Database): string[] {
   validateGuildForeignKey(db, "guild_settings", issues);
   validateGuildForeignKey(db, "metrics", issues);
 
-  const versions = db
-    .prepare(
-      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .all() as Array<{ version: number; applied_at: string }>;
+  const versions = readSchemaMigrationRows(db, "schema-v3 validation");
   if (
     versions.length !== 1 ||
     versions[0]?.version !== LEGACY_V3_SCHEMA_VERSION ||
@@ -3315,7 +3351,7 @@ export function validateV3Schema(db: Database.Database): string[] {
   return issues;
 }
 
-export function validateV4Schema(db: Database.Database): string[] {
+export function validateV4Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V4_TABLE_NAMES],
@@ -3422,11 +3458,7 @@ export function validateV4Schema(db: Database.Database): string[] {
   }
   validateTicketEventForeignKeys(db, issues);
 
-  const versions = db
-    .prepare(
-      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .all() as Array<{ version: number; applied_at: string }>;
+  const versions = readSchemaMigrationRows(db, "schema-v4 validation");
   const validVersionSequence =
     (versions.length === 1 &&
       versions[0]?.version === LEGACY_V4_SCHEMA_VERSION) ||
@@ -3448,7 +3480,7 @@ export function validateV4Schema(db: Database.Database): string[] {
   return issues;
 }
 
-export function validateV5Schema(db: Database.Database): string[] {
+export function validateV5Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V5_TABLE_NAMES],
@@ -3461,11 +3493,7 @@ export function validateV5Schema(db: Database.Database): string[] {
   validateSqlDefinitions(db, V5_TABLE_SQL, "table", issues);
   validateSqlDefinitions(db, V5_INDEX_SQL, "index", issues);
 
-  const versions = db
-    .prepare(
-      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .all() as Array<{ version: number; applied_at: string }>;
+  const versions = readSchemaMigrationRows(db, "schema-v5 validation");
   const versionNumbers = versions.map((row) => row.version);
   const validVersionSequence = [
     [LEGACY_V5_SCHEMA_VERSION],
@@ -3495,7 +3523,7 @@ export function validateV5Schema(db: Database.Database): string[] {
   return issues;
 }
 
-export function validateV6Schema(db: Database.Database): string[] {
+export function validateV6Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V6_TABLE_NAMES],
@@ -3508,11 +3536,7 @@ export function validateV6Schema(db: Database.Database): string[] {
   validateSqlDefinitions(db, V6_TABLE_SQL, "table", issues);
   validateSqlDefinitions(db, V6_INDEX_SQL, "index", issues);
 
-  const versions = db
-    .prepare(
-      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .all() as Array<{ version: number; applied_at: string }>;
+  const versions = readSchemaMigrationRows(db, "schema-v6 validation");
   const versionNumbers = versions.map((row) => row.version);
   const validVersionSequence = [
     [LEGACY_V6_SCHEMA_VERSION],
@@ -3549,7 +3573,7 @@ export function validateV6Schema(db: Database.Database): string[] {
   return issues;
 }
 
-export function validateV7Schema(db: Database.Database): string[] {
+export function validateV7Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V7_TABLE_NAMES],
@@ -3562,11 +3586,7 @@ export function validateV7Schema(db: Database.Database): string[] {
   validateSqlDefinitions(db, V7_TABLE_SQL, "table", issues);
   validateSqlDefinitions(db, V7_INDEX_SQL, "index", issues);
 
-  const versions = db
-    .prepare(
-      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .all() as Array<{ version: number; applied_at: string }>;
+  const versions = readSchemaMigrationRows(db, "schema-v7 validation");
   const versionNumbers = versions.map((row) => row.version);
   const validVersionSequence = [
     [LEGACY_V7_SCHEMA_VERSION],
@@ -3611,7 +3631,7 @@ export function validateV7Schema(db: Database.Database): string[] {
   return issues;
 }
 
-export function validateV8Schema(db: Database.Database): string[] {
+export function validateV8Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V8_TABLE_NAMES],
@@ -3622,11 +3642,7 @@ export function validateV8Schema(db: Database.Database): string[] {
   validateSqlDefinitions(db, V8_TABLE_SQL, "table", issues);
   validateSqlDefinitions(db, V8_INDEX_SQL, "index", issues);
 
-  const versions = db
-    .prepare(
-      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .all() as Array<{ version: number; applied_at: string }>;
+  const versions = readSchemaMigrationRows(db, "schema-v8 validation");
   const versionNumbers = versions.map((row) => row.version);
   const validVersionSequence = [
     [LEGACY_V8_SCHEMA_VERSION],
@@ -3679,7 +3695,7 @@ export function validateV8Schema(db: Database.Database): string[] {
   return issues;
 }
 
-export function validateV9Schema(db: Database.Database): string[] {
+export function validateV9Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V9_TABLE_NAMES],
@@ -3689,11 +3705,7 @@ export function validateV9Schema(db: Database.Database): string[] {
 
   validateSqlDefinitions(db, V9_TABLE_SQL, "table", issues);
   validateSqlDefinitions(db, V9_INDEX_SQL, "index", issues);
-  const versions = db
-    .prepare(
-      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .all() as Array<{ version: number; applied_at: string }>;
+  const versions = readSchemaMigrationRows(db, "schema-v9 validation");
   const numbers = versions.map((row) => row.version);
   const valid =
     numbers.length >= 1 &&
@@ -3721,7 +3733,7 @@ export function validateV9Schema(db: Database.Database): string[] {
   return issues;
 }
 
-export function validateV10Schema(db: Database.Database): string[] {
+export function validateV10Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V10_TABLE_NAMES],
@@ -3731,11 +3743,7 @@ export function validateV10Schema(db: Database.Database): string[] {
 
   validateSqlDefinitions(db, V10_TABLE_SQL, "table", issues);
   validateSqlDefinitions(db, V10_INDEX_SQL, "index", issues);
-  const versions = db
-    .prepare(
-      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .all() as Array<{ version: number; applied_at: string }>;
+  const versions = readSchemaMigrationRows(db, "schema-v10 validation");
   const numbers = versions.map((row) => row.version);
   const valid =
     numbers.length >= 1 &&
@@ -3764,7 +3772,7 @@ export function validateV10Schema(db: Database.Database): string[] {
   return issues;
 }
 
-export function validateV11Schema(db: Database.Database): string[] {
+export function validateV11Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V11_TABLE_NAMES],
@@ -3825,11 +3833,7 @@ export function validateV11Schema(db: Database.Database): string[] {
   );
   validateVotingPanelForeignKeys(db, issues);
 
-  const versions = db
-    .prepare(
-      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .all() as Array<{ version: number; applied_at: string }>;
+  const versions = readSchemaMigrationRows(db, "schema-v11 validation");
   const numbers = versions.map((row) => row.version);
   const valid =
     numbers.length >= 1 &&
@@ -3859,7 +3863,7 @@ export function validateV11Schema(db: Database.Database): string[] {
   return issues;
 }
 
-export function validateV2Schema(db: Database.Database): string[] {
+export function validateV2Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V2_TABLE_NAMES],
@@ -3882,11 +3886,7 @@ export function validateV2Schema(db: Database.Database): string[] {
     validateGuildForeignKey(db, table, issues);
   }
 
-  const versions = db
-    .prepare(
-      "SELECT version, applied_at FROM schema_migrations ORDER BY version",
-    )
-    .all() as Array<{ version: number; applied_at: string }>;
+  const versions = readSchemaMigrationRows(db, "schema-v2 validation");
   if (
     versions.length === 0 ||
     versions.at(-1)?.version !== LEGACY_V2_SCHEMA_VERSION ||
@@ -3904,14 +3904,42 @@ export function validateV2Schema(db: Database.Database): string[] {
   return issues;
 }
 
-export function databaseIntegrityCheck(db: Database.Database): string {
-  const rows = db.pragma("integrity_check") as Array<{
-    integrity_check: string;
-  }>;
-  return rows.map((row) => String(row.integrity_check)).join("; ");
+export function databaseIntegrityCheck(db: DatabaseConnection): string {
+  const rows = decodeRows(
+    integrityCheckRowSchema,
+    db.pragma("integrity_check"),
+    "PRAGMA integrity_check",
+  );
+  if (rows.length === 0) return "no rows returned";
+  return rows.map((row) => row.integrity_check).join("; ");
 }
 
-function validateV1Schema(db: Database.Database): string[] {
+export function databaseForeignKeyViolationCount(
+  db: DatabaseConnection,
+): number {
+  return decodeRows(
+    foreignKeyViolationRowSchema,
+    db.pragma("foreign_key_check"),
+    "PRAGMA foreign_key_check",
+  ).length;
+}
+
+function readSchemaMigrationRows(
+  db: DatabaseConnection,
+  context: string,
+): Array<z.infer<typeof schemaMigrationRowSchema>> {
+  return decodeRows(
+    schemaMigrationRowSchema,
+    db
+      .prepare(
+        "SELECT version, applied_at FROM schema_migrations ORDER BY version",
+      )
+      .all(),
+    context,
+  );
+}
+
+function validateV1Schema(db: DatabaseConnection): string[] {
   const issues = validateExactObjects(
     db,
     [...V1_TABLE_NAMES],
@@ -3952,7 +3980,7 @@ function validateV1Schema(db: Database.Database): string[] {
   return issues;
 }
 
-function validateV3Data(db: Database.Database, issues: string[]): void {
+function validateV3Data(db: DatabaseConnection, issues: string[]): void {
   validateCoreData(
     db,
     issues,
@@ -3961,12 +3989,12 @@ function validateV3Data(db: Database.Database, issues: string[]): void {
   );
 }
 
-function validateV8CoreData(db: Database.Database, issues: string[]): void {
+function validateV8CoreData(db: DatabaseConnection, issues: string[]): void {
   validateCoreData(db, issues, GUILD_SETTINGS_VERSION, parseGuildSettingsJson);
 }
 
 function validateCoreData(
-  db: Database.Database,
+  db: DatabaseConnection,
   issues: string[],
   settingsVersion: number,
   parseSettings: (raw: string) => { enabled: boolean },
@@ -4057,7 +4085,7 @@ function validateCoreData(
   }
 }
 
-function validateV4Data(db: Database.Database, issues: string[]): void {
+function validateV4Data(db: DatabaseConnection, issues: string[]): void {
   const guildIds = new Set(
     (
       db.prepare("SELECT guild_id FROM guilds").all() as Array<{
@@ -4227,7 +4255,7 @@ function validateV4Data(db: Database.Database, issues: string[]): void {
   }
 }
 
-function validateV5Data(db: Database.Database, issues: string[]): void {
+function validateV5Data(db: DatabaseConnection, issues: string[]): void {
   const textColumns: ReadonlyArray<
     readonly [
       table: string,
@@ -4603,7 +4631,7 @@ function validateV5Data(db: Database.Database, issues: string[]): void {
   }
 }
 
-function validateV6Data(db: Database.Database, issues: string[]): void {
+function validateV6Data(db: DatabaseConnection, issues: string[]): void {
   const textColumns: ReadonlyArray<
     readonly [
       table: string,
@@ -4740,7 +4768,7 @@ function validateV6Data(db: Database.Database, issues: string[]): void {
   );
 }
 
-function validateV7Data(db: Database.Database, issues: string[]): void {
+function validateV7Data(db: DatabaseConnection, issues: string[]): void {
   validateTextColumnTypes(
     db,
     "mudae_watch_deliveries",
@@ -4794,7 +4822,7 @@ function validateV7Data(db: Database.Database, issues: string[]): void {
   );
 }
 
-function validateV9Data(db: Database.Database, issues: string[]): void {
+function validateV9Data(db: DatabaseConnection, issues: string[]): void {
   const textColumns: ReadonlyArray<
     readonly [string, readonly string[], readonly string[]]
   > = [
@@ -5233,7 +5261,7 @@ function validateV9Data(db: Database.Database, issues: string[]): void {
   }
 }
 
-function validateV10Data(db: Database.Database, issues: string[]): void {
+function validateV10Data(db: DatabaseConnection, issues: string[]): void {
   validatePhase4SemanticText(db, issues);
   validateStoredPhase4PanelReferences(db, issues);
   const textColumns: ReadonlyArray<
@@ -5799,7 +5827,7 @@ function validateV10Data(db: Database.Database, issues: string[]): void {
 }
 
 function validateStoredPhase4PanelReferences(
-  db: Database.Database,
+  db: DatabaseConnection,
   issues: string[],
 ): void {
   const rows = db
@@ -5924,7 +5952,7 @@ function validateStoredPhase4PanelReferences(
   }
 }
 
-function validateV11Data(db: Database.Database, issues: string[]): void {
+function validateV11Data(db: DatabaseConnection, issues: string[]): void {
   validateTextColumnTypes(
     db,
     "voting_panels",
@@ -6090,7 +6118,7 @@ function validateV11Data(db: Database.Database, issues: string[]): void {
 }
 
 function validatePhase4SemanticText(
-  db: Database.Database,
+  db: DatabaseConnection,
   issues: string[],
 ): void {
   const rules = db
@@ -6188,7 +6216,7 @@ function validatePhase4SemanticText(
 }
 
 function validateTextColumnTypes(
-  db: Database.Database,
+  db: DatabaseConnection,
   table: string,
   required: readonly string[],
   nullable: readonly string[],
@@ -6210,7 +6238,7 @@ function validateTextColumnTypes(
 }
 
 function validateIntegerColumnTypes(
-  db: Database.Database,
+  db: DatabaseConnection,
   table: string,
   required: readonly string[],
   nullable: readonly string[],
@@ -6234,7 +6262,7 @@ function validateIntegerColumnTypes(
 }
 
 function validateTimestampColumns(
-  db: Database.Database,
+  db: DatabaseConnection,
   table: string,
   required: readonly string[],
   nullable: readonly string[],
@@ -6261,7 +6289,7 @@ function validateTimestampColumns(
 }
 
 function validateNoMatchingRows(
-  db: Database.Database,
+  db: DatabaseConnection,
   sql: string,
   issue: string,
   issues: string[],
@@ -6272,7 +6300,7 @@ function validateNoMatchingRows(
 }
 
 function validateExactObjects(
-  db: Database.Database,
+  db: DatabaseConnection,
   expectedTables: string[],
   expectedIndexes: string[],
 ): string[] {
@@ -6311,7 +6339,7 @@ function validateExactObjects(
 }
 
 function validateSqlDefinitions(
-  db: Database.Database,
+  db: DatabaseConnection,
   expected: Record<string, string>,
   type: "table" | "index",
   issues: string[],
@@ -6329,7 +6357,7 @@ function validateSqlDefinitions(
 }
 
 function validateColumnsAndKeys(
-  db: Database.Database,
+  db: DatabaseConnection,
   expectedColumns: Record<string, string[]>,
   expectedKeys: Record<string, string[]>,
   issues: string[],
@@ -6355,36 +6383,46 @@ function validateColumnsAndKeys(
 }
 
 function validateGuildForeignKey(
-  db: Database.Database,
+  db: DatabaseConnection,
   table: string,
   issues: string[],
 ): void {
   const rows = db
     .prepare(`PRAGMA foreign_key_list(${quoteIdentifier(table)})`)
-    .all() as ForeignKeyRow[];
+    .all();
+  const decodedRows = decodeRows(
+    foreignKeyRowSchema,
+    rows,
+    `PRAGMA foreign_key_list ${table}`,
+  );
   if (
-    rows.length !== 1 ||
-    rows[0]?.table !== "guilds" ||
-    rows[0]?.from !== "guild_id" ||
-    rows[0]?.to !== "guild_id" ||
-    rows[0]?.on_delete.toUpperCase() !== "CASCADE"
+    decodedRows.length !== 1 ||
+    decodedRows[0]?.table !== "guilds" ||
+    decodedRows[0]?.from !== "guild_id" ||
+    decodedRows[0]?.to !== "guild_id" ||
+    decodedRows[0]?.on_delete.toUpperCase() !== "CASCADE"
   ) {
     issues.push(`${table} must cascade from guilds(guild_id)`);
   }
 }
 
 function validateVotingPanelForeignKeys(
-  db: Database.Database,
+  db: DatabaseConnection,
   issues: string[],
 ): void {
   validateGuildForeignKey(db, "voting_panels", issues);
   const options = db
     .prepare("PRAGMA foreign_key_list(voting_panel_options)")
-    .all() as ForeignKeyRow[];
+    .all();
+  const decodedOptions = decodeRows(
+    foreignKeyRowSchema,
+    options,
+    "PRAGMA foreign_key_list voting_panel_options",
+  );
   if (
-    options.length !== 3 ||
-    !hasCascadeForeignKey(options, "guilds", ["guild_id:guild_id"]) ||
-    !hasCascadeForeignKey(options, "voting_panels", [
+    decodedOptions.length !== 3 ||
+    !hasCascadeForeignKey(decodedOptions, "guilds", ["guild_id:guild_id"]) ||
+    !hasCascadeForeignKey(decodedOptions, "voting_panels", [
       "guild_id:guild_id",
       "vote_id:vote_id",
     ])
@@ -6395,15 +6433,20 @@ function validateVotingPanelForeignKeys(
   }
   const selections = db
     .prepare("PRAGMA foreign_key_list(voting_panel_selections)")
-    .all() as ForeignKeyRow[];
+    .all();
+  const decodedSelections = decodeRows(
+    foreignKeyRowSchema,
+    selections,
+    "PRAGMA foreign_key_list voting_panel_selections",
+  );
   if (
-    selections.length !== 6 ||
-    !hasCascadeForeignKey(selections, "guilds", ["guild_id:guild_id"]) ||
-    !hasCascadeForeignKey(selections, "voting_panels", [
+    decodedSelections.length !== 6 ||
+    !hasCascadeForeignKey(decodedSelections, "guilds", ["guild_id:guild_id"]) ||
+    !hasCascadeForeignKey(decodedSelections, "voting_panels", [
       "guild_id:guild_id",
       "vote_id:vote_id",
     ]) ||
-    !hasCascadeForeignKey(selections, "voting_panel_options", [
+    !hasCascadeForeignKey(decodedSelections, "voting_panel_options", [
       "guild_id:guild_id",
       "vote_id:vote_id",
       "option_id:option_id",
@@ -6430,20 +6473,23 @@ function hasCascadeForeignKey(
 }
 
 function validateTicketEventForeignKeys(
-  db: Database.Database,
+  db: DatabaseConnection,
   issues: string[],
 ): void {
-  const rows = db
-    .prepare("PRAGMA foreign_key_list(ticket_events)")
-    .all() as ForeignKeyRow[];
-  const hasGuild = rows.some(
+  const rows = db.prepare("PRAGMA foreign_key_list(ticket_events)").all();
+  const decodedRows = decodeRows(
+    foreignKeyRowSchema,
+    rows,
+    "PRAGMA foreign_key_list ticket_events",
+  );
+  const hasGuild = decodedRows.some(
     (row) =>
       row.table === "guilds" &&
       row.from === "guild_id" &&
       row.to === "guild_id" &&
       row.on_delete.toUpperCase() === "CASCADE",
   );
-  const ticketColumns = rows
+  const ticketColumns = decodedRows
     .filter(
       (row) =>
         row.table === "tickets" && row.on_delete.toUpperCase() === "CASCADE",
@@ -6451,7 +6497,7 @@ function validateTicketEventForeignKeys(
     .map((row) => `${row.from}:${row.to}`)
     .sort();
   if (
-    rows.length !== 3 ||
+    decodedRows.length !== 3 ||
     !hasGuild ||
     !sameStrings(ticketColumns, ["guild_id:guild_id", "ticket_id:ticket_id"])
   ) {
@@ -6461,33 +6507,41 @@ function validateTicketEventForeignKeys(
   }
 }
 
-function validateDatabaseHealth(db: Database.Database, issues: string[]): void {
+function validateDatabaseHealth(
+  db: DatabaseConnection,
+  issues: string[],
+): void {
   const integrity = databaseIntegrityCheck(db);
   if (integrity.toLowerCase() !== "ok") {
     issues.push(`integrity_check failed: ${integrity}`);
   }
-  const foreignKeyViolations = db.pragma("foreign_key_check") as unknown[];
-  if (foreignKeyViolations.length > 0) {
+  if (databaseForeignKeyViolationCount(db) > 0) {
     issues.push("foreign_key_check reported violations");
   }
 }
 
-function getSchemaObjects(db: Database.Database): SchemaObjectRow[] {
-  return db
-    .prepare(
-      `SELECT type, name, tbl_name, sql
-       FROM sqlite_master
-       WHERE name NOT LIKE 'sqlite_%'
-         AND type IN ('table', 'index', 'view', 'trigger')
-       ORDER BY type, name`,
-    )
-    .all() as SchemaObjectRow[];
+function getSchemaObjects(db: DatabaseConnection): SchemaObjectRow[] {
+  return decodeRows(
+    schemaObjectRowSchema,
+    db
+      .prepare(
+        `SELECT type, name, tbl_name, sql
+         FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%'
+           AND type IN ('table', 'index', 'view', 'trigger')
+         ORDER BY type, name`,
+      )
+      .all(),
+    "sqlite_master schema objects",
+  );
 }
 
-function tableInfo(db: Database.Database, table: string): TableInfoRow[] {
-  return db
-    .prepare(`PRAGMA table_xinfo(${quoteIdentifier(table)})`)
-    .all() as TableInfoRow[];
+function tableInfo(db: DatabaseConnection, table: string): TableInfoRow[] {
+  return decodeRows(
+    tableInfoRowSchema,
+    db.prepare(`PRAGMA table_xinfo(${quoteIdentifier(table)})`).all(),
+    `PRAGMA table_xinfo ${table}`,
+  );
 }
 
 function normalizeSql(value: string): string {

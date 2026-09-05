@@ -1,10 +1,12 @@
 .agents/
 .git/
 .github/prompts/
+.playwright-cli/
 .obsidian/
 .vscode/
 backups/
 release/
+tsbot/.bun-cache/
 windows/.cache/
 windows/.work/
 **/coverage/

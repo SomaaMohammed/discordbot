@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   RESTRICTED_PING_EVENT_TYPES,
@@ -95,7 +95,7 @@ export function emptyRestrictedPingGuildData(): RestrictedPingGuildData {
 
 /** Reads every restricted-ping tenant row without exporting live leases. */
 export function readRestrictedPingGuildData(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
 ): RestrictedPingGuildData {
   const restrictedPingRoles = db
@@ -178,7 +178,7 @@ export function parseRestrictedPingGuildData(
 
 /** Inserts parsed restricted-ping data with every live binding fail-closed. */
 export function insertRestrictedPingGuildData(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   imported: RestrictedPingGuildData,
 ): void {
@@ -268,7 +268,7 @@ export function insertRestrictedPingGuildData(
 
 /** Makes preserved format-2 rows safe after any guild import. */
 export function deactivateRestrictedPingBindings(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
 ): void {
   db.prepare(

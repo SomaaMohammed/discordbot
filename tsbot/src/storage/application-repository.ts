@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   APPLICATION_EVENT_TYPES,
@@ -118,7 +118,7 @@ const MAX_EVENTS_PER_APPLICATION = 100;
 /** Tenant-bound form definitions and durable application workflow state. */
 export class ApplicationRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 

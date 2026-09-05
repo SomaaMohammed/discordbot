@@ -345,7 +345,11 @@ function readVotingCreateRequest(
       pollType,
       interaction.options.getString("options", false),
     ),
-    multiSelect: interaction.options.getBoolean("multi_select", false) ?? false,
+    // Yes/no polls are always mutually exclusive. The command keeps the
+    // setting for custom polls, but never lets it change yes/no behavior.
+    multiSelect:
+      pollType === "custom" &&
+      (interaction.options.getBoolean("multi_select", false) ?? false),
     durationMinutes,
     mentionEveryoneOnCreation:
       interaction.options.getBoolean("mention_everyone_on_creation", false) ??
@@ -383,7 +387,7 @@ function createVotingPanelView(input: {
     description: input.description,
     pollType: input.pollType,
     options: input.options.map((option) => ({ ...option, voteCount: 0 })),
-    multiSelect: input.multiSelect,
+    multiSelect: input.pollType === "custom" && input.multiSelect,
     mentionEveryoneOnCreation: input.mentionEveryoneOnCreation,
     mentionEveryoneOnCompletion: input.mentionEveryoneOnCompletion,
     status: "active",
@@ -440,7 +444,8 @@ async function handleOptionButton(
     );
     return;
   }
-  const result = current.multiSelect
+  const multiSelect = current.pollType === "custom" && current.multiSelect;
+  const result = multiSelect
     ? storage.toggleVotingPanelOption(voteId, member.id, optionId)
     : storage.selectVotingPanelOption(voteId, member.id, optionId);
   if (!isSuccessfulSelection(result)) {
@@ -450,7 +455,7 @@ async function handleOptionButton(
   const selection = result.optionIds;
   await replyPrivate(
     interaction,
-    current.multiSelect
+    multiSelect
       ? `Your selections: ${formatSelectedOptions(result.panel, selection)}.`
       : `Your vote: ${formatSelectedOptions(result.panel, selection)}.`,
   );

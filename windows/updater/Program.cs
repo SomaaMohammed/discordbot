@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -26,21 +27,24 @@ internal static class Program
                 return 0;
             }
 
-            string updaterRoot = NormalizeDirectory(AppDomain.CurrentDomain.BaseDirectory);
-            string targetRoot = NormalizeDirectory(options.TargetRoot ?? updaterRoot);
-            RefuseReparsePoint(targetRoot, "The update target directory");
+            string updaterRoot = LauncherSupport.NormalizeRoot(AppDomain.CurrentDomain.BaseDirectory);
+            string targetRoot = LauncherSupport.NormalizeRoot(options.TargetRoot ?? updaterRoot);
             if (!Directory.Exists(targetRoot))
             {
                 throw new InvalidDataException("The update target directory does not exist: " + targetRoot);
             }
+            RefuseReparsePath(targetRoot, "The update target directory");
+            string activeUpdater = Path.GetFullPath(Assembly.GetExecutingAssembly().Location);
+            RefuseReparsePath(activeUpdater, "The active updater executable");
+            AuthenticodeSupport.VerifyFile(activeUpdater, "The active updater executable");
 
             string source = Path.GetFullPath(options.Source);
             string target = Path.Combine(targetRoot, ProductName);
-            RefuseReparsePoint(source, "The update source executable");
             if (!File.Exists(source))
             {
                 throw new FileNotFoundException("The update source executable was not found.", source);
             }
+            RefuseReparsePath(source, "The update source executable");
             if (string.Equals(source, target, StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException(
@@ -49,22 +53,12 @@ internal static class Program
             }
 
             EnsureTargetStopped(target);
-            string sourceVersion = VerifyExecutable(source, options.ExpectedSha256);
-            string currentVersion = File.Exists(target) ? ReadVersion(target) : null;
-            if (
-                currentVersion != null &&
-                !options.AllowDowngrade &&
-                CompareVersions(sourceVersion, currentVersion) <= 0
-            )
-            {
-                throw new InvalidOperationException(
-                    "The source version "
-                        + sourceVersion
-                        + " is not newer than the installed version "
-                        + currentVersion
-                        + ". Use --allow-downgrade only for an intentional rollback."
-                );
-            }
+            string sourceSha256;
+            string sourceVersion = VerifyExecutable(
+                source,
+                options.ExpectedSha256,
+                out sourceSha256
+            );
 
             string environmentFile = Path.Combine(targetRoot, ".env");
             if (!File.Exists(environmentFile))
@@ -73,7 +67,38 @@ internal static class Program
                     "The target folder has no .env file. Copy the existing .env beside SuperiorBot.exe before updating."
                 );
             }
+            RefuseReparsePath(environmentFile, "The adjacent environment file");
 
+            using (SuperiorInstanceGuard instance =
+                LauncherSupport.AcquireInstanceGuard(targetRoot, environmentFile))
+            {
+            EnsureTargetStopped(target);
+            bool targetExisted = File.Exists(target);
+            string currentTargetSha256 = null;
+            if (targetExisted)
+            {
+                RefuseReparsePath(target, "The installed target executable");
+                currentTargetSha256 = ComputeSha256(target);
+                string currentVersion = ReadProductVersion(target);
+                AssertFileHash(
+                    target,
+                    currentTargetSha256,
+                    "The installed target changed during version inspection."
+                );
+                if (
+                    !options.AllowDowngrade &&
+                    CompareVersions(sourceVersion, currentVersion) <= 0
+                )
+                {
+                    throw new InvalidOperationException(
+                        "The source version "
+                            + sourceVersion
+                            + " is not newer than the installed version "
+                            + currentVersion
+                            + ". Use --allow-downgrade only for an intentional rollback."
+                    );
+                }
+            }
             string stagingRoot = Path.Combine(
                 targetRoot,
                 ".update-" + Guid.NewGuid().ToString("N")
@@ -88,22 +113,63 @@ internal static class Program
                 backupRoot,
                 ProductName + "." + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + ".bak"
             );
+            string backupSha256 = null;
+            bool replacementPublished = false;
 
-            bool targetExisted = File.Exists(target);
             try
             {
                 File.Copy(source, stagedExecutable, false);
-                RefuseReparsePoint(stagedExecutable, "The staged update executable");
+                RefuseReparsePath(stagedExecutable, "The staged update executable");
+                AssertFileHash(
+                    stagedExecutable,
+                    sourceSha256,
+                    "The update source changed while it was being staged."
+                );
+                AuthenticodeSupport.VerifyFile(
+                    stagedExecutable,
+                    "The staged update executable"
+                );
                 if (targetExisted)
                 {
+                    RefuseReparsePath(targetRoot, "The update target directory");
+                    RefuseReparsePath(target, "The installed target executable");
+                    AssertFileHash(
+                        target,
+                        currentTargetSha256,
+                        "The installed target changed before backup."
+                    );
                     File.Copy(target, backup, false);
+                    RefuseReparsePath(backup, "The executable rollback backup");
+                    backupSha256 = ComputeSha256(backup);
+                    if (!string.Equals(backupSha256, currentTargetSha256, StringComparison.Ordinal))
+                    {
+                        throw new IOException("The executable rollback backup is not an exact copy of the installed target.");
+                    }
+                    RefuseReparsePath(targetRoot, "The update target directory");
+                    RefuseReparsePath(target, "The installed target executable");
+                    AssertFileHash(
+                        target,
+                        currentTargetSha256,
+                        "The installed target changed immediately before replacement."
+                    );
                     ReplaceFile(stagedExecutable, target);
                 }
                 else
                 {
                     File.Move(stagedExecutable, target);
                 }
+                replacementPublished = true;
 
+                RefuseReparsePath(target, "The installed update executable");
+                AssertFileHash(
+                    target,
+                    sourceSha256,
+                    "The installed update executable does not match the verified source."
+                );
+                AuthenticodeSupport.VerifyFile(
+                    target,
+                    "The installed update executable"
+                );
                 string installedVersion = ReadVersion(target);
                 if (!string.Equals(installedVersion, sourceVersion, StringComparison.Ordinal))
                 {
@@ -115,6 +181,12 @@ internal static class Program
                             + "."
                     );
                 }
+                RefuseReparsePath(target, "The installed update executable");
+                AssertFileHash(
+                    target,
+                    sourceSha256,
+                    "The installed update executable changed before its configuration check."
+                );
                 int checkExitCode = RunCommand(target, "--check", CommandTimeoutMilliseconds);
                 if (checkExitCode != 0)
                 {
@@ -125,6 +197,8 @@ internal static class Program
                     );
                 }
 
+                VerifyInstalledExecutablePostcondition(target, sourceSha256);
+
                 Console.WriteLine(
                     "Updated SuperiorBot.exe to "
                         + sourceVersion
@@ -132,6 +206,8 @@ internal static class Program
                 );
                 if (!options.NoStart)
                 {
+                    VerifyInstalledExecutablePostcondition(target, sourceSha256);
+                    instance.Dispose();
                     StartBot(target, targetRoot);
                     Console.WriteLine("SuperiorBot.exe started.");
                 }
@@ -139,10 +215,22 @@ internal static class Program
             }
             catch
             {
-                if (File.Exists(backup))
+                if (replacementPublished && targetExisted && File.Exists(backup))
                 {
                     try
                     {
+                        RefuseReparsePath(target, "The failed installed executable");
+                        AssertFileHash(
+                            target,
+                            sourceSha256,
+                            "Rollback refused because the installed executable changed after replacement."
+                        );
+                        RefuseReparsePath(backup, "The executable rollback backup");
+                        AssertFileHash(
+                            backup,
+                            backupSha256,
+                            "Rollback refused because the executable backup changed."
+                        );
                         string restoreRoot = Path.Combine(
                             targetRoot,
                             ".update-restore-" + Guid.NewGuid().ToString("N")
@@ -150,7 +238,19 @@ internal static class Program
                         Directory.CreateDirectory(restoreRoot);
                         string restore = Path.Combine(restoreRoot, ProductName);
                         File.Copy(backup, restore, false);
+                        RefuseReparsePath(restore, "The staged rollback executable");
+                        AssertFileHash(
+                            restore,
+                            backupSha256,
+                            "The staged rollback executable does not match its backup."
+                        );
                         ReplaceFile(restore, target);
+                        RefuseReparsePath(target, "The restored executable");
+                        AssertFileHash(
+                            target,
+                            backupSha256,
+                            "The restored executable does not match its backup."
+                        );
                         TryDeleteDirectory(restoreRoot, targetRoot);
                         Console.Error.WriteLine("The previous executable was restored from " + backup + ".");
                     }
@@ -161,10 +261,16 @@ internal static class Program
                         );
                     }
                 }
-                else if (!targetExisted && File.Exists(target))
+                else if (replacementPublished && !targetExisted && File.Exists(target))
                 {
                     try
                     {
+                        RefuseReparsePath(target, "The failed first installation");
+                        AssertFileHash(
+                            target,
+                            sourceSha256,
+                            "The failed first installation changed and was preserved."
+                        );
                         File.Delete(target);
                     }
                     catch (Exception removeError)
@@ -180,6 +286,7 @@ internal static class Program
             finally
             {
                 TryDeleteDirectory(stagingRoot, targetRoot);
+            }
             }
         }
         catch (Exception error)
@@ -249,8 +356,13 @@ internal static class Program
         return options;
     }
 
-    private static string VerifyExecutable(string executable, string expectedSha256)
+    private static string VerifyExecutable(
+        string executable,
+        string expectedSha256,
+        out string verifiedSha256
+    )
     {
+        verifiedSha256 = ComputeSha256(executable);
         if (!string.IsNullOrWhiteSpace(expectedSha256))
         {
             string expected = expectedSha256.Trim().ToLowerInvariant();
@@ -258,15 +370,25 @@ internal static class Program
             {
                 throw new ArgumentException("--sha256 must be a 64-character lowercase hexadecimal hash.");
             }
-            string actual = ComputeSha256(executable);
-            if (!string.Equals(actual, expected, StringComparison.Ordinal))
+            if (!string.Equals(verifiedSha256, expected, StringComparison.Ordinal))
             {
                 throw new InvalidDataException(
                     "The source executable SHA-256 does not match --sha256."
                 );
             }
         }
-        string version = ReadVersion(executable);
+        AuthenticodeSupport.VerifyFile(executable, "The candidate SuperiorBot.exe");
+        AssertFileHash(
+            executable,
+            verifiedSha256,
+            "The candidate executable changed during signature verification."
+        );
+        string version = ReadProductVersion(executable);
+        AssertFileHash(
+            executable,
+            verifiedSha256,
+            "The candidate executable changed during version inspection."
+        );
         Console.WriteLine("Verified source SuperiorBot.exe version " + version + ".");
         return version;
     }
@@ -427,6 +549,17 @@ internal static class Program
         }
     }
 
+    private static void AssertFileHash(string fileName, string expected, string message)
+    {
+        if (
+            string.IsNullOrWhiteSpace(expected)
+            || !string.Equals(ComputeSha256(fileName), expected, StringComparison.Ordinal)
+        )
+        {
+            throw new IOException(message);
+        }
+    }
+
     private static bool IsSha256(string value)
     {
         if (value.Length != 64) return false;
@@ -455,19 +588,64 @@ internal static class Program
         return string.Equals(value, expected, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string NormalizeDirectory(string path)
+    private static void VerifyInstalledExecutablePostcondition(
+        string executable,
+        string expectedSha256
+    )
     {
-        return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        LauncherSupport.RefuseReparsePath(
+            executable,
+            "The installed update executable"
+        );
+        AssertFileHash(
+            executable,
+            expectedSha256,
+            "The installed update executable changed after its configuration check."
+        );
+        AuthenticodeSupport.VerifyFile(
+            executable,
+            "The installed update executable"
+        );
     }
 
     private static void RefuseReparsePoint(string path, string description)
     {
-        if (File.Exists(path) || Directory.Exists(path))
+        LauncherSupport.RefuseReparsePath(path, description);
+    }
+
+    private static void RefuseReparsePath(string path, string description)
+    {
+        LauncherSupport.RefuseReparsePath(path, description);
+    }
+
+    private static string ReadProductVersion(string executable)
+    {
+        RefuseReparsePath(executable, "The installed target executable");
+        FileVersionInfo versionInfo = FileVersionInfo.GetVersionInfo(executable);
+        string version = versionInfo.ProductVersion;
+        Version parsed;
+        if (
+            string.IsNullOrWhiteSpace(version)
+            || !Version.TryParse(version, out parsed)
+            || parsed.Build < 0
+        )
         {
-            FileAttributes attributes = File.GetAttributes(path);
-            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException(
+                "The installed SuperiorBot.exe has invalid ProductVersion metadata."
+            );
+        }
+        return parsed.ToString(3);
+    }
+
+    private static void RefuseReparseTree(string directory, string description)
+    {
+        RefuseReparsePath(directory, description);
+        foreach (string entry in Directory.GetFileSystemEntries(directory))
+        {
+            RefuseReparsePath(entry, description);
+            if (Directory.Exists(entry))
             {
-                throw new InvalidDataException(description + " must not be a reparse point.");
+                RefuseReparseTree(entry, description);
             }
         }
     }
@@ -480,7 +658,11 @@ internal static class Program
             string expected = Path.GetFullPath(expectedParent).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
             if (!resolved.StartsWith(expected, StringComparison.OrdinalIgnoreCase)) return;
             if (!Path.GetFileName(resolved).StartsWith(".update-", StringComparison.Ordinal)) return;
-            if (Directory.Exists(resolved)) Directory.Delete(resolved, true);
+            if (Directory.Exists(resolved))
+            {
+                RefuseReparseTree(resolved, "The update cleanup directory");
+                Directory.Delete(resolved, true);
+            }
         }
         catch
         {

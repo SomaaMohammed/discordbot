@@ -70,7 +70,13 @@ describe("persistent voting-panel storage", () => {
   it("replaces single selections and atomically toggles multi-select choices", () => {
     const storage = openStorage(makeDatabase(), GUILD_A);
     const guild = storage.forGuild(GUILD_A);
-    guild.createVotingPanel(votingInput({ voteId: "vote_single" }));
+    const yesNo = guild.createVotingPanel(
+      votingInput({
+        voteId: "vote_single",
+        multiSelect: true,
+      }),
+    );
+    expect(yesNo.multiSelect).toBe(false);
     expect(
       guild.selectVotingPanelOption("vote_single", VOTER_A, "option_yes"),
     ).toMatchObject({ status: "changed", optionIds: ["option_yes"] });

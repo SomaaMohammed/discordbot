@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   CASE_APPEAL_STATES,
@@ -114,7 +114,7 @@ export interface CaseAppealListFilter {
 
 export class MemberReportRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 
@@ -929,7 +929,7 @@ export class MemberReportRepository {
 
 export class CaseAppealRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 
@@ -2186,7 +2186,7 @@ function normalizeReportReservation(
 }
 
 function claimDeliveryLease<T>(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   table: "member_reports" | "case_appeals",
   idColumn: "report_id" | "appeal_id",
@@ -2270,7 +2270,7 @@ function claimDeliveryLease<T>(
 }
 
 function readDeliveryAttempt(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   table: "member_reports" | "case_appeals",
   idColumn: "report_id" | "appeal_id",
@@ -2287,7 +2287,7 @@ function readDeliveryAttempt(
 }
 
 function beginDeliveryAttemptLease<T>(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   table: "member_reports" | "case_appeals",
   idColumn: "report_id" | "appeal_id",
@@ -2399,7 +2399,7 @@ function beginDeliveryAttemptLease<T>(
 }
 
 function hasCurrentDeliveryClaim(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   table: "member_reports" | "case_appeals",
   idColumn: "report_id" | "appeal_id",
@@ -2417,7 +2417,7 @@ function hasCurrentDeliveryClaim(
 }
 
 function canReleaseDeliveryClaim(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   table: "member_reports" | "case_appeals",
   idColumn: "report_id" | "appeal_id",
@@ -2445,7 +2445,7 @@ function canReleaseDeliveryClaim(
 }
 
 function appendBoundedEvent(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   table: "member_report_events" | "case_appeal_events",
   parentColumn: "report_id" | "appeal_id",
@@ -2725,7 +2725,7 @@ function isNonTimeoutAppealOverturnEligible(
   return actionType !== "timeout" && isCaseAppealEligible(actionType, status);
 }
 function assertCapacity(
-  db: Database.Database,
+  db: DatabaseConnection,
   table: "member_reports" | "case_appeals",
   guildId: string,
   maximum: number,
@@ -2741,7 +2741,7 @@ function assertCapacity(
     throw new RangeError(`${table} reached its ${maximum}-record safety limit`);
 }
 function nextNumber(
-  db: Database.Database,
+  db: DatabaseConnection,
   table: "member_reports" | "case_appeals",
   column: "report_number" | "appeal_number",
   guildId: string,

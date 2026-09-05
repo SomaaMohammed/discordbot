@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
+import { z } from "zod";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   PANEL_PRESETS,
@@ -36,6 +37,12 @@ import {
   GENERAL_SUPPORT_DEPARTMENT_SLUG,
   TicketDepartmentRepository,
 } from "./ticket-department-repository.js";
+import {
+  countRowSchema,
+  decodeOptionalRow,
+  decodeRow,
+  decodeRows,
+} from "./row-decoder.js";
 
 const DEFAULT_OPERATIONAL_LIST_LIMIT = 100;
 const MAX_OPERATIONAL_LIST_LIMIT = 1_000;
@@ -50,6 +57,19 @@ interface PostedPanelRow {
   created_at: string;
   updated_at: string;
 }
+
+const postedPanelRowSchema = z
+  .object({
+    guild_id: z.string().min(1).max(20),
+    panel_id: z.string().min(1).max(24),
+    preset: z.string().min(1).max(40),
+    channel_id: z.string().min(1).max(20),
+    message_id: z.string().min(1).max(20),
+    configuration_json: z.string(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .strict();
 
 interface TicketRow {
   guild_id: string;
@@ -104,7 +124,7 @@ interface TicketEventRow {
  */
 export class GuildOperationalRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 
@@ -245,61 +265,62 @@ export class GuildOperationalRepository {
     const boundedLimit = normalizeListLimit(limit);
     const boundedOffset = normalizeListOffset(offset);
     if (preset === undefined) {
-      return (
+      return decodeRows(
+        postedPanelRowSchema,
         this.db
           .prepare(
             `SELECT * FROM posted_panels
              WHERE guild_id = ? ORDER BY preset, channel_id, panel_id
              LIMIT ? OFFSET ?`,
           )
-          .all(this.guildId, boundedLimit, boundedOffset) as PostedPanelRow[]
+          .all(this.guildId, boundedLimit, boundedOffset),
+        "posted panels list",
       ).map(parsePostedPanelRow);
     }
     const normalized = normalizePanelPreset(preset);
-    return (
+    return decodeRows(
+      postedPanelRowSchema,
       this.db
         .prepare(
           `SELECT * FROM posted_panels
            WHERE guild_id = ? AND preset = ? ORDER BY channel_id, panel_id
            LIMIT ? OFFSET ?`,
         )
-        .all(
-          this.guildId,
-          normalized,
-          boundedLimit,
-          boundedOffset,
-        ) as PostedPanelRow[]
+        .all(this.guildId, normalized, boundedLimit, boundedOffset),
+      "posted panels by preset",
     ).map(parsePostedPanelRow);
   }
 
   public countPostedPanels(preset?: PanelPreset): number {
-    const row =
+    const rawRow =
       preset === undefined
-        ? (this.db
+        ? this.db
             .prepare(
               "SELECT COUNT(*) AS count FROM posted_panels WHERE guild_id = ?",
             )
-            .get(this.guildId) as { count: number })
-        : (this.db
+            .get(this.guildId)
+        : this.db
             .prepare(
               `SELECT COUNT(*) AS count FROM posted_panels
                WHERE guild_id = ? AND preset = ?`,
             )
-            .get(this.guildId, normalizePanelPreset(preset)) as {
-            count: number;
-          });
-    return Number(row.count);
+            .get(this.guildId, normalizePanelPreset(preset));
+    return decodeRow(countRowSchema, rawRow, "posted panels count").count;
   }
 
   public findPostedPanelByToken(panelId: string): PostedPanel | null {
     if (!isOpaqueId(panelId)) {
       return null;
     }
-    const row = this.db
-      .prepare(
-        "SELECT * FROM posted_panels WHERE guild_id = ? AND panel_id = ?",
-      )
-      .get(this.guildId, panelId) as PostedPanelRow | undefined;
+    const row = decodeOptionalRow(
+      postedPanelRowSchema,
+      this.db
+        .prepare(
+          "SELECT * FROM posted_panels WHERE guild_id = ? AND panel_id = ?",
+        )
+        .get(this.guildId, panelId),
+      "posted panel by token",
+    );
     return row ? parsePostedPanelRow(row) : null;
   }
 
@@ -309,13 +330,16 @@ export class GuildOperationalRepository {
   ): PostedPanel | null {
     const normalizedPreset = normalizePanelPreset(preset);
     const normalizedChannel = assertDiscordSnowflake(channelId, "channel ID");
-    const row = this.db
-      .prepare(
-        `SELECT * FROM posted_panels
-         WHERE guild_id = ? AND preset = ? AND channel_id = ?`,
-      )
-      .get(this.guildId, normalizedPreset, normalizedChannel) as
-      PostedPanelRow | undefined;
+    const row = decodeOptionalRow(
+      postedPanelRowSchema,
+      this.db
+        .prepare(
+          `SELECT * FROM posted_panels
+           WHERE guild_id = ? AND preset = ? AND channel_id = ?`,
+        )
+        .get(this.guildId, normalizedPreset, normalizedChannel),
+      "posted panel by preset and channel",
+    );
     return row ? parsePostedPanelRow(row) : null;
   }
 
@@ -1505,11 +1529,11 @@ function normalizePostedPanelInput(input: PostedPanelInput): {
   };
 }
 
-function normalizePanelPreset(value: PanelPreset): PanelPreset {
+function normalizePanelPreset(value: unknown): PanelPreset {
   if (!(PANEL_PRESETS as readonly unknown[]).includes(value)) {
     throw new TypeError("Unsupported panel preset");
   }
-  return value;
+  return value as PanelPreset;
 }
 
 function normalizeTicketEventType(value: TicketEventType): TicketEventType {
@@ -1659,7 +1683,7 @@ function parsePostedPanelRow(row: PostedPanelRow): PostedPanel {
   return {
     guildId: row.guild_id,
     panelId: row.panel_id,
-    preset: row.preset as PanelPreset,
+    preset: normalizePanelPreset(row.preset),
     channelId: row.channel_id,
     messageId: row.message_id,
     configuration: parseJson(row.configuration_json, "panel configuration"),

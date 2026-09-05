@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   MODERATION_CASE_ACTION_TYPES,
@@ -40,7 +40,7 @@ const MAX_TIMEOUT_ABSENCE_AGE_MS = 5 * 60 * 1_000;
 
 export class ModerationCaseRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 

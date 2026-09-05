@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  loadDatabaseConfig,
   loadProcessConfig,
   resolveApplicationRoot,
   resolveDatabaseFile,
@@ -19,6 +20,8 @@ const ENV_KEYS = [
   "DISCORD_TOKEN",
   "ENV_FILE",
   "SUPERIOR_APPLICATION_ROOT",
+  "SUPERIOR_DATABASE_LOCK_HELD",
+  "SUPERIOR_DATABASE_LOCK_PATH",
   "npm_package_version",
 ] as const;
 
@@ -115,6 +118,45 @@ describe("configuration", () => {
 
     const config = loadProcessConfig(root);
     expect(config.botVersion).toBe(PACKAGE_VERSION);
+  });
+
+  it("accepts an exact launcher database-lock attestation", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "locked.db");
+    process.env.DB_FILE = dbFile;
+    process.env.SUPERIOR_DATABASE_LOCK_HELD = "1";
+    process.env.SUPERIOR_DATABASE_LOCK_PATH = dbFile;
+
+    expect(loadDatabaseConfig(root)).toEqual({ dbFile });
+  });
+
+  it("requires launcher lock attestation for the packaged runtime", () => {
+    const root = makeRoot();
+    const dbFile = path.join(root, "packaged.db");
+    process.env.DB_FILE = dbFile;
+    process.env.SUPERIOR_DATABASE_LOCK_HELD = "";
+    process.env.SUPERIOR_DATABASE_LOCK_PATH = "";
+
+    expect(() =>
+      loadDatabaseConfig(root, { requireLauncherLock: true }),
+    ).toThrow(/packaged Bun runtime requires Windows launcher/);
+
+    process.env.SUPERIOR_DATABASE_LOCK_HELD = "1";
+    process.env.SUPERIOR_DATABASE_LOCK_PATH = dbFile;
+    expect(loadDatabaseConfig(root, { requireLauncherLock: true })).toEqual({
+      dbFile,
+    });
+  });
+
+  it("fails closed on incomplete or mismatched launcher lock attestations", () => {
+    const root = makeRoot();
+    process.env.DB_FILE = "runtime.db";
+    process.env.SUPERIOR_DATABASE_LOCK_HELD = "1";
+
+    expect(() => loadDatabaseConfig(root)).toThrow(/attestation is incomplete/);
+
+    process.env.SUPERIOR_DATABASE_LOCK_PATH = path.join(root, "other.db");
+    expect(() => loadDatabaseConfig(root)).toThrow(/does not match/);
   });
 });
 

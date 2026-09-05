@@ -35,8 +35,10 @@ coverage/
 *.tsbuildinfo
 
 # Reproducible packaging caches and staging
+tsbot/.bun-cache/
 windows/.cache/
 windows/.work/
+windows/.artifacts/
 
 # SQLite runtime data, backups, and logs
 *.db

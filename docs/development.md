@@ -1,6 +1,6 @@
 # Development
 
-The maintained application is a strict TypeScript project in `tsbot/`. Superior requires Node.js 22.14.0 or newer.
+The maintained application is a strict TypeScript project in `tsbot/`. Superior requires Bun 1.4.0 or newer; Node.js execution is no longer supported.
 
 ## Architecture
 
@@ -10,6 +10,7 @@ The maintained application is a strict TypeScript project in `tsbot/`. Superior 
 - `src/discord/commands.ts` and `src/discord/bot.ts` register and route slash commands, autocomplete, buttons, modals, string select menus, and shutdown-tracked member lifecycle events. The interaction lifecycle acknowledges private work before database/network latency, preserves immediate modal responses, and attaches safe correlation/timing fields to failures. Unknown or obsolete components fail safely.
 - Focused modules under `src/discord/` own delegated authorization, onboarding commands/permissions/recovery, lifecycle template validation/rendering, rules acceptance, member lifecycle delivery, role safety, persistent role-menu commands/components, panels, ticket departments/workflow, suggestions, applications, restricted role pings, moderation cases, reports, appeals, anti-spam, utilities, and Discord boundary checks.
 - Focused repositories under `src/storage/` own delegated grants, onboarding/rules/member/role-delivery state, role menus/options/posts/member operations, ticket departments, operational ticket lifecycle, suggestions, applications, restricted-ping configuration/cooldowns/audit, moderation cases/delivery, reports, appeals, anti-spam rules/enforcement, schema classification, import/export parsing, and backup/check/migration CLIs.
+- `src/storage/database.ts` is the narrow production database boundary over Bun's built-in `bun:sqlite`. It owns connection-scoped prepared-statement caching, synchronous transaction modes/savepoints, readonly opens, pragmas, and bound `VACUUM INTO`; no native add-on or Node fallback exists.
 
 Do not add a second conversational parser, storage path, authorization model, or purge command. Keep member-controlled text normalized and escaped before display, set `allowedMentions: { parse: [] }` on operational payloads, and verify every persisted Discord identity against the current guild.
 
@@ -60,7 +61,7 @@ Discord API calls are performed outside long SQLite transactions. A failed exter
 
 Restricted-ping execution uses a short immediate transaction to validate cooldown timestamps and atomically claim a role-scoped reservation containing the requesting user, channel, source, and expiry. Discord receives only the canonical role token with an explicit one-role allowed-mentions allowlist. A second request cannot pass while the reservation is live. Successful delivery is finalized in another immediate transaction that updates role/user success timestamps and counters and appends the audit event; a Discord failure releases the reservation without advancing either successful cooldown. An expired reservation can be reclaimed after a process interruption. There is no cooldown bypass, and no Discord API call occurs inside the transaction.
 
-## Schema v10
+## Schema v10 and v11
 
 Schema v10 retains every schema-v9 table and adds normalized Phase 4 storage without application views or triggers:
 
@@ -78,13 +79,15 @@ All interaction and administrative queries have explicit bounds, count/exists va
 
 Onboarding persists Discord IDs, configuration/templates/rules, acceptance timestamps, safe lifecycle metadata, delivery identifiers, and exact role outcomes. It never stores member message content, DM contents, full member profiles, IP/email/phone data, invite history, or raw gateway payloads. Anti-spam and private-workflow data retain the existing schema-v9 minimization boundaries. User-controlled rules/templates/private text are excluded from terminal logs.
 
+Schema v11 is the current layout. It adds the isolated persistent-voting tables and indexes while retaining the schema-v10 workflow model.
+
 ## Initialization and migration
 
-A missing or empty database is initialized transactionally at v10. The strict storage layer accepts exact v10 only and refuses v1 through v9, malformed, partial, and unknown layouts. The self-contained Windows launcher adds a pre-login convenience layer that validates, backs up, dry-runs, and upgrades supported v2-v9 files; direct source startup and maintenance CLIs remain explicit.
+A missing or empty database is initialized transactionally at v11. The strict storage layer accepts exact v11 only and refuses v1 through v10, malformed, partial, and unknown layouts. The self-contained Windows launcher adds a pre-login convenience layer that validates, backs up, dry-runs, and upgrades supported v2-v10 files; direct source startup and maintenance CLIs remain explicit.
 
 The v9-to-v10 migration validates the exact source and completes in one immediate outer transaction. It preserves every v9 row, setting, metric, grant, panel, ticket, suggestion, application, restricted-ping, moderation, report, appeal, anti-spam, delivery, audit, and external Discord identifier. It rebuilds only the delegated-capability and panel-preset constraints needed for `onboarding.configure`, `roles.configure`, `verification`, and `roles`, preserving existing grants/panels exactly, and adds empty/default-disabled Phase 4 tables. It never invents a join, acceptance, rules version, menu, or role outcome and performs no Discord delivery or mutation. Dry-run executes this complete transaction and deliberately rolls it back; any failure leaves the source exact v9.
 
-The v8-to-v9, v7-to-v8, v6-to-v7, v5-to-v6, v4-to-v5, v3, and supported-v2 conversions remain frozen compatibility stages. Exact v2-v8 sources run their applicable stages and then v9-to-v10 within the same outer transaction. Every supported legacy path reaches v10 with empty/default-disabled Phase 4 data. V1 must first be upgraded to the supported v2 layout with the final 4.0.0 release. See [Operations](operations.md) for commands and rollback.
+The v8-to-v9, v7-to-v8, v6-to-v7, v5-to-v6, v4-to-v5, v3, and supported-v2 conversions remain frozen compatibility stages. Exact v2-v9 sources run their applicable stages through v10, then the isolated v10-to-v11 voting stage, inside one outer transaction. Exact v10 sources run only that final stage. V1 must first be upgraded to the supported v2 layout with the final 4.0.0 release. See [Operations](operations.md) for commands and rollback.
 
 ## Guild export and import
 
@@ -104,44 +107,48 @@ Every import leaves the core guild bot active. Inserted grants are inactive; ext
 
 ```bash
 cd tsbot
-npm ci
-npm run format
-npm run format:check
-npm run typecheck
-npm test
-npm run build
-node --check dist/src/index.js
+bun install --frozen-lockfile
+bun run format
+bun run format:check
+bun run runtime:check
+bun run test:policy
+bun run typecheck
+bun run test
+bun run test:focused
+bun run build
+bun run syntax:check
 ```
 
-`npm run build` removes `dist/` first and compiles only `src/**/*.ts` through `tsconfig.build.json`. Tests are never copied into production output.
+`bun run build` removes `dist/` first and compiles only `src/**/*.ts` through `tsconfig.build.json`. Tests are never copied into production output.
 
 The database CLIs require explicit paths and schema expectations:
 
 ```bash
-npm run db:check -- --db /path/to/database.db --expect 10
-npm run db:backup -- --db /path/to/database.db --out /new/path/backup.db --expect 10
-npm run migrate -- --db /path/to/database.db --dry-run
+bun run db:check -- --db /path/to/database.db --expect 11
+bun run db:backup -- --db /path/to/database.db --out /new/path/backup.db --expect 11
+bun run migrate -- --db /path/to/database.db --dry-run
+bun run doctor -- --db /path/to/database.db --backup-dir /path/to/backups --json
+bun run db:checkpoint -- --db /path/to/database.db --mode passive --json
+bun run db:rotate -- --db /path/to/database.db --backup-dir /path/to/backups --retention 7 --json
 ```
 
-Use `--expect 10` for an active database and `--expect 9`, `8`, `7`, `6`, `5`, `4`, `3`, or `2` only to validate the corresponding migration source. The backup destination must not already exist. Omit `--dry-run` only during a stopped, validated, backed-up maintenance window.
+Use `--expect 11` for an active database and `--expect 10`, `9`, `8`, `7`, `6`, `5`, `4`, `3`, or `2` only to validate the corresponding migration source. The backup destination and its SQLite sidecar names must not already exist. Publication requires hard-link support in a trusted local destination directory. Omit `--dry-run` only during a stopped, validated, backed-up maintenance window.
 
-Run `npm run security:check`, `bash -n ../ops.sh`, ShellCheck when available, and `git diff --check` before release. The security command enforces the high-severity production-audit threshold, validates the complete dependency tree, scans tracked text for high-confidence credentials and production snowflakes, checks private/runtime ignore boundaries, rejects deprecated private interaction responses, and rejects runtime version overrides. Do not use `npm run dev` or `npm start` merely to validate a change; those commands can log in and touch the selected database. Tests must use synthetic temporary databases and never an operator `.env`, token, live database, or backup.
+Run `bun run runtime:check`, `bun run test:policy`, `bun run security:check`, `bash -n ../ops.sh`, ShellCheck when available, and `git diff --check` before release. The runtime check enforces the static `bun:sqlite` import, Bun-only scripts, dependency/lockfile removal, and absence of a Node fallback. The test policy rejects skip/todo/conditional platform aliases. The security command enforces the high-severity production-audit threshold, validates the complete dependency tree, scans tracked text for high-confidence credentials and production snowflakes, checks private/runtime ignore boundaries, rejects deprecated private interaction responses, and rejects runtime version overrides. Do not use `bun run dev` or `bun run start` merely to validate a change; those commands can log in and touch the selected database. Tests must use synthetic temporary databases and never an operator `.env`, token, live database, or backup.
 
 ## Windows packaging
 
-From a Windows x64 checkout with Node.js and PowerShell 7 (`pwsh`) available for development:
+From a Windows x64 checkout with Bun 1.4.0 and PowerShell 7 (`pwsh`) available for development:
 
 ```powershell
 cd tsbot
-npm ci
-npm run package:win:verify
-cd ..
-$archive = Get-ChildItem .\release\SuperiorBot-*-win-x64.zip
-.\windows\test-portable.ps1 -Artifact $archive.FullName
-.\windows\test-standalone.ps1 -Executable .\SuperiorBot.exe
+bun install --frozen-lockfile
+bun run package:win:verify # isolated, explicitly unsigned-development proof
 ```
 
-The builder verifies SHA-256-pinned tool/runtime inputs, normalizes launcher source, produces deterministic ZIP metadata, and embeds the ZIP into the repository-root self-extracting `SuperiorBot.exe`. It also builds the repository-root `Update.exe`, which is included in the portable artifact. `package:win:verify` performs two clean-staging builds and requires byte-for-byte identical ZIP, updater, and executable output. Use `package:win` for one local iteration. Cache, staging, and release output are ignored; the requested standalone and updater executables are tracked.
+The builder verifies SHA-256-pinned tool/runtime inputs, normalizes launcher source, produces deterministic ZIP metadata, and embeds the ZIP into a self-extracting `SuperiorBot.exe`. `package:win:verify` performs two clean-staging unsigned-development builds in a verified temporary directory, requires byte-for-byte identical ZIP, updater, and executable output, and removes those temporary artifacts. Pass all three output parameters to `windows/test-reproducible.ps1` when retained isolated artifacts are needed. `package:win` remains the explicit one-build local path and writes only beneath ignored `windows/.artifacts/development`; it never replaces repository-root release executables. Neither command creates a production release.
+
+Production release signing is fail closed. Provision exactly one of `SUPERIOR_SIGNING_CERTIFICATE_THUMBPRINT` or `SUPERIOR_SIGNING_PFX_PATH`, plus `SUPERIOR_SIGNING_EXPECTED_PUBLISHER` and the independently trusted `SUPERIOR_SIGNING_EXPECTED_THUMBPRINT`; a PFX password is read only from protected `SUPERIOR_SIGNING_PFX_PASSWORD` and is cleared from the build process after import. Both certificate-store and PFX signing require that independent expected thumbprint; the selected signing identity never supplies the trust anchor implicitly. `SUPERIOR_SIGNING_TIMESTAMP_URL` and `SUPERIOR_SIGNTOOL_PATH` may select the timestamp service and Windows SDK tool. Then run `bun run release:build`. The release script first runs the deterministic unsigned-development reproducibility proof, builds and fully validates production-signed artifacts in a verified temporary directory, and only then publishes the signed runtime, updater, portable archive, and standalone output. See the [Windows guide](windows.md#authenticode-release-policy) for direct parameter equivalents and the signing-enabled CI gate.
 
 For a Raycast Run Command, select the **Default** shell and use this command:
 
@@ -153,41 +160,44 @@ The wrapper launches PowerShell 7 explicitly, packages the Windows executable, a
 
 ## Version and release workflow
 
-`tsbot/package.json` is the only hand-edited semantic version. The lockfile, generated runtime constant, portable `VERSION`, payload build identity, launcher assembly metadata, and artifact filename are derived from it. `BOT_VERSION` and npm lifecycle variables cannot alter the reported version.
+`tsbot/package.json` and `src/constants.ts` carry the synchronized semantic version. `bun.lock`, portable `VERSION`, payload build identity, launcher assembly metadata, and artifact filename are verified against it. Runtime environment overrides cannot alter the reported version.
 
 From `tsbot/`, the easiest complete releases are:
 
 ```powershell
-npm run release:patch # compatible fix; increments patch once
-npm run release:minor # backward-compatible feature; increments minor once
-npm run release:major # breaking behavior; increments major once
+bun run release:patch # compatible fix; increments patch once
+bun run release:minor # backward-compatible feature; increments minor once
+bun run release:major # breaking behavior; increments major once
 ```
 
-Each command bumps exactly once, generates/verifies the lockfile/runtime/documentation version markers, and then runs local-link and PowerShell checks, formatting verification, typecheck, all tests, the security gate, a clean production build, every compiled-JavaScript syntax check, two-build Windows reproducibility, portable and standalone smoke tests, `--version`, `--check`, safe diagnostics, PE metadata checks, payload/source identity checks, and final SHA-256 reporting. If any validation fails after the bump, fix it and run `npm run release:build`; do not run the patch/minor/major wrapper again. `release:build` is idempotent and never increments the version.
+Each command bumps exactly once, then invokes the fail-closed signed release build using the externally provisioned signing environment above. That build runs local-link and PowerShell checks, formatting and static runtime/test-policy verification, typecheck, the complete and focused tests, the security gate, a clean production build, every compiled-JavaScript syntax check under Bun, unsigned two-build Windows reproducibility, production signing, portable and standalone smoke tests, `--version`, `--check`, safe diagnostics, PE/signature metadata checks, payload/source identity checks, and final SHA-256 reporting. If any validation fails after the bump, fix it and run `bun run release:build`; do not run the patch/minor/major wrapper again. `release:build` is idempotent and never increments the version.
 
-For a controlled manual bump, use `npm run version:bump -- patch`, `minor`, or `major`, then `npm run version:verify` and `npm run release:build`. If `scripts/version.mjs` is unavailable or fails integrity review, stop: restore that exact tracked file from the trusted release source before changing a version, then run the normal non-bumping workflow. The generator is the authority for the lockfile and `src/generated-version.ts`; there is no safe scriptless release path. Never hand-edit the portable `VERSION`, C# metadata, or executable.
+For a controlled manual bump, use `bun run version:bump -- patch`, `minor`, or `major`, then `bun run version:verify` and `bun run release:build`. If `scripts/version.mjs` is unavailable or fails integrity review, stop and restore that exact tracked file from the trusted release source before changing a version. Never hand-edit the portable `VERSION`, C# metadata, or executable.
 
-CI runs the non-mutating version/security checks, verifies the committed executable's embedded source identity before rebuilding, rebuilds it twice, and fails if `git diff -- SuperiorBot.exe` is nonempty. A source or version change therefore cannot silently retain an old tracked executable.
+CI runs the non-mutating Bun/version/documentation/PowerShell/format/runtime/test/security/build gates, builds unsigned-development artifacts twice into isolated paths, validates source identity and exact inventory, and smoke-tests them with a PATH containing only Windows system tools. A manual signing-enabled job is restricted to `main` or a `v*` tag and the protected `production-signing` GitHub environment. Configure required reviewers and branch/tag deployment rules on that environment before adding its production PFX/password secrets. The job runs the ephemeral-certificate policy suite, builds the production release, and verifies every final signature, certificate thumbprint, timestamp, and expected publisher before upload.
 
-For this backward-compatible Phase 4 feature release, run `npm run release:minor` once from `tsbot/`. The complete pre-commit gate also includes `bash -n ops.sh`, ShellCheck when available, and repository-root `git diff --check`; these checks are outside the Windows release wrapper. Confirm `npm run artifact:verify` after the reproducible build, stage only Phase 4 plus generated release files, and inspect `git diff --staged` before committing.
+For a release, run the appropriate `bun run release:*` command once from `tsbot/`. The complete pre-commit gate also includes `bash -n ops.sh`, ShellCheck when available, and repository-root `git diff --check`; these checks are outside the Windows release wrapper. Confirm `bun run artifact:verify` after the reproducible build and inspect the staged diff before committing.
 
 The individual non-bumping checks, useful when diagnosing a failed release build, are:
 
 ```text
-npm run version:verify
-npm run docs:links
-npm run powershell:check
-npm run format:check
-npm run typecheck
-npm test
-npm run security:check
-npm run build
-node --check dist/src/index.js        # repeat for every dist/src/**/*.js
-npm run package:win:verify
+bun run version:verify
+bun run docs:links
+bun run powershell:check
+bun run format:check
+bun run runtime:check
+bun run test:policy
+bun run typecheck
+bun run test
+bun run test:focused
+bun run security:check
+bun run build
+bun run syntax:check
+bun run package:win:verify
 ../windows/test-portable.ps1 -Artifact ../release/SuperiorBot-<version>-win-x64.zip
 ../windows/test-standalone.ps1 -Executable ../SuperiorBot.exe
-../windows/verify-release.ps1 -Executable ../SuperiorBot.exe -Updater ../Update.exe
-npm run artifact:verify
+../windows/verify-release.ps1 -Executable ../SuperiorBot.exe -Updater ../Update.exe -ExpectedPublisher 'CN=Exact Publisher' -ExpectedSignerThumbprint '<40-hex-thumbprint>' -RequirePortableArtifact
+bun run artifact:verify
 ```
 
 ## Change rules

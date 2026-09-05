@@ -12,7 +12,7 @@ const parserCheck = path.resolve(
 const candidates = process.platform === "win32" ? ["pwsh.exe"] : ["pwsh"];
 
 for (const executable of candidates) {
-  const arguments_ = ["-NoLogo", "-NoProfile"];
+  const arguments_ = ["-NoLogo", "-NoProfile", "-NonInteractive"];
   if (process.platform === "win32") {
     arguments_.push("-ExecutionPolicy", "Bypass");
   }
@@ -20,6 +20,7 @@ for (const executable of candidates) {
   const result = spawnSync(executable, arguments_, {
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
   });
   if (result.error?.code === "ENOENT") continue;
   if (result.stdout) process.stdout.write(result.stdout);

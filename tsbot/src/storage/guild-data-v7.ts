@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   ANTI_SPAM_ACTIONS,
@@ -114,7 +114,7 @@ export function emptyPhase3GuildData(): Phase3GuildData {
 
 /** Reads portable Phase 3 state. Live delivery/enforcement leases are excluded. */
 export function readPhase3GuildData(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
 ): Phase3GuildData {
   type CollectionKey = Exclude<
@@ -394,7 +394,7 @@ export function parsePhase3GuildData(
 
 /** Inserts parsed Phase 3 history while making every external binding dormant. */
 export function insertPhase3GuildData(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   imported: Phase3GuildData,
 ): void {
@@ -415,7 +415,7 @@ export function insertPhase3GuildData(
 }
 
 export function deactivatePhase3Bindings(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
 ): void {
   db.prepare(
@@ -1252,7 +1252,7 @@ function parseParentEvents<T>(
 }
 
 function insertConfiguration(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   value: ModerationConfiguration | null,
 ): void {
@@ -1284,7 +1284,7 @@ function insertConfiguration(
 }
 
 function insertCases(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly ModerationCase[],
 ): void {
@@ -1328,7 +1328,7 @@ function insertCases(
 }
 
 function insertCaseEvents(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly ModerationCaseEvent[],
 ): void {
@@ -1352,7 +1352,7 @@ function insertCaseEvents(
 }
 
 function insertLogDeliveries(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly ModerationLogDelivery[],
 ): void {
@@ -1379,7 +1379,7 @@ function insertLogDeliveries(
 }
 
 function insertReports(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly MemberReport[],
 ): void {
@@ -1423,7 +1423,7 @@ function insertReports(
 }
 
 function insertReportEvents(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly MemberReportEvent[],
 ): void {
@@ -1447,7 +1447,7 @@ function insertReportEvents(
 }
 
 function insertAppeals(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly CaseAppeal[],
 ): void {
@@ -1486,7 +1486,7 @@ function insertAppeals(
 }
 
 function insertAppealEvents(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly CaseAppealEvent[],
 ): void {
@@ -1510,7 +1510,7 @@ function insertAppealEvents(
 }
 
 function insertRules(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly AntiSpamRule[],
 ): void {
@@ -1538,7 +1538,7 @@ function insertRules(
 }
 
 function insertExemptions(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly AntiSpamExemption[],
   role: boolean,
@@ -1554,7 +1554,7 @@ function insertExemptions(
 }
 
 function insertEnforcements(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly AntiSpamEnforcement[],
 ): void {
@@ -1584,7 +1584,7 @@ function insertEnforcements(
 }
 
 function insertAntiSpamEvents(
-  db: Database.Database,
+  db: DatabaseConnection,
   guildId: string,
   rows: readonly AntiSpamEvent[],
 ): void {

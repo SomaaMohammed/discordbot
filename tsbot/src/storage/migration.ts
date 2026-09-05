@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import Database from "better-sqlite3";
+import { z } from "zod";
+import Database, { type DatabaseConnection } from "./database.js";
 import {
   DISCORD_SNOWFLAKE_PATTERN,
   GUILD_SETTINGS_VERSION,
@@ -29,6 +30,7 @@ import {
   createV10OperationalObjects,
   createV10ReplacementObjects,
   createV11OperationalObjects,
+  databaseForeignKeyViolationCount,
   databaseIntegrityCheck,
   detectDatabaseSchema,
   type DatabaseSchemaKind,
@@ -58,6 +60,14 @@ import {
   validateV11Schema,
   LEGACY_V8_SCHEMA_VERSION,
 } from "./schema.js";
+import {
+  countRowSchema,
+  decodeRow,
+  decodeRows,
+  schemaVersionRowSchema,
+  tableInfoRowSchema,
+} from "./row-decoder.js";
+import { recordSqliteOperationalEvent } from "./telemetry.js";
 
 export type MigrationFailurePoint =
   | "after-source-read"
@@ -183,6 +193,100 @@ interface LegacyMetricRow {
   updated_at: string;
 }
 
+const legacyGuildRowSchema = z
+  .object({
+    guild_id: z.string().min(1).max(20),
+    enabled: z.number().int(),
+    name: z.string().nullable(),
+    joined_at: z.string().nullable(),
+    left_at: z.string().nullable(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .strict();
+
+const legacySettingsRowSchema = z
+  .object({
+    guild_id: z.string().min(1).max(20),
+    settings_version: z.number().int(),
+    settings_json: z.string(),
+    updated_at: z.string(),
+  })
+  .strict();
+
+const legacyMetricRowSchema = z
+  .object({
+    guild_id: z.string().min(1).max(20),
+    metric_key: z.string().min(1).max(200),
+    metric_value: z.string(),
+    updated_at: z.string(),
+  })
+  .strict();
+
+const settingsJsonRowSchema = z.object({ settings_json: z.string() }).strict();
+
+const guildLifecycleRowSchema = z
+  .object({
+    guild_id: z.string().min(1).max(20),
+    left_at: z.string().nullable(),
+  })
+  .strict();
+
+const guildEnabledRowSchema = z
+  .object({
+    guild_id: z.string().min(1).max(20),
+    enabled: z.number().int(),
+  })
+  .strict();
+
+const migratedMetricRowSchema = z
+  .object({
+    guild_id: z.string().min(1).max(20),
+    metric_key: z.string().min(1).max(200),
+    metric_value: z.number().finite(),
+    updated_at: z.string(),
+  })
+  .strict();
+
+const v4TicketConfigurationRowSchema = z
+  .object({
+    guild_id: z.string(),
+    enabled: z.number().int(),
+    category_id: z.string(),
+    log_channel_id: z.string(),
+    support_role_id: z.string(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .strict();
+
+const v4TicketRowSchema = z
+  .object({
+    guild_id: z.string(),
+    ticket_id: z.string(),
+    ticket_number: z.number().int(),
+    opener_id: z.string(),
+    channel_id: z.string().nullable(),
+    control_message_id: z.string().nullable(),
+    subject: z.string(),
+    description: z.string(),
+    state: z.string(),
+    claimed_by: z.string().nullable(),
+    claimed_at: z.string().nullable(),
+    closed_by: z.string().nullable(),
+    close_reason: z.string().nullable(),
+    close_log_message_id: z.string().nullable(),
+    close_logged_at: z.string().nullable(),
+    failure_reason: z.string().nullable(),
+    created_at: z.string(),
+    updated_at: z.string(),
+    closing_at: z.string().nullable(),
+    closed_at: z.string().nullable(),
+  })
+  .strict();
+
+const sqliteRecordSchema = z.object({}).passthrough();
+
 interface PreparedSettingsRow {
   guildId: string;
   settings: LegacyGuildSettingsV2;
@@ -216,6 +320,28 @@ const V2_EXPLICIT_INDEXES = [
 class DryRunRollback extends Error {}
 
 export function migrateDatabase(options: MigrationOptions): MigrationResult {
+  const startedAt = performance.now();
+  try {
+    const result = performMigration(options);
+    recordSqliteOperationalEvent({
+      event: "migration",
+      outcome: result.status,
+      fromSchema: result.fromSchema,
+      durationMs: performance.now() - startedAt,
+    });
+    return result;
+  } catch (error) {
+    recordSqliteOperationalEvent({
+      event: "migration",
+      outcome: "failed",
+      fromSchema: "unknown",
+      durationMs: performance.now() - startedAt,
+    });
+    throw error;
+  }
+}
+
+function performMigration(options: MigrationOptions): MigrationResult {
   const db = new Database(options.dbFile, {
     fileMustExist: true,
     timeout: 5_000,
@@ -547,7 +673,7 @@ export function migrateDatabase(options: MigrationOptions): MigrationResult {
       }
       if (schema === "legacy-v1") {
         throw new Error(
-          "Schema v1 cannot be migrated directly by v10. Upgrade with the final v4 release to schema v2, stop every older executable, create an offline backup, then run the current migration.",
+          "Schema v1 cannot be migrated directly by the current release. Upgrade with the final v4 release to schema v2, stop every older executable, create an offline backup, then run the current migration.",
         );
       }
       if (schema !== "legacy-v2") {
@@ -663,8 +789,7 @@ export function validateDatabaseFile(
   try {
     const integrity = databaseIntegrityCheck(db);
     const schema = detectDatabaseSchema(db);
-    const foreignKeyViolations = (db.pragma("foreign_key_check") as unknown[])
-      .length;
+    const foreignKeyViolations = databaseForeignKeyViolationCount(db);
     const schemaVersion = readSchemaVersion(db, schema);
     const expected = options.expect;
     if (integrity.toLowerCase() !== "ok") {
@@ -712,7 +837,7 @@ type V7OperationalSnapshot = Map<string, unknown[]>;
  * rolls the entire IMMEDIATE transaction back.
  */
 function upgradeV7ToV8(
-  db: Database.Database,
+  db: DatabaseConnection,
   options: MigrationOptions,
   now: string,
   injectStages: boolean,
@@ -761,7 +886,7 @@ function upgradeV7ToV8(
 }
 
 function upgradeV8ToV9(
-  db: Database.Database,
+  db: DatabaseConnection,
   options: MigrationOptions,
   now: string,
   injectStages: boolean,
@@ -769,12 +894,7 @@ function upgradeV8ToV9(
   const snapshot = new Map<string, unknown[]>();
   for (const table of V8_TABLE_NAMES) {
     if (table === "schema_migrations") continue;
-    snapshot.set(
-      table,
-      db
-        .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY rowid`)
-        .all(),
-    );
+    snapshot.set(table, readTableRowsByPrimaryKey(db, table));
   }
   if (injectStages) injectFailure(options, "after-source-read");
 
@@ -809,9 +929,7 @@ function upgradeV8ToV9(
     "posted_panels",
   ] as const) {
     const expected = snapshot.get(table) ?? [];
-    const actual = db
-      .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY rowid`)
-      .all();
+    const actual = readTableRowsByPrimaryKey(db, table);
     if (!isDeepStrictEqual(actual, expected)) {
       throw new Error(
         `Schema-v8 ${table} records changed during schema-v9 migration`,
@@ -831,9 +949,7 @@ function upgradeV8ToV9(
     throw new Error(`Migrated schema validation failed: ${issues.join("; ")}`);
   }
   for (const [table, expected] of snapshot) {
-    const actual = db
-      .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY rowid`)
-      .all();
+    const actual = readTableRowsByPrimaryKey(db, table);
     if (!isDeepStrictEqual(actual, expected)) {
       throw new Error(
         `Schema-v8 ${table} records changed during schema-v9 migration`,
@@ -844,7 +960,7 @@ function upgradeV8ToV9(
 
 /** Frozen v9 rows are copied exactly before empty/default-disabled Phase 4 objects are added. */
 function upgradeV9ToV10(
-  db: Database.Database,
+  db: DatabaseConnection,
   options: MigrationOptions,
   now: string,
   injectStages: boolean,
@@ -852,12 +968,7 @@ function upgradeV9ToV10(
   const snapshot = new Map<string, unknown[]>();
   for (const table of V9_TABLE_NAMES) {
     if (table === "schema_migrations") continue;
-    snapshot.set(
-      table,
-      db
-        .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY rowid`)
-        .all(),
-    );
+    snapshot.set(table, readTableRowsByPrimaryKey(db, table));
   }
   if (injectStages) injectFailure(options, "after-source-read");
 
@@ -892,9 +1003,7 @@ function upgradeV9ToV10(
     "posted_panels",
   ] as const) {
     const expected = snapshot.get(table) ?? [];
-    const actual = db
-      .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY rowid`)
-      .all();
+    const actual = readTableRowsByPrimaryKey(db, table);
     if (!isDeepStrictEqual(actual, expected)) {
       throw new Error(
         `Schema-v9 ${table} records changed during schema-v10 migration`,
@@ -914,9 +1023,7 @@ function upgradeV9ToV10(
     throw new Error(`Migrated schema validation failed: ${issues.join("; ")}`);
   }
   for (const [table, expected] of snapshot) {
-    const actual = db
-      .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY rowid`)
-      .all();
+    const actual = readTableRowsByPrimaryKey(db, table);
     if (!isDeepStrictEqual(actual, expected)) {
       throw new Error(
         `Schema-v9 ${table} records changed during schema-v10 migration`,
@@ -928,7 +1035,7 @@ function upgradeV9ToV10(
 
 /** Adds isolated voting objects after the frozen schema-v10 layout is valid. */
 function upgradeV10ToV11(
-  db: Database.Database,
+  db: DatabaseConnection,
   options: MigrationOptions,
   now: string,
   injectStages: boolean,
@@ -945,19 +1052,23 @@ function upgradeV10ToV11(
 }
 
 function prepareV8SettingsRows(
-  db: Database.Database,
+  db: DatabaseConnection,
 ): V8SettingsMigrationRow[] {
-  const guilds = db
-    .prepare("SELECT guild_id, left_at FROM guilds ORDER BY guild_id")
-    .all() as Array<{ guild_id: string; left_at: string | null }>;
+  const guilds = decodeRows(
+    guildLifecycleRowSchema,
+    db.prepare("SELECT guild_id, left_at FROM guilds ORDER BY guild_id").all(),
+    "schema-v8 migration guild lifecycle source",
+  );
   const settingsByGuild = new Map(
-    (
+    decodeRows(
+      legacySettingsRowSchema,
       db
         .prepare(
           `SELECT guild_id, settings_version, settings_json, updated_at
            FROM guild_settings ORDER BY guild_id`,
         )
-        .all() as LegacySettingsRow[]
+        .all(),
+      "schema-v8 migration settings source",
     ).map((row) => [row.guild_id, row]),
   );
   if (settingsByGuild.size !== guilds.length) {
@@ -1000,15 +1111,19 @@ function prepareV8SettingsRows(
 }
 
 function verifyV8SettingsRows(
-  db: Database.Database,
+  db: DatabaseConnection,
   expected: readonly V8SettingsMigrationRow[],
 ): void {
-  const actual = db
-    .prepare(
-      `SELECT guild_id, settings_version, settings_json, updated_at
-       FROM guild_settings ORDER BY guild_id`,
-    )
-    .all() as LegacySettingsRow[];
+  const actual = decodeRows(
+    legacySettingsRowSchema,
+    db
+      .prepare(
+        `SELECT guild_id, settings_version, settings_json, updated_at
+         FROM guild_settings ORDER BY guild_id`,
+      )
+      .all(),
+    "schema-v8 migration settings verification",
+  );
   const expectedRows = expected.map((row) => ({
     guild_id: row.guildId,
     settings_version: GUILD_SETTINGS_VERSION,
@@ -1018,9 +1133,11 @@ function verifyV8SettingsRows(
   if (!isDeepStrictEqual(actual, expectedRows)) {
     throw new Error("Schema-v8 settings do not match the prepared migration");
   }
-  const guildStates = db
-    .prepare("SELECT guild_id, enabled FROM guilds ORDER BY guild_id")
-    .all() as Array<{ guild_id: string; enabled: number }>;
+  const guildStates = decodeRows(
+    guildEnabledRowSchema,
+    db.prepare("SELECT guild_id, enabled FROM guilds ORDER BY guild_id").all(),
+    "schema-v8 migration guild-state verification",
+  );
   const expectedStates = expected.map((row) => ({
     guild_id: row.guildId,
     enabled: row.enabled ? 1 : 0,
@@ -1031,7 +1148,7 @@ function verifyV8SettingsRows(
 }
 
 function readV7OperationalSnapshot(
-  db: Database.Database,
+  db: DatabaseConnection,
 ): V7OperationalSnapshot {
   const snapshot: V7OperationalSnapshot = new Map();
   for (const table of V7_TABLE_NAMES) {
@@ -1042,24 +1159,17 @@ function readV7OperationalSnapshot(
     ) {
       continue;
     }
-    snapshot.set(
-      table,
-      db
-        .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY rowid`)
-        .all(),
-    );
+    snapshot.set(table, readTableRowsByPrimaryKey(db, table));
   }
   return snapshot;
 }
 
 function verifyV7OperationalSnapshot(
-  db: Database.Database,
+  db: DatabaseConnection,
   expected: V7OperationalSnapshot,
 ): void {
   for (const [table, rows] of expected) {
-    const actual = db
-      .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY rowid`)
-      .all();
+    const actual = readTableRowsByPrimaryKey(db, table);
     if (!isDeepStrictEqual(actual, rows)) {
       throw new Error(
         `Schema-v7 ${table} records changed during schema-v8 migration`,
@@ -1069,7 +1179,7 @@ function verifyV7OperationalSnapshot(
 }
 
 function upgradeV4ToV5(
-  db: Database.Database,
+  db: DatabaseConnection,
   options: MigrationOptions,
   injectStages: boolean,
 ): void {
@@ -1112,27 +1222,41 @@ function upgradeV4ToV5(
   if (injectStages) injectFailure(options, "after-drop");
 }
 
-function readV4Snapshot(db: Database.Database): V4Snapshot {
+function readV4Snapshot(db: DatabaseConnection): V4Snapshot {
   return {
-    configurations: db
-      .prepare("SELECT * FROM ticket_configurations ORDER BY guild_id")
-      .all() as V4TicketConfigurationRow[],
-    panels: db
-      .prepare("SELECT * FROM posted_panels ORDER BY guild_id, panel_id")
-      .all(),
-    tickets: db
-      .prepare("SELECT * FROM tickets ORDER BY guild_id, ticket_number")
-      .all() as V4TicketRow[],
-    events: db
-      .prepare(
-        "SELECT * FROM ticket_events ORDER BY guild_id, ticket_id, event_number",
-      )
-      .all(),
+    configurations: decodeRows(
+      v4TicketConfigurationRowSchema,
+      db.prepare("SELECT * FROM ticket_configurations ORDER BY guild_id").all(),
+      "schema-v4 ticket configuration migration source",
+    ),
+    panels: decodeRows(
+      sqliteRecordSchema,
+      db
+        .prepare("SELECT * FROM posted_panels ORDER BY guild_id, panel_id")
+        .all(),
+      "schema-v4 posted panel migration source",
+    ),
+    tickets: decodeRows(
+      v4TicketRowSchema,
+      db
+        .prepare("SELECT * FROM tickets ORDER BY guild_id, ticket_number")
+        .all(),
+      "schema-v4 ticket migration source",
+    ),
+    events: decodeRows(
+      sqliteRecordSchema,
+      db
+        .prepare(
+          "SELECT * FROM ticket_events ORDER BY guild_id, ticket_id, event_number",
+        )
+        .all(),
+      "schema-v4 ticket event migration source",
+    ),
   };
 }
 
 function copyV4OperationalRows(
-  db: Database.Database,
+  db: DatabaseConnection,
   snapshot: V4Snapshot,
 ): MigratedDepartment[] {
   db.exec(
@@ -1308,7 +1432,7 @@ function copyV4OperationalRows(
 }
 
 function verifyV4OperationalUpgrade(
-  db: Database.Database,
+  db: DatabaseConnection,
   snapshot: V4Snapshot,
   departments: MigratedDepartment[],
 ): void {
@@ -1353,25 +1477,30 @@ function verifyV4OperationalUpgrade(
     );
   }
 
-  const foreignKeyViolations = db.pragma("foreign_key_check") as unknown[];
-  if (foreignKeyViolations.length > 0) {
+  if (databaseForeignKeyViolationCount(db) > 0) {
     throw new Error("Schema-v5 migrated candidate has foreign-key violations");
   }
 }
 
 function prepareMigration(
-  db: Database.Database,
+  db: DatabaseConnection,
   now: string,
 ): PreparedMigration {
-  const guilds = db
-    .prepare("SELECT * FROM guilds ORDER BY guild_id")
-    .all() as LegacyGuildRow[];
-  const settingsRows = db
-    .prepare("SELECT * FROM guild_settings ORDER BY guild_id")
-    .all() as LegacySettingsRow[];
-  const metricRows = db
-    .prepare("SELECT * FROM metrics ORDER BY guild_id, metric_key")
-    .all() as LegacyMetricRow[];
+  const guilds = decodeRows(
+    legacyGuildRowSchema,
+    db.prepare("SELECT * FROM guilds ORDER BY guild_id").all(),
+    "migration legacy guilds",
+  );
+  const settingsRows = decodeRows(
+    legacySettingsRowSchema,
+    db.prepare("SELECT * FROM guild_settings ORDER BY guild_id").all(),
+    "migration legacy guild settings",
+  );
+  const metricRows = decodeRows(
+    legacyMetricRowSchema,
+    db.prepare("SELECT * FROM metrics ORDER BY guild_id, metric_key").all(),
+    "migration legacy metrics",
+  );
 
   assertLegacyGuildRows(guilds);
   assertNoUnresolvedRecoveryMetadata(metricRows);
@@ -1478,7 +1607,7 @@ function prepareMigration(
 }
 
 function copyPreparedRows(
-  db: Database.Database,
+  db: DatabaseConnection,
   prepared: PreparedMigration,
 ): void {
   const insertGuild = db.prepare(
@@ -1518,21 +1647,27 @@ function copyPreparedRows(
 }
 
 function verifyPreparedRows(
-  db: Database.Database,
+  db: DatabaseConnection,
   prepared: PreparedMigration,
 ): void {
-  const guilds = db
-    .prepare("SELECT * FROM guilds ORDER BY guild_id")
-    .all() as LegacyGuildRow[];
+  const guilds = decodeRows(
+    legacyGuildRowSchema,
+    db.prepare("SELECT * FROM guilds ORDER BY guild_id").all(),
+    "migration verify guilds",
+  );
   if (!isDeepStrictEqual(guilds, prepared.guilds)) {
     throw new Error("Migrated guild metadata does not match the prepared copy");
   }
 
-  const settings = db
-    .prepare(
-      "SELECT guild_id, settings_version, settings_json, updated_at FROM guild_settings ORDER BY guild_id",
-    )
-    .all() as LegacySettingsRow[];
+  const settings = decodeRows(
+    legacySettingsRowSchema,
+    db
+      .prepare(
+        "SELECT guild_id, settings_version, settings_json, updated_at FROM guild_settings ORDER BY guild_id",
+      )
+      .all(),
+    "migration verify guild settings",
+  );
   const expectedSettings = prepared.settings.map((row) => ({
     guild_id: row.guildId,
     settings_version: 2,
@@ -1543,16 +1678,15 @@ function verifyPreparedRows(
     throw new Error("Migrated guild settings do not match the prepared copy");
   }
 
-  const metrics = db
-    .prepare(
-      "SELECT guild_id, metric_key, metric_value, updated_at FROM metrics ORDER BY guild_id, metric_key",
-    )
-    .all() as Array<{
-    guild_id: string;
-    metric_key: string;
-    metric_value: number;
-    updated_at: string;
-  }>;
+  const metrics = decodeRows(
+    migratedMetricRowSchema,
+    db
+      .prepare(
+        "SELECT guild_id, metric_key, metric_value, updated_at FROM metrics ORDER BY guild_id, metric_key",
+      )
+      .all(),
+    "migration verify metrics",
+  );
   const expectedMetrics = prepared.metrics.map((row) => ({
     guild_id: row.guildId,
     metric_key: row.key,
@@ -1563,13 +1697,12 @@ function verifyPreparedRows(
     throw new Error("Migrated metrics do not match the prepared copy");
   }
 
-  const foreignKeyViolations = db.pragma("foreign_key_check") as unknown[];
-  if (foreignKeyViolations.length > 0) {
+  if (databaseForeignKeyViolationCount(db) > 0) {
     throw new Error("Migrated candidate has foreign-key violations");
   }
 }
 
-function readV3Snapshot(db: Database.Database): V3Snapshot {
+function readV3Snapshot(db: DatabaseConnection): V3Snapshot {
   return {
     guilds: db.prepare("SELECT * FROM guilds ORDER BY guild_id").all(),
     settings: db
@@ -1581,7 +1714,7 @@ function readV3Snapshot(db: Database.Database): V3Snapshot {
   };
 }
 
-function verifyV3Snapshot(db: Database.Database, expected: V3Snapshot): void {
+function verifyV3Snapshot(db: DatabaseConnection, expected: V3Snapshot): void {
   const actual = readV3Snapshot(db);
   if (!isDeepStrictEqual(actual.guilds, expected.guilds)) {
     throw new Error("Schema v3 guild metadata changed during migration");
@@ -1649,7 +1782,7 @@ function isValidEmptyRecoveryPayload(value: unknown): boolean {
   );
 }
 
-function assertIntegrity(db: Database.Database): void {
+function assertIntegrity(db: DatabaseConnection): void {
   const integrity = databaseIntegrityCheck(db);
   if (integrity.toLowerCase() !== "ok") {
     throw new Error(`Database integrity check failed: ${integrity}`);
@@ -1665,20 +1798,20 @@ function injectFailure(
   }
 }
 
-function countRows(db: Database.Database, table: string): number {
-  return Number(
-    (
-      db
-        .prepare(`SELECT COUNT(*) AS count FROM ${quoteIdentifier(table)}`)
-        .get() as { count: number }
-    ).count,
-  );
+function countRows(db: DatabaseConnection, table: string): number {
+  return decodeRow(
+    countRowSchema,
+    db.prepare(`SELECT COUNT(*) AS count FROM ${quoteIdentifier(table)}`).get(),
+    `migration count ${table}`,
+  ).count;
 }
 
-function countReviewRequiredSettings(db: Database.Database): number {
-  const rows = db
-    .prepare("SELECT settings_json FROM guild_settings")
-    .all() as Array<{ settings_json: string }>;
+function countReviewRequiredSettings(db: DatabaseConnection): number {
+  const rows = decodeRows(
+    settingsJsonRowSchema,
+    db.prepare("SELECT settings_json FROM guild_settings").all(),
+    "migration review-required settings",
+  );
   return rows.reduce((count, row) => {
     try {
       const parsed = JSON.parse(row.settings_json) as {
@@ -1692,7 +1825,7 @@ function countReviewRequiredSettings(db: Database.Database): number {
 }
 
 function readSchemaVersion(
-  db: Database.Database,
+  db: DatabaseConnection,
   schema: DatabaseSchemaKind,
 ): number | null {
   if (
@@ -1709,9 +1842,11 @@ function readSchemaVersion(
   ) {
     return null;
   }
-  const row = db
-    .prepare("SELECT MAX(version) AS version FROM schema_migrations")
-    .get() as { version: number | null };
+  const row = decodeRow(
+    schemaVersionRowSchema,
+    db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get(),
+    "schema_migrations max version",
+  );
   return row.version === null ? null : Number(row.version);
 }
 
@@ -1725,6 +1860,29 @@ function v4LegacyTableName(table: string): string {
 
 function v7SettingsLegacyTableName(): string {
   return "guild_settings_v7_legacy";
+}
+
+function readTableRowsByPrimaryKey(
+  db: DatabaseConnection,
+  table: string,
+): unknown[] {
+  const primaryKey = decodeRows(
+    tableInfoRowSchema,
+    db.prepare(`PRAGMA table_xinfo(${quoteIdentifier(table)})`).all(),
+    `migration table info ${table}`,
+  )
+    .filter((row) => row.pk > 0)
+    .sort((left, right) => left.pk - right.pk)
+    .map((row) => row.name);
+  if (primaryKey.length === 0) {
+    throw new Error(
+      `Migration snapshot requires an explicit primary key for ${table}`,
+    );
+  }
+  const orderBy = primaryKey.map(quoteIdentifier).join(", ");
+  return db
+    .prepare(`SELECT * FROM ${quoteIdentifier(table)} ORDER BY ${orderBy}`)
+    .all();
 }
 
 function allocateOpaqueId(allocated: Set<string>): string {

@@ -38,15 +38,16 @@ Core replies and panels normally need View Channels, Send Messages, Embed Links,
 
 Copy `.env.example` to `.env` in the application root. For a Windows portable build, that is the folder containing `SuperiorBot.exe`.
 
-| Variable                    | Required      | Meaning                                                                                       |
-| --------------------------- | ------------- | --------------------------------------------------------------------------------------------- |
-| `DISCORD_TOKEN`             | Yes           | Bot token from the Developer Portal.                                                          |
-| `DB_FILE`                   | No            | SQLite path. A relative value resolves from the application root; default is `superior.db`.   |
-| `COMMAND_REGISTRATION_MODE` | No            | `global` for production or `guild` for development. Defaults to `global`.                     |
-| `DEV_GUILD_IDS`             | In guild mode | Comma-separated development guild IDs.                                                        |
-| `BOT_OPERATOR_IDS`          | No            | Comma-separated deployment-owner IDs allowed to use the visible `/operator` recovery command. |
+| Variable                    | Required      | Meaning                                                                                               |
+| --------------------------- | ------------- | ----------------------------------------------------------------------------------------------------- |
+| `DISCORD_TOKEN`             | Yes           | Bot token from the Developer Portal.                                                                  |
+| `DB_FILE`                   | No            | SQLite path. A relative value resolves from the application root; default is `superior.db`.           |
+| `SUPERIOR_BACKUP_DIR`       | No            | Trusted backup/restore-drill directory used by doctor and compiled maintenance; default is `backups`. |
+| `COMMAND_REGISTRATION_MODE` | No            | `global` for production or `guild` for development. Defaults to `global`.                             |
+| `DEV_GUILD_IDS`             | In guild mode | Comma-separated development guild IDs.                                                                |
+| `BOT_OPERATOR_IDS`          | No            | Comma-separated deployment-owner IDs allowed to use the visible `/operator` recovery command.         |
 
-`SuperiorBot.exe --check` validates portable configuration and native SQLite without Discord login. Source check commands are documented in [Development](development.md).
+`SuperiorBot.exe --check` validates portable configuration and `bun:sqlite` without Discord login. `SuperiorBot.exe --doctor` adds offline database, path, lock, backup, and release-layout diagnostics. Source check commands are documented in [Development](development.md).
 
 ## Command registration and runtime authorization
 

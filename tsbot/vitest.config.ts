@@ -5,6 +5,11 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     environment: "node",
     globals: true,
+    server: {
+      deps: {
+        inline: ["zod"],
+      },
+    },
     coverage: {
       reporter: ["text", "html"],
       include: ["src/**/*.ts"],

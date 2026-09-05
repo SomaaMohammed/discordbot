@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
+import Database from "../src/storage/database.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { backupDatabase } from "../src/storage/backup.js";
 import { BotStorage } from "../src/storage/db.js";
 import { validateDatabaseFile } from "../src/storage/migration.js";
@@ -461,8 +462,248 @@ describe("validated SQLite backup", () => {
       backupDatabase({ dbFile: source, outputFile: mismatch, expect: 2 }),
     ).rejects.toThrow(/expected exact schema v2/);
     expect(fs.existsSync(mismatch)).toBe(false);
+    expect(
+      fs.readdirSync(root).some((entry) => entry.endsWith(".partial")),
+    ).toBe(false);
+
+    const reservedBySidecar = path.join(root, "reserved-by-sidecar.db");
+    fs.writeFileSync(`${reservedBySidecar}-wal`, "operator-owned sidecar");
+    await expect(
+      backupDatabase({
+        dbFile: source,
+        outputFile: reservedBySidecar,
+        expect: 11,
+      }),
+    ).rejects.toThrow(/sidecar already exists/);
+    expect(fs.existsSync(reservedBySidecar)).toBe(false);
+    expect(fs.readFileSync(`${reservedBySidecar}-wal`, "utf8")).toBe(
+      "operator-owned sidecar",
+    );
+  });
+
+  it("fails closed when the destination filesystem cannot publish atomically", async () => {
+    const root = makeRoot();
+    const source = path.join(root, "source.db");
+    const output = path.join(root, "unsupported-filesystem.db");
+    const storage = new BotStorage({ dbFile: source });
+    storage.initStorage();
+    storage.close();
+    const linkFailure = Object.assign(new Error("hard links unsupported"), {
+      code: "ENOTSUP",
+    });
+    vi.spyOn(fs, "linkSync").mockImplementationOnce(() => {
+      throw linkFailure;
+    });
+
+    await expect(
+      backupDatabase({ dbFile: source, outputFile: output, expect: 11 }),
+    ).rejects.toThrow(/requires hard-link support/);
+    expect(fs.existsSync(output)).toBe(false);
+    expect(
+      fs.readdirSync(root).some((entry) => entry.endsWith(".partial")),
+    ).toBe(false);
+  });
+
+  it("never claims a partial path created by a failing snapshot operation", async () => {
+    const root = makeRoot();
+    const source = path.join(root, "source.db");
+    const output = path.join(root, "backup.db");
+    const storage = new BotStorage({ dbFile: source });
+    storage.initStorage();
+    storage.close();
+    let competingPath = "";
+    const vacuum = vi
+      .spyOn(Database.prototype, "vacuumInto")
+      .mockImplementationOnce((destinationFile) => {
+        competingPath = destinationFile;
+        fs.writeFileSync(destinationFile, "operator-owned-after-failure");
+        throw new Error("injected snapshot failure");
+      });
+
+    try {
+      await expect(
+        backupDatabase({ dbFile: source, outputFile: output, expect: 11 }),
+      ).rejects.toThrow(/cleanup was incomplete/);
+      expect(fs.readFileSync(competingPath, "utf8")).toBe(
+        "operator-owned-after-failure",
+      );
+      expect(fs.existsSync(output)).toBe(false);
+    } finally {
+      vacuum.mockRestore();
+    }
+  });
+
+  it("captures a valid transaction boundary while another connection writes", async () => {
+    const root = makeRoot();
+    const source = path.join(root, "source live O'Brien Ω.db");
+    const output = path.join(root, "backup live O'Brien Ω.db");
+    const restored = path.join(root, "restored live O'Brien Ω.db");
+    const ready = path.join(root, "writer.ready");
+    const stop = path.join(root, "writer.stop");
+    const storage = new BotStorage({ dbFile: source });
+    storage.initStorage();
+    storage.ensureGuild("111111111111111111");
+    storage.close();
+    const padding = new Database(source, { fileMustExist: true });
+    try {
+      padding
+        .prepare(
+          "UPDATE guilds SET name = zeroblob(67108864) WHERE guild_id = ?",
+        )
+        .run("111111111111111111");
+    } finally {
+      padding.close();
+    }
+
+    const writerScript = fileURLToPath(
+      new URL("./helpers/concurrent-backup-writer.ts", import.meta.url),
+    );
+    const writer = Bun.spawn(
+      [process.execPath, "--no-env-file", writerScript, source, ready, stop],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    try {
+      await waitForFile(ready, writer);
+      const before = readProbeValues(source);
+      expect(before.first).toBe(before.second);
+
+      const backup = await backupDatabase({
+        dbFile: source,
+        outputFile: output,
+        expect: 11,
+      });
+      expect(backup).toMatchObject({
+        schema: "current-v11",
+        integrity: "ok",
+        foreignKeyViolations: 0,
+        concurrentWritesObserved: true,
+      });
+      expect(backup.snapshotDurationMs).toBeGreaterThan(0);
+
+      const after = readProbeValues(source);
+      expect(after.first).toBe(after.second);
+      expect(after.first).toBeGreaterThan(before.first);
+
+      const snapshot = readProbeValues(output);
+      expect(snapshot.first).toBe(snapshot.second);
+      expect(snapshot.first).toBeGreaterThan(before.first);
+      expect(snapshot.first).toBeLessThan(after.first);
+
+      fs.copyFileSync(output, restored, fs.constants.COPYFILE_EXCL);
+      expect(validateDatabaseFile(restored, { expect: 11 })).toMatchObject({
+        schema: "current-v11",
+        integrity: "ok",
+        foreignKeyViolations: 0,
+      });
+      expect(readProbeValues(restored)).toEqual(snapshot);
+    } finally {
+      fs.writeFileSync(stop, "stop");
+      const exitCode = await writer.exited;
+      const stderr = await new Response(writer.stderr).text();
+      expect(exitCode, stderr).toBe(0);
+    }
+  }, 30_000);
+
+  it("rejects a destination directory reached through a reparse point", async () => {
+    const root = makeRoot();
+    const source = path.join(root, "source.db");
+    const realDestination = path.join(root, "real destination");
+    const redirectedDestination = path.join(root, "redirected destination");
+    fs.mkdirSync(realDestination);
+    createDirectoryLink(realDestination, redirectedDestination);
+    createCurrentDatabase(source);
+
+    await expect(
+      backupDatabase({
+        dbFile: source,
+        outputFile: path.join(redirectedDestination, "backup.db"),
+        expect: 11,
+      }),
+    ).rejects.toThrow(/reparse point/u);
+    expect(fs.readdirSync(realDestination)).toEqual([]);
+  });
+
+  it("refuses a reparse-point sidecar without modifying it", async () => {
+    const root = makeRoot();
+    const source = path.join(root, "source.db");
+    const output = path.join(root, "backup.db");
+    const sidecarTarget = path.join(root, "operator sidecar target");
+    fs.mkdirSync(sidecarTarget);
+    createDirectoryLink(sidecarTarget, `${output}-wal`);
+    createCurrentDatabase(source);
+
+    await expect(
+      backupDatabase({ dbFile: source, outputFile: output, expect: 11 }),
+    ).rejects.toThrow(/already exists/u);
+    expect(fs.existsSync(`${output}-wal`)).toBe(true);
+    expect(fs.readdirSync(sidecarTarget)).toEqual([]);
+    expect(fs.existsSync(output)).toBe(false);
   });
 });
+
+function createCurrentDatabase(fileName: string): void {
+  const storage = new BotStorage({ dbFile: fileName });
+  storage.initStorage();
+  storage.ensureGuild("111111111111111111");
+  storage.close();
+}
+
+function createDirectoryLink(target: string, link: string): void {
+  fs.symlinkSync(
+    target,
+    link,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+}
+
+function readProbeValues(databaseFile: string): {
+  first: number;
+  second: number;
+} {
+  const db = new Database(databaseFile, {
+    readonly: true,
+    fileMustExist: true,
+  });
+  try {
+    const firstKey = "command_usage.utility.backup_probe";
+    const secondKey = "command_failures.utility.backup_probe";
+    return db
+      .prepare(
+        `SELECT
+           COALESCE(MAX(CASE WHEN metric_key = ? THEN metric_value END), 0) AS first,
+           COALESCE(MAX(CASE WHEN metric_key = ? THEN metric_value END), 0) AS second
+         FROM metrics
+         WHERE guild_id = ? AND metric_key IN (?, ?)`,
+      )
+      .get(firstKey, secondKey, "111111111111111111", firstKey, secondKey) as {
+      first: number;
+      second: number;
+    };
+  } finally {
+    db.close();
+  }
+}
+
+async function waitForFile(
+  fileName: string,
+  writer: Bun.ReadableSubprocess,
+): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!fs.existsSync(fileName)) {
+    if (writer.exitCode !== null) {
+      const stderr = await new Response(writer.stderr).text();
+      throw new Error(`Concurrent writer exited before readiness: ${stderr}`);
+    }
+    if (Date.now() >= deadline) {
+      writer.kill();
+      throw new Error(
+        "Concurrent writer did not become ready within 10 seconds",
+      );
+    }
+    await Bun.sleep(10);
+  }
+}
 
 function makeRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "superior-backup-"));

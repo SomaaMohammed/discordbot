@@ -5,6 +5,25 @@ on:
     branches: ["main"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_signed_release:
+        description: "Build and validate a production-signed Windows release"
+        required: true
+        default: false
+        type: boolean
+      expected_publisher:
+        description: "Exact Authenticode certificate subject (for example CN=Publisher)"
+        required: false
+        type: string
+      expected_signer_thumbprint:
+        description: "Exact 40-character SHA-1 thumbprint of the release signer"
+        required: false
+        type: string
+      timestamp_url:
+        description: "Trusted RFC 3161 timestamp server"
+        required: true
+        default: "https://timestamp.digicert.com"
+        type: string
 
 permissions:
   contents: read
@@ -18,115 +37,290 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          node-version: "22.14.0"
-          cache: "npm"
-          cache-dependency-path: tsbot/package-lock.json
+          bun-version: "1.4.0"
 
       - name: Install dependencies
         working-directory: tsbot
-        run: npm ci
+        run: bun install --frozen-lockfile
+
+      - name: Enforce zero skipped or pseudo-skipped tests
+        working-directory: tsbot
+        run: bun run test:policy
 
       - name: Validate operations shell
         run: |
-          bash -n ops.sh
+          bash -n ops.sh deploy/linux/install.sh deploy/linux/update.sh deploy/linux/verify-backup.sh deploy/linux/validate-service.sh
           if ! command -v shellcheck >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install --yes shellcheck
           fi
-          shellcheck ops.sh
+          shellcheck ops.sh deploy/linux/install.sh deploy/linux/update.sh deploy/linux/verify-backup.sh deploy/linux/validate-service.sh
 
       - name: Validate PowerShell syntax
         working-directory: tsbot
-        run: npm run powershell:check
+        run: bun run powershell:check
 
       - name: Check local documentation links
         working-directory: tsbot
-        run: npm run docs:links
+        run: bun run docs:links
 
       - name: Check formatting
         working-directory: tsbot
-        run: npm run format:check
+        run: bun run format:check
 
       - name: Verify authoritative version identity
         working-directory: tsbot
-        run: npm run version:verify
+        run: bun run version:verify
 
-      - name: Security checks
+      - name: Verify static Bun runtime and dependency policy
         working-directory: tsbot
-        run: npm run security:check
+        run: bun run runtime:check
+
+      - name: Audit dependencies
+        working-directory: tsbot
+        run: |
+          bun audit --audit-level=high
+          bun pm ls --all
+
+      - name: Scan tracked and untracked source for secrets
+        working-directory: tsbot
+        run: bun --no-env-file ../scripts/security-check.mjs
+
+      - name: Run focused security tests
+        working-directory: tsbot
+        run: bun run test:security
 
       - name: Typecheck
         working-directory: tsbot
-        run: npm run typecheck
+        run: bun run typecheck
 
       - name: Tests
         working-directory: tsbot
-        run: npm test
+        run: bun run test
+
+      - name: Focused database, migration, backup, and operations tests
+        working-directory: tsbot
+        run: bun run test:focused
 
       - name: Build production JavaScript
         working-directory: tsbot
-        run: npm run build
+        run: bun run build
 
       - name: Verify clean production output
         working-directory: tsbot
         run: |
           test -f dist/src/index.js
           test ! -d dist/tests
-          find dist/src -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          bun run syntax:check
+
+      - name: Compute deterministic source identity
+        working-directory: tsbot
+        run: bun --no-env-file ../windows/compute-source-identity.mjs
 
       - name: Check whitespace errors
         run: git diff --check
 
   windows-portable:
     name: Build Windows portable artifact
+    needs: validate
     runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          node-version: "22.14.0"
-          cache: "npm"
-          cache-dependency-path: tsbot/package-lock.json
+          bun-version: "1.4.0"
 
       - name: Install build dependencies
         working-directory: tsbot
-        run: npm ci
+        run: bun install --frozen-lockfile
 
-      - name: Reject a stale committed executable before rebuilding
-        working-directory: tsbot
-        run: npm run artifact:verify
-
-      - name: Build portable Windows x64 ZIP twice reproducibly
-        working-directory: tsbot
-        run: npm run package:win:verify
-
-      - name: Smoke-test launchers and native SQLite
+      - name: Require PowerShell 7
         shell: pwsh
         run: |
-          $archive = Get-ChildItem -LiteralPath ./release -Filter 'SuperiorBot-*-win-x64.zip'
+          if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw "Windows release validation requires PowerShell 7."
+          }
+
+      - name: Exercise Windows path and junction safety
+        shell: pwsh
+        run: ./windows/test-path-safety.ps1
+
+      - name: Build portable Windows x64 ZIP twice reproducibly
+        shell: pwsh
+        run: |
+          ./windows/test-reproducible.ps1 `
+            -OutputDirectory "ci artifacts\portable" `
+            -StandaloneOutput "ci artifacts\SuperiorBot.exe" `
+            -UpdaterOutput "ci artifacts\Update.exe"
+
+      - name: Smoke-test launchers and bun:sqlite
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem -LiteralPath './ci artifacts/portable' -Filter 'SuperiorBot-*-win-x64.zip'
           if (@($archive).Count -ne 1) { throw "Expected exactly one portable ZIP." }
           ./windows/test-portable.ps1 -Artifact $archive.FullName
 
       - name: Smoke-test standalone executable
         shell: pwsh
-        run: ./windows/test-standalone.ps1 -Executable ./SuperiorBot.exe
+        run: >-
+          ./windows/test-standalone.ps1
+          -Executable './ci artifacts/SuperiorBot.exe'
+          -Updater './ci artifacts/Update.exe'
 
-      - name: Verify committed executable is reproducible
-        run: git diff --exit-code -- SuperiorBot.exe
+      - name: Verify unsigned-development release identity and inventory
+        shell: pwsh
+        run: >-
+          ./windows/verify-release.ps1
+          -Executable './ci artifacts/SuperiorBot.exe'
+          -Updater './ci artifacts/Update.exe'
+          -OutputDirectory './ci artifacts/portable'
+          -RequirePortableArtifact
+          -AllowUnsignedDevelopment
+
+      - name: Exercise final release-verifier negative cases
+        shell: pwsh
+        run: >-
+          ./windows/test-release-verifier.ps1
+          -Executable './ci artifacts/SuperiorBot.exe'
+          -Updater './ci artifacts/Update.exe'
+          -OutputDirectory './ci artifacts/portable'
+
+      - name: Verify packaging changed no tracked source
+        run: git diff --exit-code
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: SuperiorBot-win-x64
           path: |
+            ci artifacts/SuperiorBot.exe
+            ci artifacts/Update.exe
+            ci artifacts/portable/SuperiorBot-*-win-x64.zip
+            ci artifacts/portable/SuperiorBot-*-win-x64.zip.sha256
+          if-no-files-found: error
+
+  signed-release:
+    name: Build and verify signed Windows release
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_signed_release && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+    needs: [validate, windows-portable]
+    runs-on: windows-latest
+    environment: production-signing
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.0"
+
+      - name: Install build dependencies
+        working-directory: tsbot
+        run: bun install --frozen-lockfile
+
+      - name: Locate Windows SDK signing tool
+        shell: pwsh
+        run: |
+          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $signTool = Get-ChildItem -LiteralPath $sdkRoot -Filter signtool.exe -File -Recurse |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object -Property FullName -Descending |
+            Select-Object -First 1
+          if ($null -eq $signTool) { throw "A Windows SDK x64 signtool.exe is required." }
+          "SUPERIOR_SIGNTOOL_PATH=$($signTool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Exercise Authenticode policy with an ephemeral certificate
+        shell: pwsh
+        env:
+          SUPERIOR_TIMESTAMP_URL: ${{ inputs.timestamp_url }}
+        run: >-
+          ./windows/test-signing.ps1
+          -TimestampUrl $env:SUPERIOR_TIMESTAMP_URL
+          -SignToolPath $env:SUPERIOR_SIGNTOOL_PATH
+
+      - name: Materialize protected release PFX
+        shell: pwsh
+        env:
+          SUPERIOR_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          SUPERIOR_EXPECTED_PUBLISHER: ${{ inputs.expected_publisher }}
+          SUPERIOR_EXPECTED_SIGNER_THUMBPRINT: ${{ inputs.expected_signer_thumbprint }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SUPERIOR_SIGNING_PFX_BASE64)) {
+            throw "WINDOWS_SIGNING_PFX_BASE64 is required for a signed release."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SUPERIOR_EXPECTED_PUBLISHER)) {
+            throw "The exact expected_publisher workflow input is required."
+          }
+          $expectedThumbprint = ($env:SUPERIOR_EXPECTED_SIGNER_THUMBPRINT -replace '\s', '').ToUpperInvariant()
+          if ($expectedThumbprint -notmatch '^[A-F0-9]{40}$') {
+            throw "The exact 40-character expected_signer_thumbprint workflow input is required."
+          }
+          . ./windows/path-safety.ps1
+          $temporaryRoot = Join-Path $env:RUNNER_TEMP ("Superior Signing " + [guid]::NewGuid().ToString('N'))
+          [void](Initialize-SafeDirectory -Path $temporaryRoot -Description 'Protected signing directory')
+          "SUPERIOR_SIGNING_TEMP=$temporaryRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $pfxPath = Join-Path $temporaryRoot 'release-signing.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SUPERIOR_SIGNING_PFX_BASE64))
+          "SUPERIOR_SIGNING_PFX_PATH=$pfxPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build and verify production-signed release
+        shell: pwsh
+        env:
+          SUPERIOR_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+          SUPERIOR_EXPECTED_PUBLISHER: ${{ inputs.expected_publisher }}
+          SUPERIOR_EXPECTED_SIGNER_THUMBPRINT: ${{ inputs.expected_signer_thumbprint }}
+          SUPERIOR_TIMESTAMP_URL: ${{ inputs.timestamp_url }}
+        run: >-
+          ./windows/release-build.ps1
+          -SigningPfxPath $env:SUPERIOR_SIGNING_PFX_PATH
+          -ExpectedPublisher $env:SUPERIOR_EXPECTED_PUBLISHER
+          -ExpectedSignerThumbprint $env:SUPERIOR_EXPECTED_SIGNER_THUMBPRINT
+          -SigningTimestampUrl $env:SUPERIOR_TIMESTAMP_URL
+          -SignToolPath $env:SUPERIOR_SIGNTOOL_PATH
+
+      - name: Verify final production signatures and inventory
+        shell: pwsh
+        env:
+          SUPERIOR_EXPECTED_PUBLISHER: ${{ inputs.expected_publisher }}
+          SUPERIOR_EXPECTED_SIGNER_THUMBPRINT: ${{ inputs.expected_signer_thumbprint }}
+        run: >-
+          ./windows/verify-release.ps1
+          -Executable './SuperiorBot.exe'
+          -Updater './Update.exe'
+          -OutputDirectory './release'
+          -RequirePortableArtifact
+          -ExpectedPublisher $env:SUPERIOR_EXPECTED_PUBLISHER
+          -ExpectedSignerThumbprint $env:SUPERIOR_EXPECTED_SIGNER_THUMBPRINT
+
+      - name: Upload production-signed artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: SuperiorBot-signed-win-x64
+          path: |
             SuperiorBot.exe
+            Update.exe
             release/SuperiorBot-*-win-x64.zip
             release/SuperiorBot-*-win-x64.zip.sha256
           if-no-files-found: error
+
+      - name: Remove protected PFX material
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SUPERIOR_SIGNING_TEMP)) { exit 0 }
+          $target = [IO.Path]::GetFullPath($env:SUPERIOR_SIGNING_TEMP)
+          . ./windows/path-safety.ps1
+          if (Test-Path -LiteralPath $target) {
+            Remove-SafeOwnedTree `
+              -Path $target `
+              -OwnerDirectory $env:RUNNER_TEMP `
+              -Description 'Protected signing directory'
+          }

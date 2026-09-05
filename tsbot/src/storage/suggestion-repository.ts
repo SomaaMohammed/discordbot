@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   DELIVERY_STATES,
@@ -88,7 +88,7 @@ const MAX_EVENTS_PER_SUGGESTION = 100;
 /** Tenant-bound persistence and conditional transitions for suggestions. */
 export class SuggestionRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 

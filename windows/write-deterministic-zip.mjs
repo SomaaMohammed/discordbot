@@ -5,7 +5,7 @@ import zlib from "node:zlib";
 const [sourceArgument, archiveArgument] = process.argv.slice(2);
 if (!sourceArgument || !archiveArgument || process.argv.length !== 4) {
   throw new Error(
-    "Usage: node write-deterministic-zip.mjs <source-directory> <archive.zip>",
+    "Usage: bun write-deterministic-zip.mjs <source-directory> <archive.zip>",
   );
 }
 

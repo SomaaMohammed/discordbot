@@ -322,7 +322,9 @@ export function buildVotingPanelEmbed(panel: VotingPanelView): EmbedBuilder {
   const displayTitle = panel.title ?? panel.question;
   const metadata = [
     formatStatus(panel.status),
-    panel.multiSelect ? "Choose multiple" : "Choose one",
+    panel.pollType === "custom" && panel.multiSelect
+      ? "Choose multiple"
+      : "Choose one",
     panel.status === "active"
       ? panel.deadlineAt
         ? `Ends <t:${toUnixSeconds(panel.deadlineAt)}:R>`
@@ -614,7 +616,7 @@ function votingFooter(panel: VotingPanelView): string {
   if (panel.status !== "active") {
     return "How to use: this vote is closed; review the results above.";
   }
-  return panel.multiSelect
+  return panel.pollType === "custom" && panel.multiSelect
     ? "How to use: select one or more options, then use View voters to inspect selections."
     : "How to use: select an option, then use View voters to inspect selections.";
 }

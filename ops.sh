@@ -15,6 +15,7 @@ DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
 DIRTY_POLICY="${DIRTY_POLICY:-refuse}"
 LOCK_FILE="${LOCK_FILE:-.superior-ops.lock}"
 DB_FILE_EXPLICIT=0
+BUN_EXECUTABLE=""
 [[ -n "${DB_FILE+x}" ]] && DB_FILE_EXPLICIT=1
 
 die() {
@@ -82,7 +83,7 @@ refuse_stranded_legacy_database() {
   # It is never opened, renamed, or altered here.
   local old_default="$APP_DIR/court.db"
   if [[ -e "$old_default" ]]; then
-    die "Refusing an implicit superior.db while a legacy-named database exists. Set DB_FILE explicitly, back it up, and run the documented upgrade to schema v10."
+    die "Refusing an implicit superior.db while a legacy-named database exists. Set DB_FILE explicitly, back it up, and run the documented upgrade to schema v11."
   fi
 }
 
@@ -103,13 +104,14 @@ resolve_runtime_db_file() {
   export DB_FILE
 }
 
-require_supported_node() {
-  local version
-  version="$(node -p 'process.versions.node')"
-  local major minor
-  IFS=. read -r major minor _ <<<"$version"
-  if (( major < 22 || (major == 22 && minor < 14) )); then
-    die "Node.js 22.14.0 or newer is required; found $version"
+require_supported_bun() {
+  BUN_EXECUTABLE="$(command -v bun || true)"
+  [[ -n "$BUN_EXECUTABLE" && -x "$BUN_EXECUTABLE" ]] || die "Bun 1.4.0 or newer is required"
+  local version major minor patch
+  version="$("$BUN_EXECUTABLE" --version)"
+  IFS=. read -r major minor patch <<<"$version"
+  if (( major < 1 || (major == 1 && minor < 4) )); then
+    die "Bun 1.4.0 or newer is required; found $version"
   fi
 }
 
@@ -182,33 +184,33 @@ restart_service() {
 }
 
 ensure_production_build() {
-  [[ -f "$TSBOT_DIR/dist/src/index.js" ]] || die "Production build is missing; run npm run build"
+  [[ -f "$TSBOT_DIR/dist/src/index.js" ]] || die "Production build is missing; run bun run build"
 }
 
 validate_database() {
   local database="$1"
-  local expected="${2:-10}"
-  node "$TSBOT_DIR/dist/src/storage/check-cli.js" --db "$database" --expect "$expected"
+  local expected="${2:-11}"
+  "$BUN_EXECUTABLE" --no-env-file "$TSBOT_DIR/dist/src/storage/check-cli.js" --db "$database" --expect "$expected"
 }
 
 create_database_backup() {
-  local expected="${1:-10}"
+  local expected="${1:-11}"
   [[ -f "$DB_FILE" ]] || die "Database does not exist: $DB_FILE"
   mkdir -p -- "$BACKUP_DIR"
   local destination
   destination="$BACKUP_DIR/superior-schema${expected}-$(date -u +%Y%m%dT%H%M%SZ).db"
-  node "$TSBOT_DIR/dist/src/storage/backup-cli.js" \
+  "$BUN_EXECUTABLE" --no-env-file "$TSBOT_DIR/dist/src/storage/backup-cli.js" \
     --db "$DB_FILE" --out "$destination" --expect "$expected"
   chmod 600 -- "$destination"
   validate_database "$destination" "$expected"
   note "Validated backup created: $destination"
 }
 
-migrate_database_to_v10() {
+migrate_database_to_v11() {
   local source_schema="${1:-9}"
   prepare_operation_paths
   resolve_runtime_db_file
-  require_supported_node
+  require_supported_bun
   acquire_operation_lock
   ensure_production_build
   validate_database "$DB_FILE" "$source_schema"
@@ -217,25 +219,25 @@ migrate_database_to_v10() {
   (( was_active == 0 )) || stop_service
   restrict_live_database_permissions "$DB_FILE"
   create_database_backup "$source_schema"
-  if ! node "$TSBOT_DIR/dist/src/storage/migrate-cli.js" --db "$DB_FILE"; then
+  if ! "$BUN_EXECUTABLE" --no-env-file "$TSBOT_DIR/dist/src/storage/migrate-cli.js" --db "$DB_FILE"; then
     die "Migration failed and rolled back; the validated schema-v${source_schema} backup was retained and the service remains stopped"
     return 1
   fi
-  validate_database "$DB_FILE" 10
+  validate_database "$DB_FILE" 11
   restrict_live_database_permissions "$DB_FILE"
   (( was_active == 0 )) || start_service
-  note "Database migration completed and validated at schema 10"
+  note "Database migration completed and validated at schema 11"
 }
 
 restore_database() {
   local source="${1:-}"
   [[ -n "$source" ]] || {
-    die "Usage: ops.sh restore <validated-schema10-backup>"
+    die "Usage: ops.sh restore <validated-schema11-backup>"
     return 1
   }
   prepare_operation_paths
   resolve_runtime_db_file
-  require_supported_node
+  require_supported_bun
   acquire_operation_lock
   ensure_production_build
   source="$(absolute_from "$APP_DIR" "$source")"
@@ -258,12 +260,12 @@ restore_database() {
     die "Restore workspace already exists"
     return 1
   fi
-  node "$TSBOT_DIR/dist/src/storage/backup-cli.js" \
-    --db "$source" --out "$candidate" --expect 10
+  "$BUN_EXECUTABLE" --no-env-file "$TSBOT_DIR/dist/src/storage/backup-cli.js" \
+    --db "$source" --out "$candidate" --expect 11
   chmod 600 -- "$candidate"
-  validate_database "$candidate" 10 || {
+  validate_database "$candidate" 11 || {
     rm -f -- "$candidate"
-    die "Restore source copy failed schema-v10 validation"
+    die "Restore source copy failed schema-v11 validation"
     return 1
   }
 
@@ -298,7 +300,7 @@ restore_database() {
       install_failed=1
     fi
   fi
-  if (( install_failed == 0 )) && ! validate_database "$DB_FILE" 10; then
+  if (( install_failed == 0 )) && ! validate_database "$DB_FILE" 11; then
     install_failed=1
   fi
   if (( install_failed == 1 )); then
@@ -313,7 +315,7 @@ restore_database() {
         recovery_failed=1
       fi
     done
-    if (( had_live_main == 1 )) && ! validate_database "$DB_FILE" 10; then
+    if (( had_live_main == 1 )) && ! validate_database "$DB_FILE" 11; then
       recovery_failed=1
     fi
     if (( recovery_failed == 1 )); then
@@ -332,23 +334,23 @@ restore_database() {
 rollout() {
   prepare_operation_paths
   resolve_runtime_db_file
-  require_supported_node
+  require_supported_bun
   acquire_operation_lock
   cd -- "$APP_DIR"
   ensure_clean_or_handle_changes "$DIRTY_POLICY"
   git fetch --no-tags origin "refs/heads/$DEPLOY_BRANCH"
   fast_forward_fetched_branch
   cd -- "$TSBOT_DIR"
-  npm ci
-  npm run format:check
-  npm run typecheck
-  npm test
-  npm run build
+  "$BUN_EXECUTABLE" install --frozen-lockfile
+  "$BUN_EXECUTABLE" run format:check
+  "$BUN_EXECUTABLE" run typecheck
+  "$BUN_EXECUTABLE" run test
+  "$BUN_EXECUTABLE" run build
   cd -- "$APP_DIR"
   if [[ -f "$DB_FILE" ]]; then
-    validate_database "$DB_FILE" 10 || die "Rollout refuses non-v10 data; use the explicit migration workflow first"
+    validate_database "$DB_FILE" 11 || die "Rollout refuses non-v11 data; use the explicit migration workflow first"
     restrict_live_database_permissions "$DB_FILE"
-    create_database_backup 10
+    create_database_backup 11
   fi
   restart_service
   note "Rollout completed"
@@ -357,11 +359,12 @@ rollout() {
 show_status() {
   prepare_operation_paths
   resolve_runtime_db_file
+  require_supported_bun
   command -v systemctl >/dev/null 2>&1 && systemctl --no-pager status "$SERVICE_NAME" || true
   if [[ -f "$DB_FILE" && -f "$TSBOT_DIR/dist/src/storage/check-cli.js" ]]; then
-    validate_database "$DB_FILE" 10
+    validate_database "$DB_FILE" 11
   else
-    note "No schema-v10 database is currently available to validate."
+    note "No schema-v11 database is currently available to validate."
   fi
 }
 
@@ -374,19 +377,20 @@ usage() {
   cat <<'USAGE'
 Usage: ./ops.sh <command>
 
-  status                 Show service status and validate schema 10
+  status                 Show service status and validate schema 11
   start|stop|restart     Control the configured systemd service
   logs                   Show recent service logs
-  backup                 Create and validate a private schema-v10 backup
-  restore <file>         Atomically restore a validated schema-v10 backup
-  migrate-v9             Back up and transactionally migrate schema v9 to v10
-  migrate-v8             Back up and transactionally migrate schema v8 to v10
-  migrate-v7             Back up and transactionally migrate schema v7 to v10
-  migrate-v6             Back up and transactionally migrate schema v6 to v10
-  migrate-v5             Back up and transactionally migrate schema v5 to v10
-  migrate-v4             Back up and transactionally migrate schema v4 to v10
-  migrate-v3             Back up and transactionally migrate schema v3 to v10
-  migrate-v2             Back up and transactionally migrate schema v2 to v10
+  backup                 Create and validate a private schema-v11 backup
+  restore <file>         Atomically restore a validated schema-v11 backup
+  migrate-v10            Back up and transactionally migrate schema v10 to v11
+  migrate-v9             Back up and transactionally migrate schema v9 to v11
+  migrate-v8             Back up and transactionally migrate schema v8 to v11
+  migrate-v7             Back up and transactionally migrate schema v7 to v11
+  migrate-v6             Back up and transactionally migrate schema v6 to v11
+  migrate-v5             Back up and transactionally migrate schema v5 to v11
+  migrate-v4             Back up and transactionally migrate schema v4 to v11
+  migrate-v3             Back up and transactionally migrate schema v3 to v11
+  migrate-v2             Back up and transactionally migrate schema v2 to v11
   rollout                Fast-forward, validate, build, back up, and restart
 
 Environment selectors: APP_DIR, TSBOT_DIR, ENV_FILE, DB_FILE, BACKUP_DIR,
@@ -405,20 +409,21 @@ main() {
     backup)
       prepare_operation_paths
       resolve_runtime_db_file
-      require_supported_node
+      require_supported_bun
       acquire_operation_lock
       ensure_production_build
-      create_database_backup 10
+      create_database_backup 11
       ;;
     restore) shift; restore_database "${1:-}" ;;
-    migrate-v9) migrate_database_to_v10 9 ;;
-    migrate-v8) migrate_database_to_v10 8 ;;
-    migrate-v7) migrate_database_to_v10 7 ;;
-    migrate-v6) migrate_database_to_v10 6 ;;
-    migrate-v5) migrate_database_to_v10 5 ;;
-    migrate-v4) migrate_database_to_v10 4 ;;
-    migrate-v3) migrate_database_to_v10 3 ;;
-    migrate-v2) migrate_database_to_v10 2 ;;
+    migrate-v10) migrate_database_to_v11 10 ;;
+    migrate-v9) migrate_database_to_v11 9 ;;
+    migrate-v8) migrate_database_to_v11 8 ;;
+    migrate-v7) migrate_database_to_v11 7 ;;
+    migrate-v6) migrate_database_to_v11 6 ;;
+    migrate-v5) migrate_database_to_v11 5 ;;
+    migrate-v4) migrate_database_to_v11 4 ;;
+    migrate-v3) migrate_database_to_v11 3 ;;
+    migrate-v2) migrate_database_to_v11 2 ;;
     rollout) rollout ;;
     help|-h|--help|"") usage ;;
     *) usage >&2; die "Unknown operation: $command" ;;

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
+import Database from "../src/storage/database.js";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createDefaultGuildSettings,
@@ -299,7 +299,7 @@ describe("explicit schema migration to v11", () => {
     15_000,
   );
 
-  it("dry-runs the complete exact v9-to-v10 transaction", () => {
+  it("dry-runs the complete exact v9-to-v11 transaction", () => {
     const dbFile = fixturePath("v9-dry-run.db");
     createV9Fixture(dbFile);
     const before = fs.readFileSync(dbFile);
@@ -341,7 +341,7 @@ describe("explicit schema migration to v11", () => {
     15_000,
   );
 
-  it("dry-runs exact v8 through the full v10 transaction", () => {
+  it("dry-runs exact v8 through the full v11 transaction", () => {
     const dbFile = fixturePath("v8-dry-run.db");
     createV8Fixture(dbFile);
     const before = fs.readFileSync(dbFile);
@@ -931,7 +931,7 @@ describe("explicit schema migration to v11", () => {
     },
   );
 
-  it("additively migrates an exact schema-v6 database to v10", () => {
+  it("additively migrates an exact schema-v6 database to v11", () => {
     const dbFile = fixturePath("v6.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -1072,7 +1072,7 @@ describe("explicit schema migration to v11", () => {
     );
   });
 
-  it("dry-runs schema v6 to v10 without modifying the source", () => {
+  it("dry-runs schema v6 to v11 without modifying the source", () => {
     const dbFile = fixturePath("v6-dry-run.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -1091,7 +1091,7 @@ describe("explicit schema migration to v11", () => {
     );
   });
 
-  it("additively migrates an exact schema-v5 database to v10", () => {
+  it("additively migrates an exact schema-v5 database to v11", () => {
     const dbFile = fixturePath("v5.db");
     const db = new Database(dbFile);
     db.pragma("foreign_keys = ON");
@@ -1258,9 +1258,7 @@ const PRESERVED_V4_TICKET_COLUMNS = `
   failure_reason, created_at, updated_at, closing_at, closed_at
 `;
 
-function readPreservedV4Tickets(
-  db: Database.Database,
-): Array<Record<string, unknown>> {
+function readPreservedV4Tickets(db: Database): Array<Record<string, unknown>> {
   return db
     .prepare(
       `SELECT ${PRESERVED_V4_TICKET_COLUMNS}
@@ -1269,20 +1267,14 @@ function readPreservedV4Tickets(
     .all() as Array<Record<string, unknown>>;
 }
 
-function readSettings(
-  db: Database.Database,
-  guildId: string,
-): Record<string, unknown> {
+function readSettings(db: Database, guildId: string): Record<string, unknown> {
   const row = db
     .prepare("SELECT settings_json FROM guild_settings WHERE guild_id = ?")
     .get(guildId) as { settings_json: string };
   return JSON.parse(row.settings_json) as Record<string, unknown>;
 }
 
-function schemaObjects(
-  db: Database.Database,
-  type: "table" | "index",
-): string[] {
+function schemaObjects(db: Database, type: "table" | "index"): string[] {
   return (
     db
       .prepare(

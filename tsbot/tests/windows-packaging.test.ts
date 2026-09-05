@@ -15,7 +15,7 @@ function read(relativePath: string): string {
   return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 }
 
-describe("Windows portable packaging", () => {
+describe("Windows Bun packaging", () => {
   it("does not publish the private watcher in user-facing documentation", () => {
     const publicFiles = [
       "README.md",
@@ -27,8 +27,6 @@ describe("Windows portable packaging", () => {
           withFileTypes: true,
         })
         .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-        // The handoff guide is internal agent documentation, not a public
-        // release document and may describe private operator-only features.
         .filter((entry) => entry.name !== "agent-guide.md")
         .map((entry) =>
           path.relative(repoRoot, path.join(entry.parentPath, entry.name)),
@@ -36,42 +34,40 @@ describe("Windows portable packaging", () => {
     ];
 
     for (const publicFile of publicFiles) {
-      expect(read(publicFile), publicFile).not.toMatch(/mudae/i);
+      expect(read(publicFile), publicFile).not.toMatch(/mudae/iu);
     }
   });
 
-  it("keeps public package identity and version metadata synchronized", () => {
+  it("keeps package identity and version metadata synchronized", () => {
     const packageJson = JSON.parse(read("tsbot/package.json")) as {
       name: string;
       version: string;
       private?: boolean;
-    };
-    const packageLock = JSON.parse(read("tsbot/package-lock.json")) as {
-      name: string;
-      version: string;
-      packages: Record<string, { name?: string; version?: string }>;
+      packageManager?: string;
+      engines?: Record<string, string>;
     };
     const constants = read("tsbot/src/constants.ts");
-    const generatedVersion = read("tsbot/src/generated-version.ts");
+    const bunLock = read("tsbot/bun.lock");
 
     expect(packageJson).toMatchObject({
       name: "superior-discord-bot",
       private: true,
+      packageManager: "bun@1.4.0",
+      engines: { bun: ">=1.4.0" },
     });
-    expect(packageJson.version).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(packageLock).toMatchObject({
-      name: packageJson.name,
-      version: packageJson.version,
-    });
-    expect(packageLock.packages[""]).toMatchObject({
-      name: packageJson.name,
-      version: packageJson.version,
-    });
-    expect(generatedVersion).toContain(
+    expect(packageJson.version).toMatch(/^\d+\.\d+\.\d+$/u);
+    expect(Number(packageJson.version.split(".")[0])).toBeGreaterThanOrEqual(8);
+    expect(constants).toContain(
       `export const PACKAGE_VERSION = "${packageJson.version}"`,
     );
-    expect(constants).toContain(
-      'export { PACKAGE_VERSION } from "./generated-version.js"',
+    expect(fs.existsSync(path.join(tsbotRoot, "package-lock.json"))).toBe(
+      false,
+    );
+    expect(
+      fs.existsSync(path.join(tsbotRoot, "src", "generated-version.ts")),
+    ).toBe(false);
+    expect(bunLock).not.toMatch(
+      /better-sqlite3@|@types\/better-sqlite3@|^\s*"tsx":\s*\["tsx@/mu,
     );
 
     const verification = spawnSync(
@@ -85,33 +81,25 @@ describe("Windows portable packaging", () => {
     );
   });
 
-  it("pins the bundled SQLite dependency without prebuild-install", () => {
+  it("uses bun:sqlite without compatibility dependencies or aliases", () => {
     const packageJson = JSON.parse(read("tsbot/package.json")) as {
       dependencies: Record<string, string>;
       devDependencies: Record<string, string>;
     };
-    const packageLock = JSON.parse(read("tsbot/package-lock.json")) as {
-      packages: Record<
-        string,
-        { version?: string; dependencies?: Record<string, string> }
-      >;
-    };
+    const database = read("tsbot/src/storage/database.ts");
+    const vitestConfig = read("tsbot/vitest.config.ts");
 
-    expect(packageJson.dependencies["better-sqlite3"]).toBe("13.0.3");
-    expect(packageJson.devDependencies["@types/better-sqlite3"]).toBe("9.6.0");
-    expect(packageLock.packages["node_modules/better-sqlite3"]).toMatchObject({
-      version: "13.0.3",
-      dependencies: { "node-addon-api": "^8.0.0" },
-    });
-    expect(
-      packageLock.packages["node_modules/@types/better-sqlite3"],
-    ).toMatchObject({ version: "9.6.0" });
-    expect(
-      packageLock.packages["node_modules/prebuild-install"],
-    ).toBeUndefined();
+    expect(packageJson.dependencies).not.toHaveProperty("better-sqlite3");
+    expect(packageJson.devDependencies).not.toHaveProperty(
+      "@types/better-sqlite3",
+    );
+    expect(packageJson.devDependencies).not.toHaveProperty("tsx");
+    expect(database).toContain('from "bun:sqlite"');
+    expect(database).not.toMatch(/better-sqlite3|createRequire|fallback/iu);
+    expect(vitestConfig).not.toMatch(/alias|better-sqlite3/iu);
   });
 
-  it("provides resumable version and release workflows", () => {
+  it("runs source, validation, and release workflows through Bun and pwsh", () => {
     const packageJson = JSON.parse(read("tsbot/package.json")) as {
       scripts: Record<string, string>;
     };
@@ -133,48 +121,76 @@ describe("Windows portable packaging", () => {
     );
     expect(packageJson.scripts.check).toContain("docs:links");
     expect(packageJson.scripts.check).toContain("powershell:check");
-    expect(packageJson.scripts["version:patch"]).toContain("patch");
-    expect(packageJson.scripts["version:minor"]).toContain("minor");
-    expect(packageJson.scripts["version:major"]).toContain("major");
+    expect(packageJson.scripts.check).toContain("runtime:check");
+    expect(packageJson.scripts.check).toContain("test:policy");
+    expect(packageJson.scripts.check).toContain("syntax:check");
+    expect(packageJson.scripts["test:focused"]).toContain("test:migration");
+    expect(packageJson.scripts["test:focused"]).toContain("test:backup");
+    expect(packageJson.scripts["test:focused"]).toContain("test:doctor");
+    expect(packageJson.scripts["test:focused"]).toContain("test:rotation");
+    expect(packageJson.scripts["test:focused"]).toContain("test:telemetry");
+    expect(packageJson.scripts["test:focused"]).toContain("test:row-decoder");
     expect(packageJson.scripts["release:build"]).toContain("release-build.ps1");
-    expect(packageJson.scripts["release:patch"]).toContain("release:build");
-    expect(packageJson.scripts["release:minor"]).toContain("release:build");
-    expect(packageJson.scripts["release:major"]).toContain("release:build");
+    expect(packageJson.scripts["package:win"]).toContain(
+      "windows/.artifacts/development",
+    );
+    expect(packageJson.scripts["package:win"]).not.toMatch(
+      /(?:^|\s)-(?:Standalone|Updater)Output\s+(?:SuperiorBot|Update)\.exe(?:\s|$)/u,
+    );
+    for (const script of Object.values(packageJson.scripts)) {
+      expect(script).not.toMatch(/\b(?:node|npm|npx|tsx)(?:\.cmd|\.exe)?\b/iu);
+    }
     for (const scriptName of [
       "package:win",
       "package:win:verify",
       "artifact:verify",
       "release:build",
     ]) {
-      expect(packageJson.scripts[scriptName]).toMatch(/^pwsh\b/);
-      expect(packageJson.scripts[scriptName]).not.toMatch(/^powershell\b/i);
+      expect(packageJson.scripts[scriptName]).toMatch(/^pwsh\b/u);
+      expect(packageJson.scripts[scriptName]).not.toMatch(/^powershell\b/iu);
     }
+
     expect(powershellCheck).toContain('["pwsh.exe"]');
     expect(powershellCheck).not.toContain('"powershell.exe"');
     for (const scriptName of fs
       .readdirSync(path.join(repoRoot, "windows"))
       .filter((entry) => entry.endsWith(".ps1"))) {
       expect(read(path.join("windows", scriptName)), scriptName).toMatch(
-        /^#Requires -Version 7\.0/,
+        /^#Requires -Version 7\.0/u,
       );
     }
     expect(versionTool).toContain("packageJson.version = version");
-    expect(releaseBuilder).toContain("format:check");
-    expect(releaseBuilder).toContain("docs:links");
-    expect(releaseBuilder).toContain("powershell:check");
-    expect(releaseBuilder).toContain("security:check");
-    expect(releaseBuilder).toContain("package:win:verify");
-    expect(releaseBuilder).toContain("test-portable.ps1");
-    expect(releaseBuilder).toContain("test-standalone.ps1");
+    expect(versionTool).toContain("PACKAGE_VERSION");
+    for (const gate of [
+      "format:check",
+      "docs:links",
+      "powershell:check",
+      "security:check",
+      "runtime:check",
+      "test:policy",
+      "test:focused",
+      "syntax:check",
+      "package:win:verify",
+      "test-portable.ps1",
+      "test-standalone.ps1",
+    ]) {
+      expect(releaseBuilder).toContain(gate);
+    }
+    expect(releaseBuilder).toContain("bun.exe");
+    expect(releaseBuilder).toContain("-CommandType Application");
+    expect(releaseBuilder).toContain("-OutputDirectory $FinalRelease");
     expect(releaseVerifier).toContain("sourceSha256");
     expect(releaseVerifier).toContain("--diagnostics");
-    expect(packageAndRun).toContain("npm.cmd");
+    expect(packageAndRun).toContain("bun.exe");
+    expect(packageAndRun).toContain("-CommandType Application");
+    expect(packageAndRun).not.toMatch(/npm\.cmd|node\.exe|tsx/iu);
     expect(packageAndRun).toContain("--source");
+    expect(packageAndRun).toContain(".artifacts\\development");
     expect(packageAndRunWrapper).toContain(
       "%LOCALAPPDATA%\\Microsoft\\WindowsApps\\pwsh.exe",
     );
     expect(packageAndRunWrapper).toContain("package-and-run.ps1");
-    expect(packageAndRunWrapper).not.toMatch(/powershell\.exe/i);
+    expect(packageAndRunWrapper).not.toMatch(/powershell\.exe/iu);
   });
 
   it("builds only production source into a freshly cleaned dist directory", () => {
@@ -189,148 +205,279 @@ describe("Windows portable packaging", () => {
 
     expect(packageJson.scripts.clean).toContain("clean-dist.mjs");
     expect(packageJson.scripts["db:backup"]).toBe(
-      "tsx src/storage/backup-cli.ts",
+      "bun --no-env-file src/storage/backup-cli.ts",
     );
-    expect(packageJson.scripts.build).toBe(
-      "npm run version:generate && npm run clean && tsc -p tsconfig.build.json",
+    expect(packageJson.scripts.build).toContain("bun run version:generate");
+    expect(packageJson.scripts.build).toContain(
+      "bun --no-env-file ./node_modules/typescript/bin/tsc",
+    );
+    expect(packageJson.scripts["syntax:check"]).toContain(
+      "check-built-javascript.mjs",
     );
     expect(buildConfig.include).toEqual(["src/**/*.ts"]);
     expect(buildConfig.exclude).toContain("tests");
-    expect(buildConfig.compilerOptions.types).toEqual(["node"]);
+    expect(buildConfig.compilerOptions.types).toEqual(["bun"]);
     expect(read(".env.example")).not.toMatch(
-      /BOT_OPERATOR_USER_IDS|SCHEDULER_CONCURRENCY/,
+      /BOT_OPERATOR_USER_IDS|SCHEDULER_CONCURRENCY/u,
     );
   });
 
-  it("pins, checks, and packages the Windows x64 runtime and native addon", () => {
+  it("packages a compiled Bun runtime inside the hardened launchers", () => {
     const builder = read("windows/build-portable.ps1");
+    const sourceIdentity = read("windows/compute-source-identity.mjs");
     const smokeTest = read("windows/test-portable.ps1");
+    const standaloneSmokeTest = read("windows/test-standalone.ps1");
     const reproducibilityTest = read("windows/test-reproducible.ps1");
     const launcher = read("windows/launcher/Program.cs");
     const standaloneLauncher = read("windows/standalone/Program.cs");
-    const standaloneSmokeTest = read("windows/test-standalone.ps1");
-    const fallback = read("windows/templates/Start Superior Bot.cmd");
     const launcherSupport = read("windows/launcher/LauncherSupport.cs");
-    const diagnostics = read("windows/diagnostics.mjs");
+    const signalHarness = read("windows/launcher/ConsoleSignalHarness.cs");
+    const config = read("tsbot/src/config.ts");
+    const runtime = read("tsbot/src/windows-runtime.ts");
+    const updater = read("windows/updater/Program.cs");
+    const releaseBuilder = read("windows/release-build.ps1");
     const releaseVerifier = read("windows/verify-release.ps1");
+    const signing = read("windows/signing.ps1");
+    const signingTest = read("windows/test-signing.ps1");
+    const authenticodeSupport = read("windows/launcher/AuthenticodeSupport.cs");
     const hashUtilities = read("windows/hash-utils.ps1");
+    const pathSafety = read("windows/path-safety.ps1");
+    const pathSafetyTest = read("windows/test-path-safety.ps1");
+    const releaseVerifierTest = read("windows/test-release-verifier.ps1");
+    const bunEnvironment = read("windows/bun-environment.ps1");
+    const cleanDist = read("windows/clean-dist.mjs");
+    const fallback = read("windows/templates/Start Superior Bot.cmd");
 
-    expect(builder).toContain('$NodeVersion = "22.23.2"');
-    expect(builder).toContain(
-      '$NodeArchiveSha256 = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"',
-    );
-    expect(builder).toContain('$CompilerToolsetVersion = "4.12.0"');
-    expect(builder).toContain(
-      '$CompilerToolsetPackageSha256 = "fe24ef31a6ffcb7c49383d2fd362763dee291ad9b9d98cc0c19ef80203b99ebc"',
-    );
-    expect(builder).toContain('$ReferenceAssembliesVersion = "1.0.3"');
-    expect(builder).toContain(
-      '$ReferenceAssembliesPackageSha256 = "8a7e348538e7eb91351696911689f49e3d4f63f8bab517432bbe159b8b1104a2"',
-    );
-    expect(builder).toContain(
-      '$BetterSqlite3BinarySha256 = "e21e5efd71fba66578e95b62554d9028064a80dafd7221bf8a8ef155de8d240a"',
-    );
-    expect(builder).toContain("Get-Sha256Hex");
-    expect(hashUtilities).toContain(
-      "[System.Security.Cryptography.SHA256]::Create()",
-    );
-    expect(builder).toContain('"--omit=dev"');
-    expect(builder).toContain('"--ignore-scripts"');
-    expect(builder).not.toContain('"--ignore-scripts=false"');
+    expect(builder).toContain('$BunVersion = "1.4.0"');
+    expect(builder).toContain("Get-Command bun.exe");
+    expect(builder).toContain("-CommandType Application");
+    expect(builder).toContain('"--compile"');
+    expect(builder).toContain('"--target=bun-windows-x64-baseline"');
+    expect(builder).toContain('"--no-compile-autoload-dotenv"');
+    expect(builder).toContain('"--no-compile-autoload-bunfig"');
+    expect(builder).toContain("windows-runtime.ts");
+    expect(builder).toContain("SuperiorBot.Runtime.exe");
+    for (const metadata of [
+      "BUN_VERSION",
+      "BUN_EXECUTABLE_SHA256",
+      "COMPILED_RUNTIME_SHA256",
+      "BUN_LOCK_SHA256",
+      "SOURCE_SHA256",
+    ]) {
+      expect(builder).toContain(metadata);
+    }
+    expect(builder).not.toMatch(/\$NodeVersion|NodeArchive|BetterSqlite3/iu);
+    expect(builder).toContain("node_modules|better-sqlite3");
     expect(builder).toContain('"/platform:x64"');
     expect(builder).toContain('"/noconfig"');
     expect(builder).toContain('"/nostdlib+"');
     expect(builder).toContain('"/deterministic+"');
     expect(builder).toContain('"/pathmap:');
     expect(builder).not.toContain("$env:WINDIR");
-    expect(builder).toContain('"win32-x64.node"');
-    for (const irrelevantPrebuild of [
-      "darwin-arm64.node",
-      "darwin-x64.node",
-      "linux-arm64.node",
-      "linux-x64.node",
-      "linuxmusl-arm64.node",
-      "linuxmusl-x64.node",
-      "win32-arm64.node",
-    ]) {
-      expect(builder).toContain(`"${irrelevantPrebuild}"`);
-    }
-    expect(builder).toContain("Remove-Item -LiteralPath");
-    expect(builder).not.toContain('"better_sqlite3.node"');
     expect(builder).toContain("write-deterministic-zip.mjs");
     expect(builder).toContain("MANIFEST.sha256");
     expect(builder).toContain("SuperiorBot.Payload.zip");
     expect(builder).toContain("$StandaloneOutput");
+    expect(builder).toContain("$UpdaterOutput");
     expect(builder).toContain("AssemblyFileVersion");
     expect(builder).toContain("AssemblyInformationalVersion");
-    expect(builder).toContain("SOURCE_SHA256");
-    expect(builder).toContain("diagnostics.mjs");
     expect(builder).toContain("Archive entry escapes its extraction directory");
     expect(builder).toContain("Portable staging contains reparse points");
-    expect(reproducibilityTest).toContain(
-      "Portable rebuild was not byte-for-byte reproducible",
-    );
-    expect(reproducibilityTest).toContain(
-      "Standalone rebuild was not byte-for-byte reproducible",
+    expect(builder).toContain("exact release inventory");
+    expect(builder).toContain('"bun.exe"');
+    expect(builder).toContain("Enter-BunBuildEnvironment");
+    expect(builder).toContain("Initialize-ReleaseSigning");
+    expect(builder).toContain("Invoke-ReleaseSignature");
+    expect(builder).toContain("SIGNATURE_STATUS");
+    expect(builder).toContain("SIGNING_SUBJECT");
+    expect(builder).toContain("SIGNING_THUMBPRINT");
+    expect(builder).toContain("TIMESTAMP_STATUS");
+    expect(builder).toContain("AllowUnsignedDevelopment");
+    expect(builder).toContain("Assert-PathTreeHasNoReparsePoint");
+    expect(sourceIdentity).toContain("tsbot/bun.lock");
+    expect(sourceIdentity).toContain("scripts/version.mjs");
+    expect(sourceIdentity).toContain("windows/launcher/AuthenticodeSupport.cs");
+    expect(sourceIdentity).toContain("windows/signing.ps1");
+    expect(sourceIdentity).toContain("windows/verify-release.ps1");
+    expect(sourceIdentity).toContain("windows/path-safety.ps1");
+    expect(sourceIdentity).toContain("windows/bun-environment.ps1");
+    expect(sourceIdentity).toContain("fs.lstatSync");
+    expect(sourceIdentity).toContain("status.isSymbolicLink()");
+    expect(sourceIdentity).not.toContain("package-lock.json");
+    expect(hashUtilities).toContain(
+      "[System.Security.Cryptography.SHA256]::Create()",
     );
 
     for (const source of [launcher, standaloneLauncher]) {
       expect(source).toContain("--version");
       expect(source).toContain("--check");
       expect(source).toContain("--diagnostics");
+      expect(source).toContain("--offline-smoke");
+      expect(source).toContain("--doctor");
+      expect(source).toContain("--checkpoint");
+      expect(source).toContain("--backup-rotate");
+      expect(source).toContain("SUPERIOR_TEST_MODE");
       expect(source).toContain("SUPERIOR_AUTO_MIGRATE");
+      expect(source).toContain("SUPERIOR_APPLICATION_ROOT");
+      expect(source).toContain("SuperiorBot.Runtime.exe");
+      expect(source).toContain("SanitizeBunRuntimeEnvironment");
+      expect(source).toContain("SUPERIOR_DATABASE_LOCK_PATH");
+      expect(source).not.toMatch(/node\.exe|node_modules|better-sqlite3/iu);
     }
     expect(fallback).toContain('"%~dp0SuperiorBot.exe" "%~1"');
     expect(fallback).toContain("--diagnostics");
-    expect(launcherSupport).toContain("SuperiorInstanceGuard");
-    expect(launcherSupport).toContain("AbandonedMutexException");
-    expect(launcherSupport).toContain('return @"Global\\SuperiorBot-"');
-    expect(launcherSupport).toContain("ValidatePortableManifest");
-    expect(launcherSupport).toContain("ValidateTreeHasNoReparsePoints");
-    expect(diagnostics).toContain("completed without Discord login");
-    expect(diagnostics).not.toContain("fileEnvironment.DISCORD_TOKEN");
-    expect(smokeTest).toContain("no Discord login was attempted");
-    expect(smokeTest).toContain("prebuilds\\win32-x64.node");
-    expect(smokeTest).not.toContain("better_sqlite3.node");
-    expect(smokeTest).toContain("MANIFEST.sha256");
-    expect(smokeTest).toContain("undeclared executable payload file");
-    for (const identityCheck of [
-      smokeTest,
-      standaloneSmokeTest,
-      releaseVerifier,
+
+    for (const hardening of [
+      "SuperiorInstanceGuard",
+      "AbandonedMutexException",
+      'return @"Global\\SuperiorBot-"',
+      "ValidatePortableManifest",
+      "ValidateTreeHasNoReparsePoints",
+      "RefuseReparsePath",
+      "JobObjectLimitKillOnJobClose",
+      "Console.CancelKeyPress",
     ]) {
-      expect(identityCheck).toContain("ProductVersion -ne");
-      expect(identityCheck).not.toContain("ProductVersion.StartsWith");
+      expect(launcherSupport).toContain(hardening);
     }
-    for (const environmentIsolationCheck of [
-      standaloneSmokeTest,
-      releaseVerifier,
-    ]) {
-      expect(environmentIsolationCheck).toContain(
-        'Remove-Item -LiteralPath "Env:$Name"',
-      );
-      expect(environmentIsolationCheck).not.toContain(
-        'SetEnvironmentVariable($Name, $null, "Process")',
-      );
-    }
-    expect(standaloneLauncher).toContain("SUPERIOR_APPLICATION_ROOT");
     expect(standaloneLauncher).toContain("ExtractArchiveSafely");
     expect(standaloneLauncher).toContain("LocalApplicationData");
+    expect(standaloneLauncher).toContain(
+      "LauncherSupport.ValidateTreeHasNoReparsePoints(resolved)",
+    );
+
+    expect(runtime).toContain('from "./index.js"');
+    expect(runtime).toContain('from "./storage/database.js"');
+    expect(runtime).toContain('emit("sqliteBackend", "bun:sqlite")');
+    expect(runtime).toContain("databaseState=");
+    expect(runtime).toContain("BotStorage");
+    expect(runtime).toContain("requireLauncherLock: true");
+    expect(config).toContain(
+      "packaged Bun runtime requires Windows launcher database-lock attestation",
+    );
+    expect(runtime).not.toMatch(
+      /better-sqlite3|createRequire|synthetic|metric/iu,
+    );
+
+    for (const packagedTest of [smokeTest, standaloneSmokeTest]) {
+      expect(packagedTest).toContain("sqliteBackend=bun:sqlite");
+      expect(packagedTest).toContain("ConsoleSignalHarness.cs");
+      expect(packagedTest).toContain("databaseState=$ExpectedDatabaseState");
+      expect(packagedTest).toContain("SuperiorBot.Runtime.exe");
+      expect(packagedTest).toContain("SUPERIOR_APPLICATION_ROOT");
+      expect(packagedTest).toContain("graceful");
+      expect(packagedTest).toContain("schema=current-v11");
+      expect(packagedTest).toContain("RestrictedPath");
+      expect(packagedTest).toContain('"bun.exe", "node.exe"');
+      expect(packagedTest).toContain("BUN_OPTIONS");
+      expect(packagedTest).toContain("BUN_BE_BUN");
+    }
+    expect(smokeTest).toContain("undeclared executable payload file");
+    expect(smokeTest).toContain("declared external Bun executable");
+    expect(smokeTest).toContain("artifact checksum is required");
+    expect(smokeTest).toContain("MANIFEST.sha256");
+    expect(smokeTest).toContain("Direct packaged runtime bypassed");
+    expect(launcherSupport).toContain(
+      'Path.Combine(applicationRoot, "court.db")',
+    );
+    expect(launcherSupport).toContain("DB_FILE must be set explicitly");
     expect(standaloneSmokeTest).toContain(
-      "Standalone executable, application-root, database-lock, orphan-child job, and native SQLite smoke checks passed.",
+      "Launcher accepted an implicit superior.db beside legacy court.db",
     );
     expect(standaloneSmokeTest).toContain("Another Superior Bot instance");
-    expect(standaloneSmokeTest).toContain("JobSmokeHarness.cs");
-    expect(standaloneSmokeTest).toContain(
-      "Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
-    );
-    expect(standaloneSmokeTest).not.toContain("-OutputType ConsoleApplication");
-    expect(standaloneSmokeTest).toContain(
-      "Stop-Process -Id $JobParent.Id -Force",
-    );
-    expect(launcherSupport).toContain("JobObjectLimitKillOnJobClose");
-    expect(launcherSupport).toContain("Console.CancelKeyPress");
     expect(standaloneSmokeTest).toContain("already using this database");
+    expect(standaloneSmokeTest).toContain("JobSmokeHarness.cs");
+    expect(standaloneSmokeTest).toContain("LegacyUpdateFixture.cs");
+    expect(standaloneSmokeTest).toContain(
+      "7.2.8 to $ExpectedVersion updater smoke",
+    );
+    expect(standaloneSmokeTest).toContain("sqliteBackend=bun:sqlite");
+
+    for (const harnessRequirement of [
+      "CreateProcess",
+      "AttachConsole",
+      "SetConsoleCtrlHandler",
+      "QueryFullProcessImageName",
+      "WaitForSingleObject(childProcess",
+      "StopIfRunning",
+    ]) {
+      expect(signalHarness).toContain(harnessRequirement);
+    }
+    expect(signalHarness).toContain("expectedRuntime");
+
+    expect(updater).toContain("--allow-downgrade");
+    expect(updater).toContain("LauncherSupport.AcquireInstanceGuard");
+    expect(updater).toContain("AssertFileHash");
+    expect(updater).toContain("RefuseReparsePoint");
+    expect(updater).toContain("SHA256.Create()");
+    expect(updater).toContain("AuthenticodeSupport.VerifyFile");
+    expect(updater).toContain("VerifyInstalledExecutablePostcondition");
+    expect(updater).toContain("LauncherSupport.NormalizeRoot");
+    expect(updater.indexOf("RefuseReparsePath(activeUpdater")).toBeLessThan(
+      updater.indexOf("AuthenticodeSupport.VerifyFile(activeUpdater"),
+    );
+    expect(updater.indexOf("RefuseReparsePath(source")).toBeLessThan(
+      updater.indexOf("string sourceVersion = VerifyExecutable("),
+    );
+    expect(updater).toContain(".env, database, and backups were preserved");
+    expect(authenticodeSupport).toContain("WinVerifyTrust");
+    expect(authenticodeSupport).toContain("BuildIdentity.ExpectedPublisher");
+    expect(authenticodeSupport).toContain("BuildIdentity.ExpectedThumbprint");
+    expect(authenticodeSupport).toContain("Rfc3161TimestampOid");
+    expect(signing).toContain("SUPERIOR_SIGNING_PFX_PASSWORD");
+    expect(signing).toContain("Get-AuthenticodeSignature");
+    expect(signing).toContain("TimeStamperCertificate");
+    expect(signingTest).toContain("New-SelfSignedCertificate");
+    expect(signingTest).toContain("wrong publisher");
+    expect(signingTest).toContain("tampered");
+    expect(signingTest).toContain("expired");
+    expect(signingTest).toContain("untrusted");
+    expect(signingTest).toContain("rollback");
+    expect(signingTest).toContain("verify-release.ps1");
+    expect(signingTest).toContain(
+      "same-subject certificate with the wrong thumbprint",
+    );
+    expect(releaseVerifier).toContain("ExpectedSignerThumbprint");
+    expect(releaseVerifier).toContain(
+      "independently configured publisher and thumbprint",
+    );
+    expect(releaseVerifier).toContain(
+      "checksum does not match the published ZIP",
+    );
+    expect(releaseVerifier).toContain("exact release inventory");
+    expect(releaseVerifier).toContain("byte-identical to the updater");
+    expect(releaseVerifier).toContain("embedded payload does not match");
+    expect(releaseVerifier).not.toContain("Expand-Archive");
+    expect(releaseVerifier).toContain("ProductVersion -ne");
+    expect(releaseVerifier).not.toContain("ProductVersion.StartsWith");
+    expect(reproducibilityTest).toContain(
+      "Portable rebuild was not byte-for-byte reproducible",
+    );
+    expect(reproducibilityTest).toContain(
+      "Standalone rebuild was not byte-for-byte reproducible",
+    );
+    expect(reproducibilityTest).toContain(
+      "Updater rebuild was not byte-for-byte reproducible",
+    );
+    expect(reproducibilityTest).toContain("$UpdaterOutput");
+    expect(pathSafety).toContain("Assert-PathHasNoReparsePoint");
+    expect(pathSafety).toContain("Remove-SafeOwnedTree");
+    expect(pathSafetyTest).toContain("outside sentinel");
+    expect(pathSafetyTest).toContain("ItemType Junction");
+    expect(releaseVerifierTest).toContain("missing-sidecar");
+    expect(releaseVerifierTest).toContain("wrong-root");
+    expect(releaseVerifierTest).toContain("missing-inventory");
+    expect(releaseVerifierTest).toContain("duplicate-build-info");
+    expect(releaseVerifierTest).toContain("different-updater");
+    expect(releaseVerifierTest).toContain("different-payload");
+    expect(bunEnvironment).toContain("NODE_OPTIONS");
+    expect(bunEnvironment).toContain('StartsWith("BUN_"');
+    expect(cleanDist).toContain("lstatSync");
+    expect(cleanDist).toContain("isSymbolicLink");
+    expect(cleanDist).toContain("rmdirSync");
+    expect(cleanDist).not.toContain("rmSync");
+    expect(releaseBuilder).not.toContain(
+      "$ExpectedSignerThumbprint = $SigningCertificateThumbprint",
+    );
   });
 
   it("writes identical ZIP bytes across source paths, mtimes, and creation order", () => {
@@ -387,20 +534,37 @@ describe("Windows portable packaging", () => {
     }
   });
 
-  it("builds, smoke-tests, and uploads the portable artifact in CI", () => {
+  it("builds, smoke-tests, and uploads the Bun artifact in CI", () => {
     const workflow = read(".github/workflows/ci.yml");
 
     expect(workflow).toContain("Validate on Linux");
+    expect(workflow).toContain("oven-sh/setup-bun@");
+    expect(workflow).toMatch(/bun-version:\s*["']?1\.4\.0/u);
+    expect(workflow).toContain("bun install --frozen-lockfile");
+    expect(workflow).toContain("bun run test:security");
+    expect(workflow).toContain("scripts/security-check.mjs");
+    expect(workflow).toContain("bun audit --audit-level=high");
+    expect(workflow).toContain("bun run docs:links");
+    expect(workflow).toContain("bun run powershell:check");
+    expect(workflow).toContain("bun run runtime:check");
+    expect(workflow).toContain("bun run test:policy");
+    expect(workflow).toContain("bun run test:focused");
+    expect(workflow).toContain("bun run syntax:check");
     expect(workflow).toContain("bash -n ops.sh");
     expect(workflow).toContain("git diff --check");
-    expect(workflow).toContain("npm run security:check");
-    expect(workflow).toContain("npm run docs:links");
-    expect(workflow).toContain("npm run powershell:check");
-    expect(workflow).toContain("npm run artifact:verify");
     expect(workflow).toContain("Build Windows portable artifact");
-    expect(workflow).toContain("npm run package:win:verify");
+    expect(workflow).toContain("windows/test-reproducible.ps1");
     expect(workflow).toContain("windows/test-portable.ps1");
     expect(workflow).toContain("windows/test-standalone.ps1");
+    expect(workflow).toContain("windows/test-signing.ps1");
+    expect(workflow).toContain("windows/test-path-safety.ps1");
+    expect(workflow).toContain("windows/test-release-verifier.ps1");
+    expect(workflow).toContain("Build and verify signed Windows release");
+    expect(workflow).toContain("WINDOWS_SIGNING_PFX_BASE64");
+    expect(workflow).toContain("WINDOWS_SIGNING_PFX_PASSWORD");
+    expect(workflow).toContain("expected_signer_thumbprint");
+    expect(workflow).toContain("windows/verify-release.ps1");
+    expect(workflow).not.toMatch(/setup-node|npm (?:ci|run|test)/iu);
     expect(workflow).toContain(
       "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
     );
@@ -431,7 +595,7 @@ describe("Windows portable packaging", () => {
       "versionIdentitySources",
     );
     expect(read("tsbot/src/config.ts")).not.toMatch(
-      /process\.env\.(?:BOT_VERSION|npm_package_version)/,
+      /process\.env\.(?:BOT_VERSION|npm_package_version)/u,
     );
     expect(read(".env.example")).not.toContain("BOT_VERSION=");
   });

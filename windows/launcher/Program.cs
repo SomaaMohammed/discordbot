@@ -11,7 +11,7 @@ internal static class Program
         {
             if (args.Length == 1 && LauncherSupport.EqualsOption(args[0], "--help"))
             {
-                Console.WriteLine("SuperiorBot.exe [--check | --diagnostics | --version | --help]");
+                Console.WriteLine("SuperiorBot.exe [--check | --diagnostics | --doctor [--json] [--write-probes] | --checkpoint [--mode MODE] [--json] | --backup-rotate [--retention COUNT] [--dry-run] [--json] | --version | --help]");
                 Console.WriteLine("Run without an option to start the Discord bot.");
                 return 0;
             }
@@ -20,7 +20,23 @@ internal static class Program
             bool checkOnly = args.Length == 1 && LauncherSupport.EqualsOption(args[0], "--check");
             bool diagnosticsOnly =
                 args.Length == 1 && LauncherSupport.EqualsOption(args[0], "--diagnostics");
-            if (args.Length != 0 && !showVersion && !checkOnly && !diagnosticsOnly)
+            bool doctorCommand = IsDoctorCommand(args);
+            bool checkpointCommand = IsCheckpointCommand(args);
+            bool backupRotationCommand = IsBackupRotationCommand(args);
+            bool offlineSmoke =
+                Environment.GetEnvironmentVariable("SUPERIOR_TEST_MODE") == "1"
+                && args.Length == 1
+                && LauncherSupport.EqualsOption(args[0], "--offline-smoke");
+            if (
+                args.Length != 0
+                && !showVersion
+                && !checkOnly
+                && !diagnosticsOnly
+                && !doctorCommand
+                && !checkpointCommand
+                && !backupRotationCommand
+                && !offlineSmoke
+            )
             {
                 Console.Error.WriteLine("Unknown option. Use --help for supported options.");
                 return 2;
@@ -30,6 +46,10 @@ internal static class Program
             LauncherSupport.ValidatePortableManifest(root);
             string version = LauncherSupport.VerifyPayloadVersion(root);
             string sourceIdentity = LauncherSupport.ReadSourceIdentity(root);
+            LauncherSupport.VerifyReleaseSignatures(
+                root,
+                Assembly.GetExecutingAssembly().Location
+            );
             string manifest = Path.Combine(root, "MANIFEST.sha256");
             if (!File.Exists(manifest))
             {
@@ -46,17 +66,42 @@ internal static class Program
             string environmentFile = LauncherSupport.ResolveEnvironmentFile(root);
             if (diagnosticsOnly)
             {
-                return RunNode(
-                    root,
-                    environmentFile,
-                    Path.Combine(root, "tools", "diagnostics.mjs"),
-                    version,
-                    payloadHash,
-                    sourceIdentity,
-                    "portable-directory",
-                    true,
-                    false
-                );
+                using (SuperiorInstanceGuard instance =
+                    LauncherSupport.AcquireInstanceGuard(root, environmentFile))
+                {
+                    return RunBun(
+                        root,
+                        environmentFile,
+                        new string[] { "--diagnostics" },
+                        version,
+                        payloadHash,
+                        sourceIdentity,
+                        "portable-directory",
+                        true,
+                        false,
+                        instance.DatabaseFile
+                    );
+                }
+            }
+
+            if (doctorCommand)
+            {
+                using (SuperiorInstanceGuard instance =
+                    LauncherSupport.AcquireInstanceGuard(root, environmentFile))
+                {
+                    return RunBun(
+                        root,
+                        environmentFile,
+                        args,
+                        version,
+                        payloadHash,
+                        sourceIdentity,
+                        "portable-directory",
+                        false,
+                        false,
+                        instance.DatabaseFile
+                    );
+                }
             }
 
             if (!File.Exists(environmentFile))
@@ -67,27 +112,40 @@ internal static class Program
                 return 2;
             }
 
-            string script = checkOnly
-                ? Path.Combine(root, "tools", "check-portable.mjs")
-                : Path.Combine(root, "app", "dist", "src", "index.js");
             if (checkOnly)
             {
-                return RunNode(
+                return RunBun(
                     root,
                     environmentFile,
-                    script,
+                    new string[] { "--check" },
                     version,
                     payloadHash,
                     sourceIdentity,
                     "portable-directory",
                     false,
-                    false
+                    false,
+                    null
                 );
             }
 
             using (SuperiorInstanceGuard instance =
                 LauncherSupport.AcquireInstanceGuard(root, environmentFile))
             {
+                if (checkpointCommand || backupRotationCommand)
+                {
+                    return RunBun(
+                        root,
+                        environmentFile,
+                        args,
+                        version,
+                        payloadHash,
+                        sourceIdentity,
+                        "portable-directory",
+                        false,
+                        false,
+                        instance.DatabaseFile
+                    );
+                }
                 LauncherSupport.Log("INFO", "Superior Bot " + version + " starting.");
                 LauncherSupport.Log(
                     "INFO",
@@ -98,20 +156,23 @@ internal static class Program
                     "INFO",
                     "payloadVersion=" + version + " payloadSha256=" + payloadHash + " cache=portable-directory"
                 );
-                int exitCode = RunNode(
+                int exitCode = RunBun(
                     root,
                     environmentFile,
-                    script,
+                    offlineSmoke
+                        ? new string[] { "--offline-smoke" }
+                        : new string[0],
                     version,
                     payloadHash,
                     sourceIdentity,
                     "portable-directory",
                     false,
-                    true
+                    true,
+                    instance.DatabaseFile
                 );
                 LauncherSupport.Log(
                     exitCode == 0 ? "INFO" : "ERROR",
-                    "Bundled Node process exited. exitCode=" + exitCode
+                    "Bundled Bun process exited. exitCode=" + exitCode
                 );
                 return exitCode;
             }
@@ -123,38 +184,35 @@ internal static class Program
         }
     }
 
-    private static int RunNode(
+    private static int RunBun(
         string root,
         string environmentFile,
-        string script,
+        string[] runtimeArguments,
         string version,
         string payloadHash,
         string sourceIdentity,
         string cacheStatus,
         bool diagnostics,
-        bool autoMigrate
+        bool autoMigrate,
+        string databaseLockFile
     )
     {
-        string node = Path.Combine(root, "runtime", "node.exe");
-        if (!File.Exists(node))
+        string runtime = Path.Combine(root, "app", "SuperiorBot.Runtime.exe");
+        if (!File.Exists(runtime))
         {
-            Console.Error.WriteLine("The bundled Windows Node runtime is missing.");
-            return 1;
-        }
-        if (!File.Exists(script))
-        {
-            Console.Error.WriteLine("The packaged application entrypoint is missing.");
+            Console.Error.WriteLine("The compiled Bun application runtime is missing.");
             return 1;
         }
 
         ProcessStartInfo start = new ProcessStartInfo
         {
-            FileName = node,
-            Arguments = LauncherSupport.QuoteArgument(script),
+            FileName = runtime,
+            Arguments = BuildArguments(runtimeArguments),
             WorkingDirectory = root,
             UseShellExecute = false,
             CreateNoWindow = false
         };
+        LauncherSupport.SanitizeBunRuntimeEnvironment(start);
         start.EnvironmentVariables["ENV_FILE"] = environmentFile;
         start.EnvironmentVariables["SUPERIOR_APPLICATION_ROOT"] = root;
         start.EnvironmentVariables["SUPERIOR_PAYLOAD_ROOT"] = root;
@@ -168,12 +226,140 @@ internal static class Program
         {
             start.EnvironmentVariables["SUPERIOR_AUTO_MIGRATE"] = "1";
         }
+        if (databaseLockFile != null)
+        {
+            start.EnvironmentVariables["DB_FILE"] = databaseLockFile;
+            start.EnvironmentVariables["SUPERIOR_DATABASE_LOCK_HELD"] = "1";
+            start.EnvironmentVariables["SUPERIOR_DATABASE_LOCK_PATH"] = databaseLockFile;
+        }
         if (!diagnostics)
         {
             start.EnvironmentVariables["SUPERIOR_PORTABLE_EXPECT_ROOT"] = root;
             start.EnvironmentVariables["SUPERIOR_PORTABLE_EXPECT_ENV"] = environmentFile;
+            if (databaseLockFile != null)
+            {
+                start.EnvironmentVariables["SUPERIOR_PORTABLE_EXPECT_DB"] = databaseLockFile;
+            }
         }
 
         return LauncherSupport.RunChild(start);
+    }
+
+    private static string BuildArguments(string[] arguments)
+    {
+        string result = "";
+        foreach (string argument in arguments)
+        {
+            if (result.Length > 0)
+            {
+                result += " ";
+            }
+            result += LauncherSupport.QuoteArgument(argument);
+        }
+        return result;
+    }
+
+    private static bool IsDoctorCommand(string[] args)
+    {
+        if (args.Length < 1 || !LauncherSupport.EqualsOption(args[0], "--doctor"))
+        {
+            return false;
+        }
+        bool json = false;
+        bool writeProbes = false;
+        for (int index = 1; index < args.Length; index += 1)
+        {
+            if (LauncherSupport.EqualsOption(args[index], "--json") && !json)
+            {
+                json = true;
+                continue;
+            }
+            if (LauncherSupport.EqualsOption(args[index], "--write-probes") && !writeProbes)
+            {
+                writeProbes = true;
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static bool IsCheckpointCommand(string[] args)
+    {
+        if (args.Length < 1 || !LauncherSupport.EqualsOption(args[0], "--checkpoint"))
+        {
+            return false;
+        }
+        bool json = false;
+        bool mode = false;
+        for (int index = 1; index < args.Length; index += 1)
+        {
+            if (LauncherSupport.EqualsOption(args[index], "--json") && !json)
+            {
+                json = true;
+                continue;
+            }
+            if (
+                LauncherSupport.EqualsOption(args[index], "--mode")
+                && !mode
+                && index + 1 < args.Length
+                && IsCheckpointMode(args[index + 1])
+            )
+            {
+                mode = true;
+                index += 1;
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static bool IsCheckpointMode(string value)
+    {
+        return LauncherSupport.EqualsOption(value, "passive")
+            || LauncherSupport.EqualsOption(value, "full")
+            || LauncherSupport.EqualsOption(value, "restart")
+            || LauncherSupport.EqualsOption(value, "truncate");
+    }
+
+    private static bool IsBackupRotationCommand(string[] args)
+    {
+        if (args.Length < 1 || !LauncherSupport.EqualsOption(args[0], "--backup-rotate"))
+        {
+            return false;
+        }
+        bool json = false;
+        bool dryRun = false;
+        bool retention = false;
+        for (int index = 1; index < args.Length; index += 1)
+        {
+            if (LauncherSupport.EqualsOption(args[index], "--json") && !json)
+            {
+                json = true;
+                continue;
+            }
+            if (LauncherSupport.EqualsOption(args[index], "--dry-run") && !dryRun)
+            {
+                dryRun = true;
+                continue;
+            }
+            int parsedRetention;
+            if (
+                LauncherSupport.EqualsOption(args[index], "--retention")
+                && !retention
+                && index + 1 < args.Length
+                && Int32.TryParse(args[index + 1], out parsedRetention)
+                && parsedRetention >= 1
+                && parsedRetention <= 1000
+            )
+            {
+                retention = true;
+                index += 1;
+                continue;
+            }
+            return false;
+        }
+        return true;
     }
 }

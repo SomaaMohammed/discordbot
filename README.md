@@ -1,13 +1,13 @@
 # Superior
 
-Superior 7.2.7 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
+Superior 8.0.0 is a neutral, multi-server Discord utility and moderation bot. One process can serve many guilds while keeping settings, delegated access, lifecycle state, and operational records isolated by guild ID.
 
 ## Windows quick start
 
-The repository-root `SuperiorBot.exe` is a self-extracting Windows x64 build. It includes its own Node.js runtime and native SQLite dependency, so no ZIP extraction or separate Node installation is needed.
+The repository-root `SuperiorBot.exe` is a self-extracting Windows x64 build. It contains a compiled Bun 1.4 runtime that uses Bun's built-in `bun:sqlite`, so no ZIP extraction, Node.js installation, native SQLite add-on, or separate Bun installation is needed.
 
 1. Copy `.env.example` to `.env` beside `SuperiorBot.exe`, then add the Discord token.
-2. Run `SuperiorBot.exe --check`. This validates configuration and native SQLite without logging in to Discord or creating a database.
+2. Run `SuperiorBot.exe --check`. This validates configuration and `bun:sqlite` without logging in to Discord or creating a database.
 3. Double-click `SuperiorBot.exe` to start.
 
 The first launch places the immutable bundled runtime in the current Windows user's local application-data cache. Configuration and the default `superior.db` remain beside the visible executable. On normal launch, the executable automatically backs up and upgrades supported legacy databases before Discord login. The versioned portable ZIP is still produced for advanced maintenance that needs the bundled database tools. See the [Windows guide](docs/windows.md) for Discord setup, upgrades, backups, and troubleshooting.
@@ -51,33 +51,35 @@ For a deployed Windows copy, place `Update.exe` beside `SuperiorBot.exe` and run
 - Anti-spam rules remain disabled after migration and import. The detector ignores bots, webhooks, the owner, Administrators, and configured live exemptions; it never persists raw message content, and Phase 3 does not enforce message edits.
 - Restricted role pings require a live same-guild mapping, exact channel or explicitly enabled parent-thread match, current role membership, current user and bot channel permissions, and both per-user and per-role cooldowns. The bot never makes a role mentionable, and the outgoing message permits only the one authorized role mention.
 - Schema v10 adds normalized, guild-scoped onboarding configuration, immutable rule versions and acceptances, member lifecycle/recovery records, automatic-role configuration, role menus/options/posts, and bounded audit records. The supported v9-to-v10 migration preserves every existing row and Discord identifier, invents no member history, and leaves Phase 4 services disabled.
-- Packaged Windows startup creates v10 for a missing or empty database and automatically backs up and upgrades supported v2-v9 databases. It refuses partial, malformed, unknown, and v1 layouts; never starts Discord until migration validation succeeds; and never runs a Discord effect during migration. Never run a pre-v10 executable after a database has migrated.
+- Packaged Windows startup creates v11 for a missing or empty database and automatically backs up and upgrades supported v2-v10 databases. It refuses partial, malformed, unknown, and v1 layouts; never starts Discord until migration validation succeeds; and never runs a Discord effect during migration. Never run a pre-v11 executable after a database has migrated.
 - Guild export format 8 contains the complete portable tenant product model. Imports preserve readable acceptance and workflow history but leave authority, external Discord-resource bindings, automatic roles, verification, role menus, and anti-spam enforcement dormant until their explicit current-resource verification paths succeed.
 
 Superior remains a single-process SQLite deployment. Database constraints and short transactions protect concurrent interactions inside that process, but a shared SQLite file must not be written by multiple bot processes.
 
 ## Source development
 
-Node.js 22.14.0 or newer is required.
+Bun 1.4.0 or newer is required. Node.js is not a supported runtime.
 
 ```bash
 cp .env.example .env
 cd tsbot
-npm ci
-npm run format:check
-npm run typecheck
-npm test
-npm run build
-node --check dist/src/index.js
+bun install --frozen-lockfile
+bun run format:check
+bun run typecheck
+bun run test
+bun run build
+bun run syntax:check
 ```
 
-Do not use `npm run dev` or `npm start` as a smoke test: both can log in to Discord and open the configured database. The production build is cleaned first and contains source output under `dist/src/`, never compiled tests.
+Do not use `bun run dev` or `bun run start` as a smoke test: both can log in to Discord and open the configured database. The production build is cleaned first and contains source output under `dist/src/`, never compiled tests.
 
 ## Documentation
 
 - [Configuration, commands, and Discord permissions](docs/configuration.md)
 - [Windows portable guide](docs/windows.md)
-- [Development architecture and schema v10](docs/development.md)
+- [Linux deployment guide](docs/linux-deployment.md)
+- [Linux operations checklist](docs/operations-checklist.md)
+- [Development architecture and schema v11](docs/development.md)
 - [Operations, migration, backup, recovery, and rollback](docs/operations.md)
 - [Member and delegated capabilities](docs/reference/member-capabilities.md)
 - [Natural-chat trigger reference](docs/reference/trigger-patterns.md)

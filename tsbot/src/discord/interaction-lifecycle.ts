@@ -109,7 +109,7 @@ export class EventLoopDiagnostics {
     if (snapshot.maxMs >= this.warningThresholdMs) {
       logWarn(
         "event-loop",
-        "The Node.js event loop was delayed; Discord interactions may have arrived stale.",
+        "The Bun event loop was delayed; Discord interactions may have arrived stale.",
         {
           maxDelayMs: snapshot.maxMs,
           p99DelayMs: snapshot.p99Ms,

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type Database from "better-sqlite3";
+import type { DatabaseConnection } from "./database.js";
 import { assertDiscordSnowflake } from "../guild-settings.js";
 import {
   VOTING_PANEL_STATUSES,
@@ -85,7 +85,7 @@ interface NormalizedVotingPanelOptionInput {
  */
 export class GuildVotingRepository {
   public constructor(
-    private readonly db: Database.Database,
+    private readonly db: DatabaseConnection,
     public readonly guildId: string,
   ) {}
 
@@ -597,10 +597,9 @@ function normalizeVotingPanelInput(
   }
   const pollType = normalizePollType(input.pollType);
   const options = normalizeVotingPanelOptions(input.options, pollType);
-  const multiSelect = normalizeBoolean(
-    input.multiSelect,
-    "Voting multi-select",
-  );
+  const multiSelect =
+    pollType === "custom" &&
+    normalizeBoolean(input.multiSelect, "Voting multi-select");
   return {
     voteId:
       input.voteId === undefined
@@ -688,6 +687,7 @@ function normalizeVotingPanelOptions(
 function parseVotingPanelRow(
   row: VotingPanelRow,
 ): Omit<VotingPanel, "options" | "totalVoters"> {
+  const pollType = normalizePollType(row.poll_type);
   return {
     guildId: row.guild_id,
     voteId: row.vote_id,
@@ -697,11 +697,10 @@ function parseVotingPanelRow(
     question: row.question,
     title: row.title,
     description: row.description,
-    pollType: normalizePollType(row.poll_type),
-    multiSelect: normalizeStoredBoolean(
-      row.multi_select,
-      "voting multi_select",
-    ),
+    pollType,
+    multiSelect:
+      pollType === "custom" &&
+      normalizeStoredBoolean(row.multi_select, "voting multi_select"),
     deadlineAt: row.deadline_at,
     mentionEveryoneOnCreation: normalizeStoredBoolean(
       row.mention_everyone_on_creation,

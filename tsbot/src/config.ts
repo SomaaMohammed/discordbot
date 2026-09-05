@@ -76,14 +76,62 @@ export function resolveDatabaseFile(repoRoot: string): string {
   return path.resolve(repoRoot, "superior.db");
 }
 
-export function loadDatabaseConfig(
-  repoRoot: string,
-): Pick<ProcessConfig, "dbFile"> {
-  loadEnvironmentFile(repoRoot);
-  return { dbFile: resolveDatabaseFile(repoRoot) };
+function assertLauncherDatabaseLock(dbFile: string, required: boolean): void {
+  const held = process.env.SUPERIOR_DATABASE_LOCK_HELD;
+  const lockedPath = process.env.SUPERIOR_DATABASE_LOCK_PATH;
+  const heldPresent = held !== undefined && held.trim() !== "";
+  const lockedPathPresent =
+    lockedPath !== undefined && lockedPath.trim() !== "";
+  if (!heldPresent && !lockedPathPresent) {
+    if (required) {
+      throw new Error(
+        "The packaged Bun runtime requires Windows launcher database-lock attestation; refusing to open SQLite.",
+      );
+    }
+    return;
+  }
+  if (held !== "1" || !lockedPath?.trim()) {
+    throw new Error(
+      "The launcher database-lock attestation is incomplete; refusing to open SQLite.",
+    );
+  }
+  const resolvedDatabase = path.resolve(dbFile);
+  const resolvedLock = path.resolve(lockedPath);
+  const matches =
+    process.platform === "win32"
+      ? resolvedDatabase.toLowerCase() === resolvedLock.toLowerCase()
+      : resolvedDatabase === resolvedLock;
+  if (!matches) {
+    throw new Error(
+      "The launcher database lock does not match the configured database; refusing to open SQLite.",
+    );
+  }
 }
 
-export function loadProcessConfig(repoRoot: string): ProcessConfig {
+export function resolveBackupDirectory(repoRoot: string): string {
+  const configured = String(process.env.SUPERIOR_BACKUP_DIR ?? "").trim();
+  if (!configured) {
+    return path.resolve(repoRoot, "backups");
+  }
+  return path.isAbsolute(configured)
+    ? path.normalize(configured)
+    : path.resolve(repoRoot, configured);
+}
+
+export function loadDatabaseConfig(
+  repoRoot: string,
+  options: { requireLauncherLock?: boolean } = {},
+): Pick<ProcessConfig, "dbFile"> {
+  loadEnvironmentFile(repoRoot);
+  const dbFile = resolveDatabaseFile(repoRoot);
+  assertLauncherDatabaseLock(dbFile, options.requireLauncherLock === true);
+  return { dbFile };
+}
+
+export function loadProcessConfig(
+  repoRoot: string,
+  options: { requireLauncherLock?: boolean } = {},
+): ProcessConfig {
   loadEnvironmentFile(repoRoot);
 
   const discordToken = String(process.env.DISCORD_TOKEN ?? "").trim();
@@ -110,10 +158,13 @@ export function loadProcessConfig(repoRoot: string): ProcessConfig {
     );
   }
 
+  const dbFile = resolveDatabaseFile(repoRoot);
+  assertLauncherDatabaseLock(dbFile, options.requireLauncherLock === true);
+
   return {
     discordToken,
     botVersion: PACKAGE_VERSION,
-    dbFile: resolveDatabaseFile(repoRoot),
+    dbFile,
     commandRegistrationMode,
     devGuildIds,
     operatorIds,

@@ -168,7 +168,9 @@ export function buildPanelCommandDefinition(): SlashCommandSubcommandsOnlyBuilde
         .addBooleanOption((option) =>
           option
             .setName("multi_select")
-            .setDescription("Allow voters to select more than one option")
+            .setDescription(
+              "Custom polls only; yes/no polls always allow one answer",
+            )
             .setRequired(true),
         )
         .addIntegerOption((option) =>

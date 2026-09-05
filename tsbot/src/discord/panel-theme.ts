@@ -495,7 +495,7 @@ export function renderPanelHowToGuide(): SuperiorPanelPayload {
       {
         name: "Voting panels: required settings",
         value:
-          "`/panel vote` requires `question` (1–256), `poll_type` (`yes-no` or `custom`), `multi_select`, `duration_minutes`, `mention_everyone_on_creation`, and `mention_everyone_on_completion`. Multi-select lets one voter choose several answers. Duration `0` means close manually; another value closes automatically. Mention choices request @everyone notifications, subject to the bot's Mention Everyone permission.",
+          "`/panel vote` requires `question` (1–256), `poll_type` (`yes-no` or `custom`), `multi_select`, `duration_minutes`, `mention_everyone_on_creation`, and `mention_everyone_on_completion`. Multi-select applies only to custom polls; yes/no polls always allow exactly one answer. Duration `0` means close manually; another value closes automatically. Mention choices request @everyone notifications, subject to the bot's Mention Everyone permission.",
       },
       {
         name: "Voting panels: optional settings and limits",

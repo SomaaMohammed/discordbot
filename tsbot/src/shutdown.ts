@@ -6,6 +6,7 @@ import {
 import { logClassifiedError, logError, logInfo, logWarn } from "./logging.js";
 import type { BotRuntime } from "./runtime.js";
 import { clearAntiSpamProcessState } from "./discord/anti-spam-enforcement.js";
+import { recordSqliteOperationalEvent } from "./storage/telemetry.js";
 
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 15_000;
 
@@ -98,9 +99,20 @@ export function createShutdownCoordinator(
         });
       }
 
+      const drainStartedAt = performance.now();
       try {
         drained = await workLifecycle.drain(timeoutMs);
+        recordSqliteOperationalEvent({
+          event: "shutdown-drain",
+          outcome: drained ? "drained" : "timed-out",
+          durationMs: performance.now() - drainStartedAt,
+        });
       } catch (error) {
+        recordSqliteOperationalEvent({
+          event: "shutdown-drain",
+          outcome: "failed",
+          durationMs: performance.now() - drainStartedAt,
+        });
         logError("shutdown", "Failed while draining Discord work", {
           reason,
           error,
@@ -219,7 +231,7 @@ export function installProcessFailureHandlers(
   const warning = (value: unknown): void => {
     const nodeWarning =
       value instanceof Error ? value : new Error(String(value));
-    logWarn("process", "Node.js emitted a runtime warning", {
+    logWarn("process", "Bun emitted a runtime warning", {
       warningName: nodeWarning.name,
       warningCode:
         "code" in nodeWarning
