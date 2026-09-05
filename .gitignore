@@ -4,6 +4,7 @@
 *.env
 *.env.*
 !.env.example
+!deploy/linux/superior.env.example
 /mudae-watch.private.json
 /emoji-replies.json
 /owo-watcher.json
