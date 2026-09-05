@@ -12,6 +12,7 @@ import {
   type ShutdownCoordinator,
 } from "./shutdown.js";
 import { ensureDatabaseCurrent } from "./storage/startup-migration.js";
+import { installTerminalCommandLoop } from "./terminal-commands.js";
 
 const currentFile = fileURLToPath(import.meta.url);
 const currentDir = path.dirname(currentFile);
@@ -60,7 +61,12 @@ export async function runBot(
       await shutdownCoordinator.shutdown("fatal-discord-session-invalidated");
     },
   });
-  shutdownCoordinator = createShutdownCoordinator(client, runtime);
+  let removeTerminalCommandLoop = (): void => undefined;
+  shutdownCoordinator = createShutdownCoordinator(client, runtime, {
+    beforeShutdown: () => {
+      removeTerminalCommandLoop();
+    },
+  });
   const removeShutdownSignalHandlers =
     installShutdownSignalHandlers(shutdownCoordinator);
   installProcessFailureHandlers(shutdownCoordinator);
@@ -80,6 +86,7 @@ export async function runBot(
     shutdownCoordinator,
     removeShutdownSignalHandlers,
   );
+  removeTerminalCommandLoop = installTerminalCommandLoop(client, runtime);
 }
 
 if (import.meta.main) {

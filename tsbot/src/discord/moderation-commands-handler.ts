@@ -1779,7 +1779,7 @@ function bindingHealth(
   return `<#${configuredId}> (verified and healthy now)`;
 }
 
-function targetIssue(
+export function targetIssue(
   actor: GuildMember,
   bot: GuildMember | null,
   target: GuildMember | null,
@@ -1948,7 +1948,7 @@ function unix(value: string): number {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? Math.floor(parsed / 1_000) : 0;
 }
-function timeoutExpiry(record: ModerationCase): number | null {
+export function timeoutExpiry(record: ModerationCase): number | null {
   if (
     !record.discordActionMetadata ||
     typeof record.discordActionMetadata !== "object"

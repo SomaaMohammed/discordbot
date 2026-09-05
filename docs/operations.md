@@ -29,6 +29,14 @@ Representative output has this shape:
 
 Superior classifies Discord 10062 as an interaction that was already expired/unknown when acknowledgement began. The operation is not executed, and no doomed user reply is attempted. Code 40060 means a competing path already acknowledged the interaction, so Superior avoids a second reply. Codes 50001/50013 identify missing access/permissions; missing-channel/message/role codes name a stale external resource; rate-limit, network, SQLite busy/integrity/schema, configuration, filesystem, child-process, and shutdown-timeout failures each include a concise recovery action. Unknown failures retain a correlation ID, bounded cause chain, and redacted stack.
 
+When Superior is attached to an interactive terminal, it also accepts the operator-only timeout-removal command. It runs inside the existing bot process, so it does not open a second SQLite writer or log in a second bot session:
+
+```text
+untimeout --guild GUILD_ID --member USER_ID --actor ACTOR_ID --reason "reason for removal"
+```
+
+`unmute` is an alias. The actor must currently have `moderation.manage`, the bot must have Moderate Members and a safe role hierarchy, and the command requires a uniquely matching active timeout case when case tracking is enabled. The command verifies the Discord change, records the related timeout-removal case, and attempts moderation-log delivery. Type `help` in the bot terminal for the syntax. This input is unavailable when the process stdin is not an interactive terminal.
+
 If 10062 appears, correlate `ageAtReceiptMs`, `eventLoopMaxDelayMs`, gateway disconnect/resume lines, and the same correlation ID. An interaction arriving near 3 seconds is warned and rejected before business work; event-loop delay above the diagnostic threshold produces a separate warning. Check host CPU pressure, synchronous maintenance/backfill work, Discord gateway health, and duplicate processes. Do not retry by adding another reply path. Unhandled rejections, uncaught exceptions, and fatal gateway invalidation are reported once and enter the controlled drain/shutdown path rather than continuing in an unknown state.
 
 ## Build and service commands

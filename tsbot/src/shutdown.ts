@@ -21,6 +21,7 @@ export interface ShutdownCoordinator {
 export interface ShutdownCoordinatorOptions {
   timeoutMs?: number;
   workLifecycle?: DiscordClientWorkLifecycle | null;
+  beforeShutdown?: () => void | Promise<void>;
 }
 
 export type ShutdownSignal = "SIGINT" | "SIGTERM";
@@ -68,6 +69,14 @@ export function createShutdownCoordinator(
     let drained = false;
 
     try {
+      try {
+        await options.beforeShutdown?.();
+      } catch (error) {
+        logError("shutdown", "Failed to stop terminal command input", {
+          reason,
+          error,
+        });
+      }
       try {
         workLifecycle.stop();
       } catch (error) {
