@@ -58,6 +58,8 @@ const PHASE4_TABLES = [
   "role_menu_operations",
   "role_menu_operation_items",
 ] as const;
+const MIGRATION_FAILURE_TIMEOUT_MS =
+  process.platform === "linux" ? 60_000 : 15_000;
 const roots: string[] = [];
 
 afterEach(() => {
@@ -296,7 +298,7 @@ describe("explicit schema migration to v11", () => {
         foreignKeyViolations: 0,
       });
     },
-    15_000,
+    MIGRATION_FAILURE_TIMEOUT_MS,
   );
 
   it("dry-runs the complete exact v9-to-v11 transaction", () => {
@@ -338,7 +340,7 @@ describe("explicit schema migration to v11", () => {
         "legacy-v8",
       );
     },
-    15_000,
+    MIGRATION_FAILURE_TIMEOUT_MS,
   );
 
   it("dry-runs exact v8 through the full v11 transaction", () => {

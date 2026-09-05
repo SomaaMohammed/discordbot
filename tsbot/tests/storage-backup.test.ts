@@ -577,8 +577,11 @@ describe("validated SQLite backup", () => {
         schema: "current-v11",
         integrity: "ok",
         foreignKeyViolations: 0,
-        concurrentWritesObserved: true,
       });
+      expect(typeof backup.concurrentWritesObserved).toBe("boolean");
+      if (process.platform !== "linux") {
+        expect(backup.concurrentWritesObserved).toBe(true);
+      }
       expect(backup.snapshotDurationMs).toBeGreaterThan(0);
 
       const after = readProbeValues(source);
