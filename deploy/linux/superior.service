@@ -2,6 +2,7 @@
 Description=Superior Discord bot
 After=network-online.target
 Wants=network-online.target
+RequiresMountsFor=@DATA_ROOT@ @BACKUP_ROOT@
 ConditionPathExists=@INSTALL_ROOT@/current/tsbot/dist/src/index.js
 ConditionPathExists=@ENV_FILE@
 StartLimitIntervalSec=5min

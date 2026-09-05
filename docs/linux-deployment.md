@@ -27,6 +27,25 @@ The deployment layout is intentionally split:
 
 The `superior` service user owns mutable state. Releases are root-owned and readable by the service group. SQLite writes are single-process only; systemd restart/recovery and the deployment lock are the process-management boundary.
 
+For a separate local ext4 or XFS filesystem, mount it before creating the
+service layout and pass its state directories to the bootstrap and deployment
+scripts. The generated unit includes `RequiresMountsFor` so systemd waits for
+the filesystem before starting the bot:
+
+```bash
+sudo bash deploy/linux/install.sh \
+  --data-root /srv/superior-storage/data \
+  --backup-root /srv/superior-storage/backups
+sudo bash deploy/linux/update.sh \
+  --source /path/to/imperial-court-bot \
+  --data-root /srv/superior-storage/data \
+  --backup-root /srv/superior-storage/backups \
+  --activate
+sudo bash deploy/linux/validate-service.sh \
+  --data-root /srv/superior-storage/data \
+  --backup-root /srv/superior-storage/backups
+```
+
 ## Bootstrap and Bun verification
 
 From a Linux checkout of this repository, run the bootstrap as root. The flags that install packages and download Bun are explicit; without them the script only verifies prerequisites and refuses to guess.

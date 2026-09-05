@@ -112,6 +112,7 @@ describe("Linux deployment boundary", () => {
       "utf8",
     );
     expect(service).toContain("ExecStart=@BUN_PATH@ --no-env-file");
+    expect(service).toContain("RequiresMountsFor=@DATA_ROOT@ @BACKUP_ROOT@");
     expect(service).toContain("Environment=SUPERIOR_AUTO_MIGRATE=0");
     expect(service).toContain(
       "Environment=SUPERIOR_RELEASE_ROOT=@INSTALL_ROOT@/current",
